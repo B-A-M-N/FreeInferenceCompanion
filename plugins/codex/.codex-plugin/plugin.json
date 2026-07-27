@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "hooks": {
+    "SessionStart": [
+      {
+        "command": "fi hook codex SessionStart",
+        "timeout": 5,
+        "async": true
+      }
+    ],
+    "SessionEnd": [
+      {
+        "command": "fi hook codex SessionEnd",
+        "timeout": 5,
+        "async": true
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "command": "fi hook codex UserPromptSubmit",
+        "timeout": 5
+      }
+    ],
+    "PreCompact": [
+      {
+        "command": "fi hook codex PreCompact",
+        "timeout": 5,
+        "async": true
+      }
+    ],
+    "PostCompact": [
+      {
+        "command": "fi hook codex PostCompact",
+        "timeout": 5,
+        "async": true
+      }
+    ],
+    "Stop": [
+      {
+        "command": "fi hook codex Stop",
+        "timeout": 5,
+        "async": true
+      }
+    ]
+  },
+  "skills": "./skills/"
+}

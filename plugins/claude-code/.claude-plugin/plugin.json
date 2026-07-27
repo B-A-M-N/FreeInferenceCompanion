@@ -1,0 +1,10 @@
+{
+  "name": "freeinference-companion",
+  "version": "0.1.0",
+  "description": "FreeInference observability: model health, session metrics, context pressure monitoring for Claude Code",
+  "author": {
+    "name": "FreeInference Companion"
+  },
+  "hooks": "./hooks/hooks.json",
+  "skills": "./skills/"
+}
