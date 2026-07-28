@@ -803,3 +803,50 @@ func TestClaudeProjectionWarningFiresNearReserveLimit(t *testing.T) {
 		t.Error("projection warning must never block the prompt")
 	}
 }
+
+// TestClaudeContextWarningDoesNotBlockCacheResolution is the P1-11 regression
+// test: when a context warning fires AND a cache warning resolves on the same
+// prompt, both state transitions must be persisted. The old code short-circuited
+// after the context warning and never evaluated cache recovery.
+func TestClaudeContextWarningDoesNotBlockCacheResolution(t *testing.T) {
+	confirmFreeInference(t)
+	paths := testPaths(t)
+	a := NewClaudeAdapter(paths)
+
+	// Seed: 3 low-cache observations (cache warning active) + high context.
+	for _, total := range []int64{160000, 161000, 162000} {
+		_ = a.HandleStatusLineUpdate(statusInput("s1", "glm-5.1", total, 2000, 200000, 16,
+			total-10000, 5000, 5000, 2000), "s1")
+	}
+
+	// First prompt: cache-low warning fires at low context percentage.
+	out1, _ := a.HandleUserPromptSubmit(&schema.ClaudeHookInput{SessionID: "s1"}, "s1")
+	if out1 == nil || !strings.Contains(out1.SystemMessage, "cache reuse is low") {
+		t.Fatalf("expected cache-low warning, got %+v", out1)
+	}
+
+	// Seed recovery: 3 high-reuse observations + high context (84%).
+	for _, total := range []int64{168000, 169000, 170000} {
+		_ = a.HandleStatusLineUpdate(statusInput("s1", "glm-5.1", total, 2000, 200000, 84,
+			5000, total-10000, 5000, 2000), "s1")
+	}
+
+	// Second prompt: context warning fires (84% ≥ 80%) AND cache warning
+	// resolves (3 recovered observations). Both must be persisted.
+	out2, _ := a.HandleUserPromptSubmit(&schema.ClaudeHookInput{SessionID: "s1"}, "s1")
+	if out2 == nil {
+		t.Fatal("expected a context warning at 84%")
+	}
+	if !strings.Contains(out2.SystemMessage, "84%") {
+		t.Errorf("context warning should show 84%%: %q", out2.SystemMessage)
+	}
+
+	snap := loadClaude(t, paths, "s1")
+	if snap.Warnings.CacheLowActive {
+		t.Error("cache warning must have resolved — 3 recovered observations were made")
+	}
+	// Context severity must be set to warn (from the 84% warning).
+	if snap.Warnings.ContextSeverity != schema.WarningSeverityWarn {
+		t.Errorf("context severity = %q, want %q", snap.Warnings.ContextSeverity, schema.WarningSeverityWarn)
+	}
+}

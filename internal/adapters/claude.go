@@ -384,10 +384,9 @@ func (a *ClaudeAdapter) HandleUserPromptSubmit(input *schema.ClaudeHookInput, se
 	if sessionID == "" {
 		return nil, nil
 	}
-	var output *schema.ClaudeWarningOutput
-	var warningActive, warningResolved bool
-	var warningDetail string
 	now := time.Now().UTC()
+	var output *schema.ClaudeWarningOutput
+	var events []state.Event
 
 	err := state.UpdateSnapshot(a.Paths, schema.ClientClaudeCode, sessionID,
 		func() *schema.Snapshot {
@@ -406,71 +405,87 @@ func (a *ClaudeAdapter) HandleUserPromptSubmit(input *schema.ClaudeHookInput, se
 				return nil
 			}
 
-			// Context pressure warning (authoritative used percentage).
-			var warningMsg string
-			var severity string
+			// Calculate all warning-family state transitions FIRST,
+			// then select one user-facing message by priority afterward.
+			// This ensures that cache-warning recovery is evaluated even
+			// when a context warning fires (the old code short-circuited).
+
+			// 1. Context pressure warning state
+			var contextMsg string
+			var contextSeverity string
+			var contextWouldShow bool
 			if snap.LiveContext != nil && snap.LiveContext.UsedPercentage != nil {
 				usedPct := *snap.LiveContext.UsedPercentage
 				switch {
 				case usedPct >= 90.0:
-					severity = schema.WarningSeverityCritical
-					warningMsg = fmt.Sprintf("FreeInference: context usage is %.0f%% on %s. Compact or start a fresh session.", usedPct, snap.Model.ID)
+					contextSeverity = schema.WarningSeverityCritical
+					contextMsg = fmt.Sprintf("FreeInference: context usage is %.0f%% on %s. Compact or start a fresh session.", usedPct, snap.Model.ID)
 				case usedPct >= 80.0:
-					severity = schema.WarningSeverityWarn
-					warningMsg = fmt.Sprintf("FreeInference: context usage is %.0f%% on %s. Consider compacting soon.", usedPct, snap.Model.ID)
+					contextSeverity = schema.WarningSeverityWarn
+					contextMsg = fmt.Sprintf("FreeInference: context usage is %.0f%% on %s. Consider compacting soon.", usedPct, snap.Model.ID)
 				}
 			}
-			if warningMsg != "" && shouldShowContextWarning(snap, severity, now) {
-				snap.Warnings.ContextSeverity = severity
-				snap.Warnings.LastContextShownAt = &now
-				snap.Warnings.HistoryCount++
-				output = &schema.ClaudeWarningOutput{
-					Continue:       true,
-					SystemMessage:  warningMsg,
-					SuppressOutput: true,
-				}
-				warningActive = true
-				warningDetail = "context:" + severity
-				return nil
+			if contextMsg != "" {
+				contextWouldShow = shouldShowContextWarning(snap, contextSeverity, now)
 			}
 
-			// Advisory projection warning: estimate the next request's
-			// output budget. This catches "context isn't critical yet, but
-			// the next prompt will leave too little room for the reply" — a
-			// common cause of output-truncation failures that waste tokens.
-			if shouldShowProjectionWarning(snap, now) {
+			// 2. Projection warning state (only evaluated if context won't show)
+			var projectionMsg string
+			if !contextWouldShow && shouldShowProjectionWarning(snap, now) {
 				projection := engine.ProjectNextRequest(
 					ActiveContextTokens(snap),
 					promptByteSize(input),
 					snap.Model.ContextLength,
 					engine.DefaultOutputReserve,
 				)
-				if proj := projection.AdvisoryMessage(); proj != "" {
-					snap.Warnings.ContextSeverity = "projection_overflow"
-					snap.Warnings.LastContextShownAt = &now
-					snap.Warnings.HistoryCount++
-					output = &schema.ClaudeWarningOutput{
-						Continue:       true,
-						SystemMessage:  proj,
-						SuppressOutput: true,
-					}
-					warningActive = true
-					warningDetail = "projection_overflow"
-					return nil
-				}
+				projectionMsg = projection.AdvisoryMessage()
 			}
 
-			// Rolling cache-low warning.
-			decision := engine.QualifyCacheWarning(snap, ActiveContextTokens(snap), true, now)
+			// 3. Cache warning state
+			cacheDecision := engine.QualifyCacheWarning(snap, ActiveContextTokens(snap), true, now)
+
+			// Persist ALL state transitions now (before short-circuiting).
+			if contextWouldShow {
+				snap.Warnings.ContextSeverity = contextSeverity
+				snap.Warnings.LastContextShownAt = &now
+				snap.Warnings.HistoryCount++
+				events = append(events, state.Event{Type: state.EventWarningShown, Detail: "context:" + contextSeverity})
+			} else if projectionMsg != "" {
+				snap.Warnings.LastContextShownAt = &now
+				snap.Warnings.HistoryCount++
+				events = append(events, state.Event{Type: state.EventWarningShown, Detail: "projection_overflow"})
+			}
+
 			switch {
-			case decision.Warn:
-				share := 0.0
-				if decision.Share != nil {
-					share = *decision.Share
-				}
+			case cacheDecision.Warn:
 				snap.Warnings.CacheLowActive = true
 				snap.Warnings.LastCacheShownAt = &now
 				snap.Warnings.HistoryCount++
+				events = append(events, state.Event{Type: state.EventWarningShown, Detail: "cache_low"})
+			case cacheDecision.Resolved:
+				snap.Warnings.CacheLowActive = false
+				events = append(events, state.Event{Type: state.EventWarningResolved})
+			}
+
+			// Select ONE output message by priority: context > projection > cache.
+			switch {
+			case contextWouldShow:
+				output = &schema.ClaudeWarningOutput{
+					Continue:       true,
+					SystemMessage:  contextMsg,
+					SuppressOutput: true,
+				}
+			case projectionMsg != "":
+				output = &schema.ClaudeWarningOutput{
+					Continue:       true,
+					SystemMessage:  projectionMsg,
+					SuppressOutput: true,
+				}
+			case cacheDecision.Warn:
+				share := 0.0
+				if cacheDecision.Share != nil {
+					share = *cacheDecision.Share
+				}
 				output = &schema.ClaudeWarningOutput{
 					Continue: true,
 					SystemMessage: fmt.Sprintf(
@@ -478,28 +493,17 @@ func (a *ClaudeAdapter) HandleUserPromptSubmit(input *schema.ClaudeHookInput, se
 						share*100),
 					SuppressOutput: true,
 				}
-				warningActive = true
-				warningDetail = "cache_low"
-			case decision.Resolved:
-				snap.Warnings.CacheLowActive = false
-				warningResolved = true
 			}
 			return nil
 		})
 
 	if err != nil {
-		// Fail open — hooks must never block the client.
 		return nil, nil
 	}
 	appendEventBestEffort(a.Paths, schema.ClientClaudeCode, sessionID,
 		state.Event{Type: state.EventPromptSubmitted})
-	if warningActive {
-		appendEventBestEffort(a.Paths, schema.ClientClaudeCode, sessionID,
-			state.Event{Type: state.EventWarningShown, Detail: warningDetail})
-	}
-	if warningResolved {
-		appendEventBestEffort(a.Paths, schema.ClientClaudeCode, sessionID,
-			state.Event{Type: state.EventWarningResolved})
+	for _, ev := range events {
+		appendEventBestEffort(a.Paths, schema.ClientClaudeCode, sessionID, ev)
 	}
 	return output, nil
 }
