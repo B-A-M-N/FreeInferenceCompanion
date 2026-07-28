@@ -454,3 +454,79 @@ func TestLegacyChecksumSidecarDoesNotBreakLoad(t *testing.T) {
 	// happens implicitly via the next SaveSnapshot or explicitly on
 	// quarantineSnapshot — but here we only verify load is unaffected).
 }
+
+// TestReadJSONRejectsTrailingData ensures that a file with valid JSON followed
+// by trailing garbage (partial write, corruption) is rejected rather than
+// silently decoded from the prefix.
+func TestReadJSONRejectsTrailingData(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "data.json")
+	// Valid JSON followed by trailing garbage.
+	if err := os.WriteFile(path, []byte(`{"a":1}garbage`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var v map[string]any
+	if err := ReadJSON(path, &v); err == nil {
+		t.Fatal("expected error for trailing data after JSON, got nil")
+	}
+}
+
+// TestLoadGlobalQuarantinesCorruptResource ensures a corrupt global resource
+// file is quarantined (renamed aside) and does not poison the other resources.
+func TestLoadGlobalQuarantinesCorruptResource(t *testing.T) {
+	paths := testPaths(t)
+	if err := paths.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write valid models JSON.
+	models := `{"fetched_at":"2025-01-01T00:00:00Z","models":[{"id":"m1","context_length":100}]}`
+	if err := os.WriteFile(paths.GlobalModels(), []byte(models), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// Write corrupt health JSON.
+	if err := os.WriteFile(paths.GlobalHealth(), []byte("{not json"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	gs, err := LoadGlobal(paths)
+	// Models should still be loaded even though health is corrupt.
+	if gs.Models == nil || len(gs.Models.Models) != 1 {
+		t.Fatalf("models should load despite corrupt health, got %+v", gs.Models)
+	}
+	if err == nil {
+		t.Error("expected error from corrupt resource, got nil")
+	}
+	// The corrupt health file should have been quarantined.
+	if _, statErr := os.Stat(paths.GlobalHealth()); statErr == nil {
+		t.Error("corrupt health file should have been quarantined")
+	}
+}
+
+// TestEnsureSessionDirRejectsSymlink verifies that EnsureSessionDir refuses
+// to follow an existing symlink at the session path.
+func TestEnsureSessionDirRejectsSymlink(t *testing.T) {
+	paths := testPaths(t)
+	// Create parent dirs so the symlink can be placed.
+	if err := paths.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	// Manually create the client-type dir since EnsureSessionDir would.
+	clientDir := filepath.Join(paths.CacheDir, "sessions", schema.ClientClaudeCode)
+	if err := os.MkdirAll(clientDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	dir := paths.SessionDir(schema.ClientClaudeCode, "s1")
+
+	// Create a symlink at the session path pointing to /tmp.
+	if err := os.Symlink("/tmp", dir); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	err := paths.EnsureSessionDir(schema.ClientClaudeCode, "s1")
+	if err == nil {
+		t.Fatal("expected error when session path is a symlink, got nil")
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Errorf("error should mention symlink, got: %v", err)
+	}
+}

@@ -1,6 +1,7 @@
 package schema
 
 import (
+	"math"
 	"strings"
 	"testing"
 )
@@ -125,6 +126,63 @@ func TestQuarantineReasonSanitized(t *testing.T) {
 				t.Errorf("reason too long: %d", len(got))
 			}
 		})
+	}
+}
+
+func TestValidateSnapshotRejectsNaNTokens(t *testing.T) {
+	nanVal := math.NaN()
+	s := &Snapshot{
+		SchemaVersion: StateVersion,
+		Client:        ClientInfo{Type: ClientClaudeCode},
+		Session:       SessionInfo{ID: "s1"},
+		LiveContext:   &LiveContext{UsedPercentage: &nanVal},
+	}
+	if err := ValidateSnapshot(s); err == nil {
+		t.Fatal("NaN used_percentage must be rejected")
+	}
+}
+
+func TestValidateSnapshotRejectsNegativeTokens(t *testing.T) {
+	neg := int64(-100)
+	s := &Snapshot{
+		SchemaVersion: StateVersion,
+		Client:        ClientInfo{Type: ClientClaudeCode},
+		Session:       SessionInfo{ID: "s1"},
+		LiveContext:   &LiveContext{TotalInputTokens: &neg},
+	}
+	if err := ValidateSnapshot(s); err == nil {
+		t.Fatal("negative total_input_tokens must be rejected")
+	}
+}
+
+func TestValidateSnapshotRejectsBadCacheShares(t *testing.T) {
+	badShare := 1.5
+	s := &Snapshot{
+		SchemaVersion: StateVersion,
+		Client:        ClientInfo{Type: ClientClaudeCode},
+		Session:       SessionInfo{ID: "s1"},
+		CacheAnalysis: &CacheAnalysis{CacheReadShare: &badShare},
+	}
+	if err := ValidateSnapshot(s); err == nil {
+		t.Fatal("cache_read_share > 1 must be rejected")
+	}
+}
+
+func TestMigrateV1ClearsLiveContext(t *testing.T) {
+	// A v1 snapshot cannot be cleanly decomposed into the v2 LiveContext
+	// split. The migration must leave LiveContext null (not fabricate data).
+	lc := &LiveContext{}
+	s := &Snapshot{
+		SchemaVersion: 1,
+		Client:        ClientInfo{Type: ClientClaudeCode},
+		Session:       SessionInfo{ID: "s1"},
+		LiveContext:   lc,
+	}
+	if err := MigrateSnapshot(s); err != nil {
+		t.Fatalf("migrate v1: %v", err)
+	}
+	if s.LiveContext != nil {
+		t.Error("v1→v2 migration must clear LiveContext (cannot fabricate split)")
 	}
 }
 

@@ -149,3 +149,56 @@ func TestCorruptIndexFailsOpen(t *testing.T) {
 		t.Errorf("corrupt index should load empty, got %d entries", len(idx.Sessions))
 	}
 }
+
+// TestPruneStaleIndexEntries verifies that CleanupStaleSessions removes index
+// entries for sessions whose directories no longer exist.
+func TestPruneStaleIndexEntries(t *testing.T) {
+	paths := testPaths(t)
+	now := time.Now()
+
+	// Add two sessions to the index.
+	_ = UpdateSessionIndex(paths, indexTestSnapshot(schema.ClientClaudeCode, "live", "m1", schema.SessionActive, now))
+	_ = UpdateSessionIndex(paths, indexTestSnapshot(schema.ClientClaudeCode, "dead", "m2", schema.SessionActive, now))
+
+	// Only create the directory for "live".
+	if err := paths.EnsureSessionDir(schema.ClientClaudeCode, "live"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Prune. "dead" has no directory and should be removed from the index.
+	if err := pruneStaleIndexEntries(paths, now); err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+
+	idx, _ := LoadSessionIndex(paths)
+	if len(idx.Sessions) != 1 {
+		t.Fatalf("after prune, entries = %d, want 1", len(idx.Sessions))
+	}
+	if idx.Sessions[0].SessionID != "live" {
+		t.Errorf("remaining entry = %q, want live", idx.Sessions[0].SessionID)
+	}
+}
+
+// TestPruneStaleIndexEntriesRemovesOld verifies that index entries older than
+// MaxSessionAge are pruned.
+func TestPruneStaleIndexEntriesRemovesOld(t *testing.T) {
+	paths := testPaths(t)
+	now := time.Now()
+
+	// Add a session whose last event is very old.
+	_ = UpdateSessionIndex(paths, indexTestSnapshot(schema.ClientClaudeCode, "old", "m1", schema.SessionCompleted, now.Add(-60*24*time.Hour)))
+
+	// Create its directory so it passes the directory check but fails age.
+	if err := paths.EnsureSessionDir(schema.ClientClaudeCode, "old"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := pruneStaleIndexEntries(paths, now); err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+
+	idx, _ := LoadSessionIndex(paths)
+	if len(idx.Sessions) != 0 {
+		t.Fatalf("after age prune, entries = %d, want 0", len(idx.Sessions))
+	}
+}
