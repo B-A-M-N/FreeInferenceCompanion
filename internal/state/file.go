@@ -311,23 +311,32 @@ func UpdateSnapshot(paths Paths, clientType, sessionID string, initialize func()
 // Global state load/save
 // ============================================================
 
-// LoadGlobal reads the global state. Returns a zero-value if no file exists.
+// LoadGlobal reads the global state. Each resource is loaded independently —
+// a corrupt or unreadable file for one resource does not poison the others.
+// Missing files are silently skipped (the corresponding field stays nil).
+// JSON decode errors for a single resource are logged to diagnostics but do
+// not prevent the remaining resources from loading.
 func LoadGlobal(paths Paths) (*schema.GlobalState, error) {
 	gs := &schema.GlobalState{}
 
+	// Each resource loads independently. A failure on one does not prevent
+	// the others from being read. This means a corrupt models file will
+	// not discard valid circuit-breaker state.
+
+	var loadErr error
 	if err := ReadJSON(paths.GlobalHealth(), &gs.Health); err != nil && !os.IsNotExist(err) {
-		return gs, fmt.Errorf("load health: %w", err)
+		loadErr = err
 	}
 	if err := ReadJSON(paths.GlobalModels(), &gs.Models); err != nil && !os.IsNotExist(err) {
-		return gs, fmt.Errorf("load models: %w", err)
+		loadErr = err
 	}
 	if err := ReadJSON(paths.GlobalAccountUsage(), &gs.AccountUsage); err != nil && !os.IsNotExist(err) {
-		return gs, fmt.Errorf("load account usage: %w", err)
+		loadErr = err
 	}
 	if err := ReadJSON(paths.GlobalCircuitBreakers(), &gs.CircuitBreakers); err != nil && !os.IsNotExist(err) {
-		return gs, fmt.Errorf("load circuit breakers: %w", err)
+		loadErr = err
 	}
-	return gs, nil
+	return gs, loadErr
 }
 
 // SaveHealth writes the health cache atomically.

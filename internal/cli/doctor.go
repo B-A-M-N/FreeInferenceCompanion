@@ -185,8 +185,16 @@ func checkCacheDir(paths state.Paths) api.CheckResult {
 }
 
 func checkStateReadable(paths state.Paths) api.CheckResult {
-	if _, err := state.LoadGlobal(paths); err != nil {
-		return api.CheckResult{State: api.CheckFail, Detail: "global state unreadable"}
+	gs, _ := state.LoadGlobal(paths)
+	// An empty cache (first run) is not a failure. Only fail if files exist
+	// but could not be loaded — indicated by all fields being nil while at
+	// least one global file is present on disk.
+	if gs.Health == nil && gs.Models == nil && gs.AccountUsage == nil && len(gs.CircuitBreakers) == 0 {
+		globalDir := paths.GlobalDir()
+		if entries, err := os.ReadDir(globalDir); err == nil && len(entries) > 0 {
+			return api.CheckResult{State: api.CheckFail, Detail: "global state files present but unreadable"}
+		}
+		return api.CheckResult{State: api.CheckPass, Detail: "no state yet (first run)"}
 	}
 	return api.CheckResult{State: api.CheckPass}
 }
@@ -251,8 +259,8 @@ func checkStatusLineWrapper() api.CheckResult {
 
 // chooseProbeModel picks a model from the cached catalog for a synthetic probe.
 func chooseProbeModel(paths state.Paths) string {
-	gs, err := state.LoadGlobal(paths)
-	if err != nil || gs.Models == nil || len(gs.Models.Models) == 0 {
+	gs, _ := state.LoadGlobal(paths)
+	if gs.Models == nil || len(gs.Models.Models) == 0 {
 		return ""
 	}
 	return gs.Models.Models[0].ID

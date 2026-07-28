@@ -94,10 +94,7 @@ func (r *Refresher) WorkerRefresh(worker string) *RefreshResult {
 	defer fl.Release()
 
 	now := time.Now()
-	gs, err := state.LoadGlobal(r.Paths)
-	if err != nil {
-		gs = &schema.GlobalState{}
-	}
+	gs, _ := state.LoadGlobal(r.Paths)
 
 	// Circuit breaker gate.
 	if breakerOpen(gs, worker, now) {
@@ -139,10 +136,7 @@ func (r *Refresher) WorkerRefresh(worker string) *RefreshResult {
 func (r *Refresher) RefreshIfStale() *RefreshResult {
 	result := &RefreshResult{}
 	now := time.Now()
-	gs, err := state.LoadGlobal(r.Paths)
-	if err != nil {
-		gs = &schema.GlobalState{}
-	}
+	gs, _ := state.LoadGlobal(r.Paths)
 
 	if modelsStale(gs, now) && !breakerOpen(gs, WorkerModels, now) {
 		res := r.WorkerRefresh(WorkerModels)
@@ -182,10 +176,7 @@ func (r *Refresher) ForceRefresh() *RefreshResult {
 // are closed. Cheap and read-only — safe for hooks to call.
 func StaleWorkers(paths state.Paths, healthURL string) []string {
 	now := time.Now()
-	gs, err := state.LoadGlobal(paths)
-	if err != nil {
-		gs = &schema.GlobalState{}
-	}
+	gs, _ := state.LoadGlobal(paths)
 	var stale []string
 	if modelsStale(gs, now) && !breakerOpen(gs, WorkerModels, now) {
 		stale = append(stale, WorkerModels)

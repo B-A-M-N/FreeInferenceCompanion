@@ -144,10 +144,12 @@ func printSessionListWith(paths state.Paths, stdout io.Writer, reveal bool) {
 	}
 }
 
-// loadGlobal is a fail-open global state load.
+// loadGlobal is a fail-open global state load. Each resource loads
+// independently, so a corrupt models file will not discard valid
+// circuit-breaker state. The returned state is always non-nil.
 func loadGlobal(paths state.Paths) *schema.GlobalState {
-	gs, err := state.LoadGlobal(paths)
-	if err != nil || gs == nil {
+	gs, _ := state.LoadGlobal(paths)
+	if gs == nil {
 		return &schema.GlobalState{}
 	}
 	return gs
