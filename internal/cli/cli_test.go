@@ -111,8 +111,34 @@ func TestRefreshWorkerUnknownName(t *testing.T) {
 func TestReportFormatValidation(t *testing.T) {
 	var out, errOut strings.Builder
 	code := cmdReport(testPaths(t), []string{"--format", "yaml"}, &out, &errOut)
-	if code != 1 {
-		t.Errorf("bad format exit = %d", code)
+	if code != 2 {
+		t.Errorf("bad format exit = %d, want 2 (usage error)", code)
+	}
+}
+
+// TestStrictFlagParsing verifies that unknown flags and unexpected arguments
+// are rejected with usage errors (exit 2) rather than silently ignored.
+func TestStrictFlagParsing(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{"unknown flag", []string{"--unknown-flag"}},
+		{"unknown flag with value", []string{"--bogus", "value"}},
+		{"missing client value", []string{"--client"}},
+		{"missing session value", []string{"--session"}},
+		{"missing format value", []string{"--format"}},
+		{"unknown client", []string{"--client", "vim"}},
+		{"unexpected arg", []string{"extra-arg"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out, errOut strings.Builder
+			code := cmdStatus(testPaths(t), tt.args, nil, &out, &errOut)
+			if code != 2 {
+				t.Errorf("%s: exit = %d, want 2 (usage error)", tt.name, code)
+			}
+		})
 	}
 }
 

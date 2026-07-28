@@ -23,7 +23,11 @@ func cmdStatus(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 			flagArgs = append(flagArgs, a)
 		}
 	}
-	clientType, sessionID, _ := parseClientSessionFlags(flagArgs)
+	clientType, sessionID, _, _, err := parseClientSessionFlags(flagArgs)
+	if err != nil {
+		fmt.Fprintf(stderr, "usage error: %v\n", err)
+		return 2
+	}
 
 	// Status-line mode: a Claude status payload arrives on stdin.
 	if sessionID == "" && stdinHasData(stdin) {
@@ -181,7 +185,11 @@ func printFullStatus(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalS
 // cmdContext implements `fi context`. Missing metrics render as "unknown",
 // never as zero.
 func cmdContext(paths state.Paths, args []string, _ io.Reader, stdout, stderr io.Writer) int {
-	clientType, sessionID, _ := parseClientSessionFlags(args)
+	clientType, sessionID, _, _, err := parseClientSessionFlags(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "usage error: %v\n", err)
+		return 2
+	}
 
 	resolved, err := resolveSession(paths, clientType, sessionID, stdout)
 	if err != nil {

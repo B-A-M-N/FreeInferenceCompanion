@@ -12,7 +12,11 @@ import (
 // cmdCache implements `fi cache` — analyzes cache efficiency and gives
 // actionable, zero-risk recommendations to improve cache hit rates.
 func cmdCache(paths state.Paths, args []string, stdout, stderr io.Writer) int {
-	clientType, sessionID, _ := parseClientSessionFlags(args)
+	clientType, sessionID, _, _, err := parseClientSessionFlags(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "usage error: %v\n", err)
+		return 2
+	}
 
 	resolved, err := resolveSession(paths, clientType, sessionID, stdout)
 	if err != nil {

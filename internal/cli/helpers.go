@@ -27,19 +27,6 @@ func newAPIClient() *api.Client {
 	return client
 }
 
-// includeIdentifiers reports whether the caller passed --include-identifiers.
-// When false (the default), all display paths mask session IDs and other
-// identifying fields. When true, full identifiers are shown — intended for
-// local debugging by a user who understands the value is on their own disk.
-func includeIdentifiers(args []string) bool {
-	for _, a := range args {
-		if a == "--include-identifiers" {
-			return true
-		}
-	}
-	return false
-}
-
 // displaySessionID returns either the masked or the raw session ID depending
 // on whether --include-identifiers was passed. All human-facing output paths
 // should call this rather than emitting the raw ID directly.
@@ -50,28 +37,48 @@ func displaySessionID(id string, reveal bool) string {
 	return secure.MaskSessionID(id)
 }
 
-// parseClientSessionFlags extracts --client, --session, and --format flags.
-func parseClientSessionFlags(args []string) (clientType, sessionID, format string) {
+// parseClientSessionFlags extracts --client, --session, --format, and
+// --include-identifiers flags. Rejects unknown flags (arguments starting
+// with "--" that aren't recognized) and missing flag values.
+// Returns an error describing the first invalid input.
+func parseClientSessionFlags(args []string) (clientType, sessionID, format string, reveal bool, err error) {
 	for i := 0; i < len(args); i++ {
-		switch args[i] {
+		a := args[i]
+		if a == "--include-identifiers" {
+			reveal = true
+			continue
+		}
+		switch a {
 		case "--client":
-			if i+1 < len(args) {
-				i++
-				clientType = args[i]
+			if i+1 >= len(args) {
+				return "", "", "", false, fmt.Errorf("--client requires a value")
+			}
+			i++
+			clientType = args[i]
+			if clientType != schema.ClientClaudeCode && clientType != schema.ClientCodex {
+				return "", "", "", false, fmt.Errorf("unknown client %q (supported: %s, %s)",
+					clientType, schema.ClientClaudeCode, schema.ClientCodex)
 			}
 		case "--session":
-			if i+1 < len(args) {
-				i++
-				sessionID = args[i]
+			if i+1 >= len(args) {
+				return "", "", "", false, fmt.Errorf("--session requires a value")
 			}
+			i++
+			sessionID = args[i]
 		case "--format":
-			if i+1 < len(args) {
-				i++
-				format = args[i]
+			if i+1 >= len(args) {
+				return "", "", "", false, fmt.Errorf("--format requires a value")
 			}
+			i++
+			format = args[i]
+		default:
+			if strings.HasPrefix(a, "--") {
+				return "", "", "", false, fmt.Errorf("unknown flag %q", a)
+			}
+			return "", "", "", false, fmt.Errorf("unexpected argument %q", a)
 		}
 	}
-	return clientType, sessionID, format
+	return clientType, sessionID, format, reveal, nil
 }
 
 // resolvedSession pairs a session identity with its loaded snapshot.

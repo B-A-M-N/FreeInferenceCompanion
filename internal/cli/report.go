@@ -60,15 +60,18 @@ const reportNote = "This report is designed to exclude known sensitive fields. R
 
 // cmdReport implements `fi report`.
 func cmdReport(paths state.Paths, args []string, stdout, stderr io.Writer) int {
-	clientType, sessionID, format := parseClientSessionFlags(args)
+	clientType, sessionID, format, reveal, err := parseClientSessionFlags(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "usage error: %v\n", err)
+		return 2
+	}
 	if format == "" {
 		format = "markdown"
 	}
 	if format != "markdown" && format != "json" {
 		fmt.Fprintf(stderr, "unknown format: %s (want markdown|json)\n", format)
-		return 1
+		return 2
 	}
-	reveal := includeIdentifiers(args)
 
 	gs := loadGlobal(paths)
 	report := &reportData{

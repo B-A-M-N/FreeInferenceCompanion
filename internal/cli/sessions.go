@@ -50,7 +50,11 @@ func cmdSnapshot(paths state.Paths, args []string, stdin io.Reader, stdout, stde
 			flagArgs = append(flagArgs, a)
 		}
 	}
-	clientType, sessionID, _ := parseClientSessionFlags(flagArgs)
+	clientType, sessionID, _, _, err := parseClientSessionFlags(flagArgs)
+	if err != nil {
+		fmt.Fprintf(stderr, "usage error: %v\n", err)
+		return 2
+	}
 
 	// Accept a Claude status payload on stdin (updates state first).
 	if sessionID == "" {
@@ -105,13 +109,17 @@ func cmdRender(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 			flagArgs = append(flagArgs, args[i])
 		}
 	}
-	clientType, sessionID, _ := parseClientSessionFlags(flagArgs)
+	clientType, sessionID, _, _, err := parseClientSessionFlags(flagArgs)
+	if err != nil {
+		fmt.Fprintf(stderr, "usage error: %v\n", err)
+		return 2
+	}
 	if mode == "" {
 		mode = "line"
 	}
 	if mode != "line" && mode != "expanded" {
 		fmt.Fprintf(stderr, "unknown render mode: %s (want line|expanded)\n", mode)
-		return 1
+		return 2
 	}
 
 	// Status payload on stdin takes priority (same path as status line).

@@ -18,7 +18,7 @@ type doctorCheck struct {
 }
 
 // cmdDoctor implements `fi doctor`. All independent checks run; the command
-// exits 1 if any check failed, 0 otherwise.
+// exits 1 if any check failed, 2 on usage error, 0 otherwise.
 func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 	probe := false
 	probeModel := ""
@@ -27,10 +27,19 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 		case "--probe":
 			probe = true
 		case "--model":
-			if i+1 < len(args) {
-				i++
-				probeModel = args[i]
+			if i+1 >= len(args) {
+				fmt.Fprintln(stdout, "usage error: --model requires a value")
+				return 2
 			}
+			i++
+			probeModel = args[i]
+		default:
+			if strings.HasPrefix(args[i], "--") {
+				fmt.Fprintf(stdout, "usage error: unknown flag %q\n", args[i])
+				return 2
+			}
+			fmt.Fprintf(stdout, "usage error: unexpected argument %q\n", args[i])
+			return 2
 		}
 	}
 
