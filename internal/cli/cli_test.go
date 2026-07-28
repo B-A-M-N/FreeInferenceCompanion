@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -30,6 +32,15 @@ func TestDoctorRunsAllChecksWithoutEarlyExit(t *testing.T) {
 	t.Setenv("FREEINFERENCE_BASE_URL", server.URL)
 	t.Setenv("FREEINFERENCE_API_KEY", "")
 	t.Setenv("FI_HEALTH_URL", "")
+
+	// Put the running binary on PATH so `fi` resolves correctly.
+	if exe, err := os.Executable(); err == nil {
+		fiDir := t.TempDir()
+		fiPath := filepath.Join(fiDir, "fi")
+		if err := os.Symlink(exe, fiPath); err == nil {
+			t.Setenv("PATH", fiDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+		}
+	}
 
 	var out, errOut strings.Builder
 	code := cmdDoctor(testPaths(t), nil, &out, &errOut)

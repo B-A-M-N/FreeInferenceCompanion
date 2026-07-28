@@ -10,6 +10,7 @@ import (
 	"github.com/b-a-m-n/freeinference-companion/internal/adapters"
 	"github.com/b-a-m-n/freeinference-companion/internal/api"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
+	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
 
 type doctorCheck struct {
@@ -68,12 +69,8 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 
 	// 6. Provider detection.
 	det := adapters.DetectProvider()
-	providerDetail := det.Source
-	if det.BaseURL != "" {
-		providerDetail += " (" + det.BaseURL + ")"
-	}
 	if det.Confirmed {
-		add("Provider detection", api.CheckResult{State: api.CheckPass, Detail: det.Name + " via " + providerDetail})
+		add("Provider detection", api.CheckResult{State: api.CheckPass, Detail: det.Name + " via " + det.Source})
 	} else {
 		add("Provider detection", api.CheckResult{State: api.CheckUnknown, Detail: "provider unknown — FreeInference features stay quiet"})
 	}
@@ -147,7 +144,12 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 				detail += fmt.Sprintf(", retry: %s", cb.NextRetryAt.Format("15:04:05"))
 			}
 			detail += ")"
-			add(fmt.Sprintf("Circuit: %s", cb.Endpoint), api.CheckResult{State: api.CheckPass, Detail: detail})
+			// An open circuit breaker is a failure, not a pass.
+			if cb.State == schema.CircuitOpen {
+				add(fmt.Sprintf("Circuit: %s", cb.Endpoint), api.CheckResult{State: api.CheckFail, Detail: detail})
+			} else {
+				add(fmt.Sprintf("Circuit: %s", cb.Endpoint), api.CheckResult{State: api.CheckPass, Detail: detail})
+			}
 		}
 	} else {
 		add("Circuit breakers", api.CheckResult{State: api.CheckUnknown, Detail: "no state recorded"})
@@ -155,11 +157,15 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 
 	// Print results.
 	failures := 0
+	warnings := 0
 	for _, c := range checks {
 		symbol := "?"
 		switch c.result.State {
 		case api.CheckPass:
 			symbol = "✓"
+		case api.CheckWarn:
+			symbol = "⚠"
+			warnings++
 		case api.CheckFail:
 			symbol = "✗"
 			failures++
@@ -175,6 +181,10 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 	if failures > 0 {
 		fmt.Fprintf(stdout, "Doctor complete: %d check(s) failed.\n", failures)
 		return 1
+	}
+	if warnings > 0 {
+		fmt.Fprintf(stdout, "Doctor complete: %d warning(s).\n", warnings)
+		return 0
 	}
 	fmt.Fprintln(stdout, "Doctor complete.")
 	return 0
@@ -209,18 +219,26 @@ func checkStateReadable(paths state.Paths) api.CheckResult {
 }
 
 func checkBinaryResolvable() api.CheckResult {
+	onPath := false
+	if _, err := lookPathFI(); err == nil {
+		onPath = true
+	}
+	runningBinary := false
 	if exe, err := os.Executable(); err == nil {
 		if _, err := os.Stat(exe); err == nil {
-			if _, lookErr := lookPathFI(); lookErr == nil {
-				return api.CheckResult{State: api.CheckPass, Detail: "on PATH"}
-			}
-			return api.CheckResult{State: api.CheckPass, Detail: "running binary found, but `fi` is not on PATH — plugin hooks may not resolve it"}
+			runningBinary = true
 		}
 	}
-	if _, err := lookPathFI(); err == nil {
+	switch {
+	case onPath && runningBinary:
 		return api.CheckResult{State: api.CheckPass, Detail: "on PATH"}
+	case runningBinary:
+		// Binary exists but `fi` is not on PATH — hooks configured to call
+		// `fi` by name will fail to resolve it.
+		return api.CheckResult{State: api.CheckFail, Detail: "running binary found, but `fi` is not on PATH — plugin hooks may not resolve it"}
+	default:
+		return api.CheckResult{State: api.CheckFail, Detail: "fi not resolvable"}
 	}
-	return api.CheckResult{State: api.CheckFail, Detail: "fi not resolvable"}
 }
 
 func checkClaudeHookConfig() api.CheckResult {
@@ -228,8 +246,7 @@ func checkClaudeHookConfig() api.CheckResult {
 	if err != nil {
 		return api.CheckResult{State: api.CheckUnknown, Detail: "no home directory"}
 	}
-	// Plugin installation places hooks under ~/.claude/plugins; also accept a
-	// statusLine wrapper referencing fi.
+	// Plugin installation places hooks under ~/.claude/plugins.
 	candidates := []string{
 		filepath.Join(home, ".claude", "plugins", "freeinference-companion", "hooks", "hooks.json"),
 		filepath.Join(home, ".claude", "statusline-freeinference.sh"),
@@ -239,11 +256,13 @@ func checkClaudeHookConfig() api.CheckResult {
 			return api.CheckResult{State: api.CheckPass}
 		}
 	}
-	// Scan plugin cache for our hooks file.
+	// Scan plugin cache for our hooks file. Match on the exact hook runner
+	// path that our installer writes, not a loose substring that could
+	// false-positive on unrelated plugins.
 	matches, _ := filepath.Glob(filepath.Join(home, ".claude", "plugins", "*", "*", "hooks", "hooks.json"))
 	for _, m := range matches {
 		data, err := os.ReadFile(m)
-		if err == nil && strings.Contains(string(data), "freeinference") {
+		if err == nil && strings.Contains(string(data), "run-hook.sh") && strings.Contains(string(data), "freeinference-companion") {
 			return api.CheckResult{State: api.CheckPass, Detail: m}
 		}
 	}
@@ -262,6 +281,14 @@ func checkStatusLineWrapper() api.CheckResult {
 	}
 	if info.Mode()&0111 == 0 {
 		return api.CheckResult{State: api.CheckFail, Detail: "wrapper not executable"}
+	}
+	// Verify that Claude settings actually point to this wrapper. An
+	// executable wrapper that isn't referenced by settings is misleading.
+	settingsPath := filepath.Join(home, ".claude", "settings.json")
+	if data, err := os.ReadFile(settingsPath); err == nil {
+		if !strings.Contains(string(data), "statusline-freeinference") {
+			return api.CheckResult{State: api.CheckWarn, Detail: "wrapper exists but Claude settings don't reference it"}
+		}
 	}
 	return api.CheckResult{State: api.CheckPass}
 }

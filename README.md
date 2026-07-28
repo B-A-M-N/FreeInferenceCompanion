@@ -66,7 +66,7 @@ surfaces the user already has:
 
 - **Status line reads live Claude JSON from stdin + cached health data** — zero network, p95 <10ms target
 - **Hooks do local computation only** — no network, p95 <25ms target, always fail open (exit 0)
-- **Every session mutation holds a cross-process file lock** — concurrent hooks and status lines never lose each other's writes; lock contention returns immediately
+- **Every session mutation holds a cross-process file lock** — concurrent hooks and status lines coordinate writes; lock contention returns immediately (fail-open) and is counted in `state.DroppedMutations()`
 - **Warnings use JSON `systemMessage`** — never plain stdout, never `additionalContext`, never in model context; no warning → no output at all
 - **Provider detection gates all warnings** — no FreeInference warning or health symbol ever appears in a non-FreeInference session
 - **Background refreshes are detached and coalesced across processes** — file-lock single-flight, per-endpoint circuit breakers (2→30min backoff), `Retry-After` honored

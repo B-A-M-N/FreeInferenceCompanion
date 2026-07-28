@@ -432,11 +432,12 @@ func (c *Client) GetHealthFromTrusted(healthURL string, allowlist []string) (*He
 // Probe / diagnostics
 // ============================================================
 
-// CheckState is the tri-state result of a single diagnostic check.
+// CheckState is the result of a single diagnostic check.
 type CheckState string
 
 const (
 	CheckPass    CheckState = "pass"
+	CheckWarn    CheckState = "warn"
 	CheckFail    CheckState = "fail"
 	CheckUnknown CheckState = "unknown"
 )

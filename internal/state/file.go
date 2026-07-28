@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
@@ -18,6 +19,20 @@ const (
 
 // ChecksumFileSuffix is appended to cache files to store their SHA-256 checksum.
 const ChecksumFileSuffix = ".sha256"
+
+// droppedMutations counts session-snapshot mutations that were skipped because
+// the per-session lock was held by another process (ErrLockBusy). Exposed via
+// DroppedMutations() for observability. Under contention this counter rises;
+// in normal single-client operation it stays at zero.
+var droppedMutations int64
+
+// DroppedMutations returns the count of snapshot mutations dropped due to lock
+// contention since process start. A rising count under load indicates that the
+// nonblocking lock is discarding updates; the companion's fail-open contract
+// means these are not correctness bugs but observability gaps.
+func DroppedMutations() int64 {
+	return atomic.LoadInt64(&droppedMutations)
+}
 
 // Paths resolves filesystem paths for state storage.
 type Paths struct {
@@ -271,7 +286,8 @@ func SaveSnapshot(paths Paths, clientType, sessionID string, s *schema.Snapshot)
 // nil, UpdateSnapshot is a no-op and returns nil.
 //
 // Returns ErrLockBusy when another process holds the session lock; callers
-// should treat that as fail-open.
+// should treat that as fail-open. Dropped mutations are counted in
+// droppedMutations for observability.
 func UpdateSnapshot(paths Paths, clientType, sessionID string, initialize func() *schema.Snapshot, mutate func(*schema.Snapshot) error) error {
 	lockPath := paths.SessionLock(clientType, sessionID)
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0700); err != nil {
@@ -279,6 +295,9 @@ func UpdateSnapshot(paths Paths, clientType, sessionID string, initialize func()
 	}
 	fl := NewFileLock(lockPath)
 	if err := fl.Acquire(); err != nil {
+		if IsLockBusy(err) {
+			atomic.AddInt64(&droppedMutations, 1)
+		}
 		return err
 	}
 	defer fl.Release()

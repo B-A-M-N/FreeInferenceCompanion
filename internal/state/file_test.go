@@ -124,6 +124,38 @@ func TestLockContentionReturnsImmediately(t *testing.T) {
 	}
 }
 
+// TestDroppedMutationsCounted verifies that lock-busy mutations are counted
+// in DroppedMutations() for observability.
+func TestDroppedMutationsCounted(t *testing.T) {
+	paths := testPaths(t)
+
+	// Reset counter (it's global, so snapshot before).
+	before := DroppedMutations()
+
+	if err := paths.EnsureSessionDir(schema.ClientClaudeCode, "s1"); err != nil {
+		t.Fatal(err)
+	}
+	fl := NewFileLock(paths.SessionLock(schema.ClientClaudeCode, "s1"))
+	if err := fl.Acquire(); err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	defer fl.Release()
+
+	// Mutate while lock is held — should increment the dropped counter.
+	for i := 0; i < 3; i++ {
+		err := UpdateSnapshot(paths, schema.ClientClaudeCode, "s1", nil,
+			func(snap *schema.Snapshot) error { return nil })
+		if !IsLockBusy(err) {
+			t.Fatalf("expected ErrLockBusy, got %v", err)
+		}
+	}
+
+	after := DroppedMutations()
+	if after-before != 3 {
+		t.Errorf("dropped mutations = %d, want 3", after-before)
+	}
+}
+
 func TestCorruptSnapshotJSONFailsOpen(t *testing.T) {
 	paths := testPaths(t)
 	if err := paths.EnsureSessionDir(schema.ClientClaudeCode, "s1"); err != nil {
