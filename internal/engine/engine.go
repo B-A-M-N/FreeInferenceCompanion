@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"time"
@@ -11,6 +13,17 @@ import (
 // ============================================================
 // Pressure thresholds
 // ============================================================
+
+// ThresholdConfig holds validated runtime configuration.
+type ThresholdConfig struct {
+	WatchEnter    float64
+	WarnEnter     float64
+	CriticalEnter float64
+	WatchLeave    float64
+	WarnLeave     float64
+	CriticalLeave float64
+	OutputReserve int
+}
 
 // Default thresholds (can be overridden via environment variables)
 var (
@@ -27,6 +40,70 @@ var (
 	// Default output reserve in tokens
 	DefaultOutputReserve = getEnvInt("FI_OUTPUT_RESERVE", 16000)
 )
+
+// ValidateThresholds checks that thresholds are finite, in [0,100], ordered,
+// and have valid hysteresis. Returns a diagnostic string if invalid.
+func ValidateThresholds() error {
+	cfg := ThresholdConfig{
+		WatchEnter:    WatchEnterThreshold,
+		WarnEnter:     WarnEnterThreshold,
+		CriticalEnter: CriticalEnterThreshold,
+		WatchLeave:    WatchLeaveThreshold,
+		WarnLeave:     WarnLeaveThreshold,
+		CriticalLeave: CriticalLeaveThreshold,
+		OutputReserve: DefaultOutputReserve,
+	}
+	return cfg.Validate()
+}
+
+// Validate checks the threshold configuration for correctness.
+func (c ThresholdConfig) Validate() error {
+	// All percentages must be finite and in [0,100].
+	fields := map[string]float64{
+		"watch_enter":    c.WatchEnter,
+		"warn_enter":     c.WarnEnter,
+		"critical_enter": c.CriticalEnter,
+		"watch_leave":    c.WatchLeave,
+		"warn_leave":     c.WarnLeave,
+		"critical_leave": c.CriticalLeave,
+	}
+	for name, val := range fields {
+		if math.IsNaN(val) || math.IsInf(val, 0) {
+			return fmt.Errorf("threshold %s is not finite: %v", name, val)
+		}
+		if val < 0 || val > 100 {
+			return fmt.Errorf("threshold %s is out of range [0,100]: %v", name, val)
+		}
+	}
+	// Enter thresholds must be strictly ordered.
+	if !(c.WatchEnter < c.WarnEnter && c.WarnEnter < c.CriticalEnter) {
+		return fmt.Errorf("enter thresholds must be ordered: watch < warn < critical (got %.1f < %.1f < %.1f)",
+			c.WatchEnter, c.WarnEnter, c.CriticalEnter)
+	}
+	// Leave thresholds must be strictly ordered.
+	if !(c.WatchLeave < c.WarnLeave && c.WarnLeave < c.CriticalLeave) {
+		return fmt.Errorf("leave thresholds must be ordered: watch < warn < critical (got %.1f < %.1f < %.1f)",
+			c.WatchLeave, c.WarnLeave, c.CriticalLeave)
+	}
+	// Hysteresis: leave < enter for each level.
+	if c.WatchLeave >= c.WatchEnter {
+		return fmt.Errorf("watch leave (%.1f) must be < watch enter (%.1f)", c.WatchLeave, c.WatchEnter)
+	}
+	if c.WarnLeave >= c.WarnEnter {
+		return fmt.Errorf("warn leave (%.1f) must be < warn enter (%.1f)", c.WarnLeave, c.WarnEnter)
+	}
+	if c.CriticalLeave >= c.CriticalEnter {
+		return fmt.Errorf("critical leave (%.1f) must be < critical enter (%.1f)", c.CriticalLeave, c.CriticalEnter)
+	}
+	// Output reserve must be positive and bounded.
+	if c.OutputReserve <= 0 {
+		return fmt.Errorf("output reserve must be positive: %d", c.OutputReserve)
+	}
+	if c.OutputReserve > 1_000_000 {
+		return fmt.Errorf("output reserve is unreasonable: %d (max 1000000)", c.OutputReserve)
+	}
+	return nil
+}
 
 func getEnvFloat(key string, def float64) float64 {
 	if v := os.Getenv(key); v != "" {
