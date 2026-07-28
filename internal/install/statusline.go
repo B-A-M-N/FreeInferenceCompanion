@@ -6,9 +6,14 @@
 //
 //   - Installation is transactional: if metadata cannot be written after the
 //     wrapper and settings are updated, both are rolled back to their prior
-//     on-disk state. A half-installed state must never be observable.
+//     on-disk state. Rollback is best-effort (each step is independent and
+//     failure-tolerant); the goal is that a half-installed state is never
+//     observable to a concurrent reader, but perfect atomicity across a crash
+//     mid-rename is not guaranteed without a durable transaction journal.
 //   - Reinstalls preserve the original pre-install status line across runs.
-//     A second install no longer collapses the prior-history pointer.
+//     A second install no longer collapses the prior-history pointer. Reinstall
+//     verifies that the current settings["statusLine"] still matches the value
+//     we own — if the user changed it, the install is refused.
 //   - Uninstall refuses to delete or replace a statusLine value the user
 //     changed after install. The user is told to reconcile manually instead.
 //   - Ownership is by exact value equality, never by substring matching.
@@ -78,8 +83,13 @@ func metadataPath(home string) string {
 // the wrapper falls back to resolving `fi` from PATH at runtime.
 //
 // This function is transactional: any failure after the first mutation rolls
-// all touched files back to their prior on-disk state. A half-installed
-// state is never observable to a concurrent reader or to the caller.
+// all touched files back to their prior on-disk state. Rollback is best-effort;
+// perfect atomicity across a crash mid-rename is not guaranteed without a
+// durable transaction journal.
+//
+// On reinstall, the current settings["statusLine"] is compared with the
+// recorded OwnedStatusLine. If the user changed it, installation is refused
+// with ErrDriftedStatusLine.
 func InstallClaudeStatusLine(home, binaryPath string, stdout io.Writer) error {
 	settingsFile := settingsPath(home)
 	wrapper := wrapperPath(home)
@@ -92,7 +102,10 @@ func InstallClaudeStatusLine(home, binaryPath string, stdout io.Writer) error {
 	// Load any existing metadata first. Reinstall must NOT collapse the prior
 	// history pointer — the pre-install value recorded on the first install is
 	// authoritative across all subsequent reinstalls.
-	existingMeta, haveExistingMeta := loadMetadata(metadataPath(home))
+	existingMeta, haveExistingMeta, metaErr := loadMetadata(metadataPath(home))
+	if metaErr != nil {
+		return fmt.Errorf("installation metadata is corrupted; refusing to modify. Repair with: fi status-line reset, then reinstall: %w", metaErr)
+	}
 
 	// Determine the pre-install status line value. On a fresh install this is
 	// the current settings["statusLine"]. On a reinstall it is whatever the
@@ -120,6 +133,17 @@ func InstallClaudeStatusLine(home, binaryPath string, stdout io.Writer) error {
 	})
 	if err != nil {
 		return fmt.Errorf("encode owned status line: %w", err)
+	}
+
+	// Reinstall drift check: if we have existing metadata, verify that the
+	// current settings["statusLine"] still matches what we own. If the user
+	// changed it after install, refuse to overwrite their customization.
+	if haveExistingMeta {
+		currentStatusLine, present := settings["statusLine"]
+		currentBytes, _ := json.Marshal(currentStatusLine)
+		if !present || !bytes.Equal(normalizeJSON(currentBytes), normalizeJSON(existingMeta.OwnedStatusLine)) {
+			return fmt.Errorf("%w: the current statusLine does not match our recorded value; reconcile manually or run `fi status-line reset` first", ErrDriftedStatusLine)
+		}
 	}
 
 	// Build the new wrapper. It composes with the pre-install value (not the
@@ -202,11 +226,15 @@ func UninstallClaudeStatusLine(home string, stdout io.Writer) error {
 		return fmt.Errorf("settings file is malformed; removed wrapper only: %w", err)
 	}
 
-	meta, haveMeta := loadMetadata(metaFile)
+	meta, haveMeta, metaErr := loadMetadata(metaFile)
+	if metaErr != nil {
+		return fmt.Errorf("installation metadata is corrupted; refusing to modify. Repair with: fi status-line reset, then reinstall: %w", metaErr)
+	}
 
 	// Decide what to do with settings["statusLine"] based on ownership.
 	currentStatusLine, statusLinePresent := settings["statusLine"]
 	currentStatusLineBytes, _ := json.Marshal(currentStatusLine)
+	modified := false // tracks whether settings map was mutated
 
 	if statusLinePresent {
 		if haveMeta && bytes.Equal(normalizeJSON(currentStatusLineBytes), normalizeJSON(meta.OwnedStatusLine)) {
@@ -217,10 +245,10 @@ func UninstallClaudeStatusLine(home string, stdout io.Writer) error {
 			} else {
 				delete(settings, "statusLine")
 			}
+			modified = true
 		} else if haveMeta && meta.HadPrevious && bytes.Equal(normalizeJSON(currentStatusLineBytes), normalizeJSON(meta.PreInstallStatusLine)) {
 			// Edge case: the user manually restored the pre-install value.
-			// Leave it exactly as-is.
-			delete(settings, "statusLine")
+			// Leave it exactly as-is — do NOT delete or modify settings["statusLine"].
 		} else {
 			// The current statusLine does not match what we own NOR the
 			// recorded pre-install value. The user has customized it since
@@ -239,16 +267,18 @@ func UninstallClaudeStatusLine(home string, stdout io.Writer) error {
 		}
 	}
 
-	// Atomic settings write, preserving mode. The wrapper and metadata are
-	// removed only AFTER the settings write succeeds — if settings write fails,
-	// we leave the (still-owned) wrapper in place so the user's status line
-	// keeps working.
-	newSettingsBytes, err := json.MarshalIndent(settings, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode settings: %w", err)
-	}
-	if err := writeFilePreservingMode(settingsFile, newSettingsBytes, mode); err != nil {
-		return fmt.Errorf("write settings: %w", err)
+	// Atomic settings write only if we modified the settings map. The wrapper
+	// and metadata are removed only AFTER the settings write succeeds — if
+	// settings write fails, we leave the (still-owned) wrapper in place so the
+	// user's status line keeps working.
+	if modified {
+		newSettingsBytes, err := json.MarshalIndent(settings, "", "  ")
+		if err != nil {
+			return fmt.Errorf("encode settings: %w", err)
+		}
+		if err := writeFilePreservingMode(settingsFile, newSettingsBytes, mode); err != nil {
+			return fmt.Errorf("write settings: %w", err)
+		}
 	}
 
 	os.Remove(wrapper)
@@ -463,19 +493,20 @@ func writeMetadata(path string, meta *Metadata) error {
 	return writeFilePreservingMode(path, data, 0600)
 }
 
-// loadMetadata reads and parses installation metadata. Missing file returns
-// (zero, false, nil). Corrupt file returns (zero, false, err) — the caller
-// treats this as "no metadata" but propagates the error to the log.
-func loadMetadata(path string) (Metadata, bool) {
+// LoadMetadata reads and parses installation metadata.
+// Returns (zero, false, nil) for missing file, (zero, false, err) for corrupt file.
+// The error distinguishes "no metadata" from "corrupt metadata" so callers can
+// refuse to install/uninstall when metadata exists but is malformed.
+func loadMetadata(path string) (Metadata, bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return Metadata{}, false
+		return Metadata{}, false, nil
 	}
 	var m Metadata
 	if err := json.Unmarshal(data, &m); err != nil {
-		return Metadata{}, false
+		return Metadata{}, false, err
 	}
-	return m, true
+	return m, true, nil
 }
 
 // mustUnmarshal is the JSON-decode equivalent used when the bytes are known

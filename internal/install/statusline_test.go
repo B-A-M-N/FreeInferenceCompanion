@@ -435,6 +435,6 @@ func TestReinstallAfterUserKeepsCustomOriginal(t *testing.T) {
 
 func loadMetadataForTest(t *testing.T, home string) (Metadata, bool) {
 	t.Helper()
-	m, ok := loadMetadata(metadataPath(home))
+	m, ok, _ := loadMetadata(metadataPath(home))
 	return m, ok
 }
