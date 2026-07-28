@@ -1,47 +1,11 @@
 {
-  "version": 1,
-  "hooks": {
-    "SessionStart": [
-      {
-        "command": "fi hook codex SessionStart",
-        "timeout": 5,
-        "async": true
-      }
-    ],
-    "SessionEnd": [
-      {
-        "command": "fi hook codex SessionEnd",
-        "timeout": 5,
-        "async": true
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "command": "fi hook codex UserPromptSubmit",
-        "timeout": 5
-      }
-    ],
-    "PreCompact": [
-      {
-        "command": "fi hook codex PreCompact",
-        "timeout": 5,
-        "async": true
-      }
-    ],
-    "PostCompact": [
-      {
-        "command": "fi hook codex PostCompact",
-        "timeout": 5,
-        "async": true
-      }
-    ],
-    "Stop": [
-      {
-        "command": "fi hook codex Stop",
-        "timeout": 5,
-        "async": true
-      }
-    ]
+  "name": "freeinference-companion",
+  "version": "0.1.0",
+  "description": "FreeInference observability for Codex: model health, session lifecycle metrics, and provider status. Context and cache metrics are not available from Codex and are reported as unknown. Community-built and unofficial. Not affiliated with or endorsed by FreeInference.",
+  "author": {
+    "name": "b-a-m-n",
+    "url": "https://github.com/b-a-m-n"
   },
+  "hooks": "./hooks/hooks.json",
   "skills": "./skills/"
 }

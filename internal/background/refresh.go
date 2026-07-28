@@ -1,16 +1,32 @@
 package background
 
 import (
-	"math/rand"
-	"sync"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"syscall"
 	"time"
 
-	"github.com/bamn/freeinference-companion/internal/api"
-	"github.com/bamn/freeinference-companion/internal/state"
-	"github.com/bamn/freeinference-companion/pkg/schema"
+	"github.com/b-a-m-n/freeinference-companion/internal/api"
+	"github.com/b-a-m-n/freeinference-companion/internal/state"
+	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
 
-// Default backoff intervals
+// Worker names / circuit breaker endpoint IDs.
+const (
+	WorkerModels       = "models"
+	WorkerHealth       = "health"
+	WorkerAccountUsage = "account-usage"
+)
+
+// Cache TTLs.
+const (
+	ModelsTTL = 6 * time.Hour
+	HealthTTL = 120 * time.Second
+)
+
+// Backoff intervals for consecutive failures: 2 → 5 → 15 → 30 minutes.
 var backoffIntervals = []time.Duration{
 	2 * time.Minute,
 	5 * time.Minute,
@@ -18,106 +34,242 @@ var backoffIntervals = []time.Duration{
 	30 * time.Minute,
 }
 
-const maxBackoffInterval = 30 * time.Minute
-const jitterPercent = 0.15 // ±15% jitter
+// RefreshResult summarizes what a refresh pass did.
+type RefreshResult struct {
+	Worker          string `json:"worker,omitempty"`
+	ModelsRefreshed bool   `json:"models_refreshed"`
+	HealthRefreshed bool   `json:"health_refreshed"`
+	Skipped         bool   `json:"skipped"`
+	SkipReason      string `json:"skip_reason,omitempty"`
+	Error           string `json:"error,omitempty"`
+}
 
-// Refresher manages opportunistic refreshing of provider metadata.
+// Refresher performs provider metadata refreshes. Cross-process coalescing
+// is done with non-blocking file locks; there is no in-process state.
 type Refresher struct {
 	Client    *api.Client
 	Paths     state.Paths
 	HealthURL string
-
-	mu       sync.Mutex
-	refreshing map[string]bool
 }
 
 // NewRefresher creates a new Refresher.
 func NewRefresher(client *api.Client, paths state.Paths, healthURL string) *Refresher {
 	return &Refresher{
-		Client:     client,
-		Paths:      paths,
-		HealthURL:  healthURL,
-		refreshing: make(map[string]bool),
+		Client:    client,
+		Paths:     paths,
+		HealthURL: healthURL,
 	}
 }
 
-// RefreshResult summarizes what happened during a refresh.
-type RefreshResult struct {
-	ModelsRefreshed      bool   `json:"models_refreshed"`
-	HealthRefreshed      bool   `json:"health_refreshed"`
-	CircuitBreakerOpened bool   `json:"circuit_breaker_opened"`
-	Error                string `json:"error,omitempty"`
-}
+// ============================================================
+// Worker path (fi refresh --worker <name>)
+// ============================================================
 
-// RefreshIfStale checks if global caches are stale and refreshes them.
-// Only refreshes if no other refresh is currently running for that resource.
-func (r *Refresher) RefreshIfStale() *RefreshResult {
-	result := &RefreshResult{}
+// WorkerRefresh runs one refresh worker under a non-blocking process lock.
+// Concurrent workers coalesce: the second process to arrive skips immediately.
+func (r *Refresher) WorkerRefresh(worker string) *RefreshResult {
+	result := &RefreshResult{Worker: worker}
 
-	gs, err := state.LoadGlobal(r.Paths)
-	if err != nil {
-		result.Error = "load global state"
+	if worker != WorkerModels && worker != WorkerHealth {
+		result.Skipped = true
+		result.SkipReason = "unknown worker"
 		return result
 	}
 
+	if err := r.Paths.EnsureDirs(); err != nil {
+		result.Error = "ensure dirs"
+		return result
+	}
+
+	fl := state.NewFileLock(r.Paths.RefreshLock(worker))
+	if err := fl.Acquire(); err != nil {
+		if state.IsLockBusy(err) {
+			result.Skipped = true
+			result.SkipReason = "another worker running"
+			return result
+		}
+		result.Error = "acquire lock"
+		return result
+	}
+	defer fl.Release()
+
 	now := time.Now()
-
-	// Check models cache (TTL: 6 hours)
-	if r.tryStartRefresh("models") {
-		defer r.endRefresh("models")
-		if shouldRefresh(gs.Models, 6*time.Hour, now) {
-			r.refreshModels(result, now)
-		}
+	gs, err := state.LoadGlobal(r.Paths)
+	if err != nil {
+		gs = &schema.GlobalState{}
 	}
 
-	// Check health cache (TTL: 120 seconds)
-	if r.HealthURL != "" && r.tryStartRefresh("health") {
-		defer r.endRefresh("health")
-		if shouldRefresh(gs.Health, 120*time.Second, now) {
-			r.refreshHealth(result, now, gs)
-		}
+	// Circuit breaker gate.
+	if breakerOpen(gs, worker, now) {
+		result.Skipped = true
+		result.SkipReason = "circuit breaker open"
+		return result
 	}
 
+	switch worker {
+	case WorkerModels:
+		if !modelsStale(gs, now) {
+			result.Skipped = true
+			result.SkipReason = "cache fresh"
+			return result
+		}
+		r.refreshModels(result, now)
+	case WorkerHealth:
+		if r.HealthURL == "" {
+			result.Skipped = true
+			result.SkipReason = "no health source configured"
+			return result
+		}
+		if !healthStale(gs, now) {
+			result.Skipped = true
+			result.SkipReason = "cache fresh"
+			return result
+		}
+		r.refreshHealth(result, now)
+	}
 	return result
 }
 
-// ForceRefresh bypasses staleness checks.
+// ============================================================
+// Synchronous paths (manual CLI)
+// ============================================================
+
+// RefreshIfStale synchronously refreshes any stale resource whose breaker is
+// closed. Intended for interactive use (fi refresh).
+func (r *Refresher) RefreshIfStale() *RefreshResult {
+	result := &RefreshResult{}
+	now := time.Now()
+	gs, err := state.LoadGlobal(r.Paths)
+	if err != nil {
+		gs = &schema.GlobalState{}
+	}
+
+	if modelsStale(gs, now) && !breakerOpen(gs, WorkerModels, now) {
+		res := r.WorkerRefresh(WorkerModels)
+		result.ModelsRefreshed = res.ModelsRefreshed
+		if res.Error != "" {
+			result.Error = res.Error
+		}
+	}
+	if r.HealthURL != "" && healthStale(gs, now) && !breakerOpen(gs, WorkerHealth, now) {
+		res := r.WorkerRefresh(WorkerHealth)
+		result.HealthRefreshed = res.HealthRefreshed
+		if res.Error != "" && result.Error == "" {
+			result.Error = res.Error
+		}
+	}
+	return result
+}
+
+// ForceRefresh synchronously refreshes regardless of staleness or breaker
+// state (explicit user request). Breaker state is still updated.
 func (r *Refresher) ForceRefresh() *RefreshResult {
 	result := &RefreshResult{}
 	now := time.Now()
-
-	if r.tryStartRefresh("models") {
-		defer r.endRefresh("models")
-		r.refreshModels(result, now)
-	}
-	if r.HealthURL != "" && r.tryStartRefresh("health") {
-		defer r.endRefresh("health")
-		gs, _ := state.LoadGlobal(r.Paths)
-		r.refreshHealth(result, now, gs)
+	r.refreshModels(result, now)
+	if r.HealthURL != "" {
+		r.refreshHealth(result, now)
 	}
 	return result
+}
+
+// ============================================================
+// Detached coalescing (fi refresh --if-stale --detach, and hooks)
+// ============================================================
+
+// StaleWorkers returns the workers whose caches are stale and whose breakers
+// are closed. Cheap and read-only — safe for hooks to call.
+func StaleWorkers(paths state.Paths, healthURL string) []string {
+	now := time.Now()
+	gs, err := state.LoadGlobal(paths)
+	if err != nil {
+		gs = &schema.GlobalState{}
+	}
+	var stale []string
+	if modelsStale(gs, now) && !breakerOpen(gs, WorkerModels, now) {
+		stale = append(stale, WorkerModels)
+	}
+	if healthURL != "" && healthStale(gs, now) && !breakerOpen(gs, WorkerHealth, now) {
+		stale = append(stale, WorkerHealth)
+	}
+	return stale
+}
+
+// SpawnDetachedWorkers launches one detached `fi refresh --worker <name>`
+// process per worker and returns immediately. Worker-side file locks make
+// duplicate spawns harmless.
+func SpawnDetachedWorkers(executable string, workers []string) error {
+	if executable == "" {
+		return errors.New("no executable path")
+	}
+	for _, worker := range workers {
+		if err := spawnDetached(executable, "refresh", "--worker", worker); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// spawnDetached starts a fully detached child process (new session, stdio to
+// /dev/null) so it outlives the short-lived hook that spawned it.
+func spawnDetached(executable string, args ...string) error {
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	defer devNull.Close()
+
+	cmd := exec.Command(executable, args...)
+	cmd.Stdin = devNull
+	cmd.Stdout = devNull
+	cmd.Stderr = devNull
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("spawn detached: %w", err)
+	}
+	// Do not Wait — the child is reparented and reaped by init.
+	return nil
+}
+
+// ============================================================
+// Internals
+// ============================================================
+
+func modelsStale(gs *schema.GlobalState, now time.Time) bool {
+	return gs.Models == nil || now.Sub(gs.Models.FetchedAt) > ModelsTTL
+}
+
+func healthStale(gs *schema.GlobalState, now time.Time) bool {
+	return gs.Health == nil || now.Sub(gs.Health.FetchedAt) > HealthTTL
+}
+
+func breakerOpen(gs *schema.GlobalState, endpoint string, now time.Time) bool {
+	for _, cb := range gs.CircuitBreakers {
+		if cb.Endpoint == endpoint && cb.State == schema.CircuitOpen {
+			if cb.NextRetryAt != nil && now.Before(*cb.NextRetryAt) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (r *Refresher) refreshModels(result *RefreshResult, now time.Time) {
 	models, err := r.Client.ListModels()
 	if err != nil {
+		r.recordFailure(WorkerModels, err, now)
 		result.Error = "models fetch failed"
 		return
 	}
 
 	catalog := make([]schema.CatalogModel, 0, len(models))
 	for _, m := range models {
-		access := schema.AccessUnknown
-		if m.OwnedBy == "internal" || m.ID == "glm-5.2" {
-			access = schema.AccessRestricted
-		}
-
 		catalog = append(catalog, schema.CatalogModel{
 			ID:              m.ID,
 			Name:            m.Name,
 			ContextLength:   m.ContextLength,
 			MaxOutputLength: m.MaxOutputLength,
-			AccessState:     access,
+			AccessState:     schema.AccessUnknown,
 			Pricing:         m.Pricing,
 			Features:        m.SupportedFeatures,
 		})
@@ -132,25 +284,33 @@ func (r *Refresher) refreshModels(result *RefreshResult, now time.Time) {
 		return
 	}
 	result.ModelsRefreshed = true
+	r.resetCircuitBreaker(WorkerModels)
 }
 
-func (r *Refresher) refreshHealth(result *RefreshResult, now time.Time, gs *schema.GlobalState) {
-	// Check circuit breaker
-	if gs != nil {
-		for _, cb := range gs.CircuitBreakers {
-			if cb.Endpoint == "health" && cb.State == schema.CircuitOpen {
-				if cb.NextRetryAt != nil && now.Before(*cb.NextRetryAt) {
-					return // circuit open, skip
-				}
-			}
-		}
-	}
-
-	health, err := r.Client.GetHealth(r.HealthURL)
+func (r *Refresher) refreshHealth(result *RefreshResult, now time.Time) {
+	// FI_HEALTH_URL comes straight from the environment, so treat it as
+	// untrusted: enforce the canonical FreeInference-origin allowlist and
+	// strip the API key from the request. Only the sanitized origin is
+	// persisted to disk.
+	health, err := r.Client.GetHealthFromTrusted(r.HealthURL, api.HealthURLOrigins)
 	if err != nil {
-		r.recordFailure("health", now)
+		r.recordFailure(WorkerHealth, err, now)
 		result.Error = "health fetch failed"
 		return
+	}
+
+	// Persist only the sanitized origin so userinfo, query-string secrets, or
+	// fragments in a misconfigured FI_HEALTH_URL never land on disk.
+	sanitized, sanitizeErr := api.NormalizeHealthURL(r.HealthURL)
+	source := ""
+	if sanitizeErr == nil {
+		source = sanitized.Origin
+	} else {
+		// NormalizeHealthURL rejected the URL — keep the field empty rather
+		// than persisting a value that may carry a credential. The fetch
+		// itself would have failed above in that case, so this branch is
+		// defensive only.
+		source = ""
 	}
 
 	cache := &schema.HealthCache{
@@ -158,19 +318,19 @@ func (r *Refresher) refreshHealth(result *RefreshResult, now time.Time, gs *sche
 		Status:         health.Status,
 		HealthyCount:   &health.Healthy,
 		UnhealthyCount: &health.Unhealthy,
-		Source:         r.HealthURL,
+		Source:         source,
 	}
 	if err := state.SaveHealth(r.Paths, cache); err != nil {
 		result.Error = "save health"
 		return
 	}
 	result.HealthRefreshed = true
-
-	// Reset circuit breaker on success
-	r.resetCircuitBreaker("health")
+	r.resetCircuitBreaker(WorkerHealth)
 }
 
-func (r *Refresher) recordFailure(endpoint string, now time.Time) {
+// recordFailure opens the circuit breaker with escalating backoff.
+// A server-supplied Retry-After overrides the computed backoff.
+func (r *Refresher) recordFailure(endpoint string, cause error, now time.Time) {
 	gs, err := state.LoadGlobal(r.Paths)
 	if err != nil {
 		return
@@ -181,18 +341,25 @@ func (r *Refresher) recordFailure(endpoint string, now time.Time) {
 	cb.LastFailureAt = &now
 	cb.State = schema.CircuitOpen
 
-	// Calculate backoff
-	idx := cb.FailureCount - 1
-	if idx >= len(backoffIntervals) {
-		idx = len(backoffIntervals) - 1
+	interval := time.Duration(0)
+	var he *api.HTTPError
+	if errors.As(cause, &he) && he.RetryAfter > 0 {
+		interval = he.RetryAfter
+	} else {
+		idx := cb.FailureCount - 1
+		if idx >= len(backoffIntervals) {
+			idx = len(backoffIntervals) - 1
+		}
+		if idx < 0 {
+			idx = 0
+		}
+		interval = backoffIntervals[idx]
 	}
-	interval := backoffIntervals[idx]
-	interval = addJitter(interval)
 
 	nextRetry := now.Add(interval)
 	cb.NextRetryAt = &nextRetry
 
-	state.SaveCircuitBreakers(r.Paths, gs.CircuitBreakers)
+	_ = state.SaveCircuitBreakers(r.Paths, gs.CircuitBreakers)
 }
 
 func (r *Refresher) resetCircuitBreaker(endpoint string) {
@@ -200,7 +367,6 @@ func (r *Refresher) resetCircuitBreaker(endpoint string) {
 	if err != nil {
 		return
 	}
-
 	for i := range gs.CircuitBreakers {
 		if gs.CircuitBreakers[i].Endpoint == endpoint {
 			gs.CircuitBreakers[i].State = schema.CircuitClosed
@@ -209,23 +375,7 @@ func (r *Refresher) resetCircuitBreaker(endpoint string) {
 			gs.CircuitBreakers[i].NextRetryAt = nil
 		}
 	}
-	state.SaveCircuitBreakers(r.Paths, gs.CircuitBreakers)
-}
-
-func (r *Refresher) tryStartRefresh(name string) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.refreshing[name] {
-		return false
-	}
-	r.refreshing[name] = true
-	return true
-}
-
-func (r *Refresher) endRefresh(name string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	delete(r.refreshing, name)
+	_ = state.SaveCircuitBreakers(r.Paths, gs.CircuitBreakers)
 }
 
 func findOrCreateCB(cbs *[]schema.CircuitBreaker, endpoint string) *schema.CircuitBreaker {
@@ -239,24 +389,4 @@ func findOrCreateCB(cbs *[]schema.CircuitBreaker, endpoint string) *schema.Circu
 		State:    schema.CircuitClosed,
 	})
 	return &(*cbs)[len(*cbs)-1]
-}
-
-func shouldRefresh(cache interface{}, ttl time.Duration, now time.Time) bool {
-	switch v := cache.(type) {
-	case *schema.ModelsCache:
-		return v == nil || now.Sub(v.FetchedAt) > ttl
-	case *schema.HealthCache:
-		return v == nil || now.Sub(v.FetchedAt) > ttl
-	default:
-		return true
-	}
-}
-
-func addJitter(d time.Duration) time.Duration {
-	if jitterPercent <= 0 {
-		return d
-	}
-	jitter := time.Duration(float64(d) * jitterPercent)
-	offset := time.Duration(rand.Int63n(int64(jitter*2))) - jitter
-	return d + offset
 }

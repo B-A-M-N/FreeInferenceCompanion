@@ -7,9 +7,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "fi hook claude SessionStart",
-            "timeout": 5,
-            "async": true
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/run-hook.sh\" SessionStart",
+            "timeout": 5
           }
         ]
       }
@@ -20,9 +19,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "fi hook claude SessionEnd",
-            "timeout": 5,
-            "async": true
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/run-hook.sh\" SessionEnd",
+            "timeout": 5
           }
         ]
       }
@@ -33,7 +31,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "fi hook claude UserPromptSubmit",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/run-hook.sh\" UserPromptSubmit",
             "timeout": 5
           }
         ]
@@ -45,9 +43,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "fi hook claude PreCompact",
-            "timeout": 5,
-            "async": true
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/run-hook.sh\" PreCompact",
+            "timeout": 5
           }
         ]
       }
@@ -58,9 +55,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "fi hook claude PostCompact",
-            "timeout": 5,
-            "async": true
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/run-hook.sh\" PostCompact",
+            "timeout": 5
           }
         ]
       }
@@ -71,9 +67,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "fi hook claude Stop",
-            "timeout": 5,
-            "async": true
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/run-hook.sh\" Stop",
+            "timeout": 5
           }
         ]
       }
@@ -84,7 +79,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "fi hook claude StopFailure",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/run-hook.sh\" StopFailure",
             "timeout": 5
           }
         ]

@@ -4,11 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
-	"github.com/bamn/freeinference-companion/internal/engine"
-	"github.com/bamn/freeinference-companion/internal/state"
-	"github.com/bamn/freeinference-companion/pkg/schema"
+	"github.com/b-a-m-n/freeinference-companion/internal/state"
+	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
 
 // CodexAdapter handles Codex-specific integration logic.
@@ -21,35 +21,23 @@ func NewCodexAdapter(paths state.Paths) *CodexAdapter {
 	return &CodexAdapter{Paths: paths}
 }
 
-// ParseHookEvent reads and parses a Codex hook event from stdin.
-func (a *CodexAdapter) ParseHookEvent(r io.Reader) (*schema.CodexHookEvent, error) {
-	var event schema.CodexHookEvent
-	if err := json.NewDecoder(r).Decode(&event); err != nil {
+// ParseHookInput reads and parses a flat Codex hook event from stdin.
+func (a *CodexAdapter) ParseHookInput(r io.Reader) (*schema.CodexHookInput, error) {
+	var input schema.CodexHookInput
+	if err := json.NewDecoder(r).Decode(&input); err != nil {
 		return nil, fmt.Errorf("parse codex hook event: %w", err)
 	}
-	return &event, nil
+	return &input, nil
 }
 
-// HandleSessionStart initializes a new Codex session.
-func (a *CodexAdapter) HandleSessionStart(event *schema.CodexHookEvent) error {
-	sessionID := event.Payload.SessionID
-	if sessionID == "" {
-		sessionID = fmt.Sprintf("sess_%d", time.Now().UnixNano())
+// newCodexSnapshot builds a fresh snapshot for a newly seen Codex session.
+func newCodexSnapshot(sessionID, modelID string, now time.Time) *schema.Snapshot {
+	if modelID == "" {
+		modelID = "unknown"
 	}
-
-	now := time.Now().UTC()
-	modelID := "unknown"
-	if event.Payload.Model != nil {
-		modelID = *event.Payload.Model
-	}
-	ctxLen := int64(200000)
-	if event.Payload.ContextLength != nil {
-		ctxLen = *event.Payload.ContextLength
-	}
-
-	snap := &schema.Snapshot{
+	return &schema.Snapshot{
 		SchemaVersion: schema.StateVersion,
-		PluginVersion: "0.1.0",
+		PluginVersion: PluginVersion,
 		Client: schema.ClientInfo{
 			Type: schema.ClientCodex,
 		},
@@ -59,148 +47,240 @@ func (a *CodexAdapter) HandleSessionStart(event *schema.CodexHookEvent) error {
 			LastEventAt: now,
 			Status:      schema.SessionActive,
 		},
+		Provider: DetectProvider().ToProviderInfo(),
 		Model: schema.ModelInfo{
-			ID:              modelID,
-			Provider:        "freeinference",
-			ContextLength:   int(ctxLen),
-			MaxOutputTokens: int(ctxLen) / 2,
-			MetadataSource:  "client_hook",
-			AccessState:     schema.AccessUnknown,
+			ID:             modelID,
+			MetadataSource: "client_hook",
+			AccessState:    schema.AccessUnknown,
 		},
 		Pressure: schema.PressureState{
-			State:                schema.PressureUnknown,
-			PreviousState:        schema.PressureUnknown,
-			ProjectionConfidence: engine.ProjectionConfidenceLow,
-			ChangedAt:            now,
+			State:     schema.PressureUnknown,
+			ChangedAt: now,
 		},
 		Activity: schema.ActivityState{
 			Confidence: schema.ConfidenceClientLifecycle,
 		},
 	}
-
-	return state.SaveSnapshot(a.Paths, schema.ClientCodex, sessionID, snap)
 }
 
-// HandleUserPromptSubmit processes a prompt submission and generates Codex warnings.
-// Codex output format: {"continue":true,"systemMessage":"..."} (no suppressOutput)
-func (a *CodexAdapter) HandleUserPromptSubmit(event *schema.CodexHookEvent, sessionID string) (out *schema.CodexWarningOutput, err error) {
-	snap, err := state.LoadSnapshot(a.Paths, schema.ClientCodex, sessionID)
-	if err != nil || snap == nil {
-		return &schema.CodexWarningOutput{Continue: true}, nil
+// HandleSessionStart initializes a new Codex session.
+// Codex does not provide context window size from hooks — it stays null.
+func (a *CodexAdapter) HandleSessionStart(input *schema.CodexHookInput) error {
+	sessionID := input.SessionID
+	if sessionID == "" {
+		return nil
 	}
-
 	now := time.Now().UTC()
-
-	// Estimate prompt length
-	var estimatedPrompt int64
-	if event.Payload.Prompt != nil {
-		estimatedPrompt = int64(len(*event.Payload.Prompt) / 4)
+	provider := DetectProvider()
+	err := state.UpdateSnapshot(a.Paths, schema.ClientCodex, sessionID,
+		func() *schema.Snapshot {
+			return newCodexSnapshot(sessionID, input.Model, now)
+		},
+		func(snap *schema.Snapshot) error {
+			snap.Session.Status = schema.SessionActive
+			snap.Session.LastEventAt = now
+			snap.Session.EndedAt = nil
+			snap.Provider = provider.ToProviderInfo()
+			if input.Model != "" && (snap.Model.ID == "" || snap.Model.ID == "unknown") {
+				snap.Model.ID = input.Model
+				snap.Model.MetadataSource = "client_hook"
+			}
+			return nil
+		})
+	if err == nil {
+		appendCodexEvent(a.Paths, sessionID,
+			state.Event{Type: state.EventSessionStarted, Model: input.Model, Provider: provider.Name})
 	}
+	return err
+}
 
-	// Compute projected context
-	currentTokens := int64(0)
-	if snap.LiveContext != nil && snap.LiveContext.FreshInputTokens != nil {
-		currentTokens = *snap.LiveContext.FreshInputTokens
+// HandleUserPromptSubmit activates the turn for a Codex session.
+// Codex hooks expose no live token/context snapshot, so no context or cache
+// warnings are ever generated — returns (nil, nil), producing no stdout.
+func (a *CodexAdapter) HandleUserPromptSubmit(input *schema.CodexHookInput, sessionID string) (*schema.CodexWarningOutput, error) {
+	if sessionID == "" {
+		return nil, nil
 	}
-
-	proj := engine.EstimateProjectedContext(
-		currentTokens,
-		int64(snap.Model.ContextLength),
-		estimatedPrompt,
-		engine.DefaultOutputReserve,
-	)
-
-	// Build warnings (same logic, different output format)
-	var warnings []string
-	if proj.ProjectedPercent > 95 && proj.Confidence != engine.ProjectionConfidenceLow {
-		warnings = append(warnings, engine.BuildProjectedOverflowWarning(proj))
+	now := time.Now().UTC()
+	err := state.UpdateSnapshot(a.Paths, schema.ClientCodex, sessionID,
+		func() *schema.Snapshot {
+			return newCodexSnapshot(sessionID, "", now)
+		},
+		func(snap *schema.Snapshot) error {
+			active := true
+			snap.Activity.TurnActive = &active
+			snap.Activity.TurnStartedAt = &now
+			snap.Session.Status = schema.SessionActive
+			snap.Session.LastEventAt = now
+			return nil
+		})
+	if err != nil {
+		return nil, nil
 	}
-	if snap.Pressure.State == schema.PressureCritical || snap.Pressure.State == schema.PressureWarn {
-		usedPct := 0.0
-		if snap.LiveContext != nil && snap.LiveContext.UsedPercentage != nil {
-			usedPct = *snap.LiveContext.UsedPercentage
-		}
-		msg := engine.BuildContextWarning(usedPct, proj.ProjectedPercent, snap.Model.ID, int64(snap.Model.ContextLength))
-		warnings = append(warnings, msg)
-	}
-
-	if len(warnings) > 0 {
-		out = &schema.CodexWarningOutput{
-			Continue:      true,
-			SystemMessage: warnings[0],
-		}
-	} else {
-		out = &schema.CodexWarningOutput{Continue: true}
-	}
-
-	// Store projection
-	pct := proj.ProjectedPercent
-	snap.Pressure.ProjectedPercentage = &pct
-	snap.Pressure.ProjectionConfidence = proj.Confidence
-	snap.Session.LastEventAt = now
-	state.SaveSnapshot(a.Paths, schema.ClientCodex, sessionID, snap)
-	return out, nil
+	appendCodexEvent(a.Paths, sessionID, state.Event{Type: state.EventPromptSubmitted})
+	return nil, nil
 }
 
 // HandleSessionEnd marks a Codex session as completed.
 func (a *CodexAdapter) HandleSessionEnd(sessionID string) error {
-	snap, err := state.LoadSnapshot(a.Paths, schema.ClientCodex, sessionID)
-	if err != nil || snap == nil {
-		return nil // fail open
+	if sessionID == "" {
+		return nil
 	}
 	now := time.Now().UTC()
-	snap.Session.Status = schema.SessionCompleted
-	snap.Session.LastEventAt = now
-	snap.Activity.TurnActive = false
-	return state.SaveSnapshot(a.Paths, schema.ClientCodex, sessionID, snap)
+	err := state.UpdateSnapshot(a.Paths, schema.ClientCodex, sessionID, nil,
+		func(snap *schema.Snapshot) error {
+			inactive := false
+			snap.Session.Status = schema.SessionCompleted
+			snap.Session.EndedAt = &now
+			snap.Session.LastEventAt = now
+			snap.Activity.TurnActive = &inactive
+			return nil
+		})
+	if err == nil {
+		appendCodexEvent(a.Paths, sessionID, state.Event{Type: state.EventSessionEnded})
+	}
+	return err
 }
 
-// HandleStop marks a Codex session as stopped.
+// HandleStop marks the turn as inactive without ending the session.
 func (a *CodexAdapter) HandleStop(sessionID string) error {
-	snap, err := state.LoadSnapshot(a.Paths, schema.ClientCodex, sessionID)
-	if err != nil || snap == nil {
-		return nil // fail open
-	}
-	now := time.Now().UTC()
-	snap.Session.Status = schema.SessionStopped
-	snap.Session.LastEventAt = now
-	snap.Activity.TurnActive = false
-	return state.SaveSnapshot(a.Paths, schema.ClientCodex, sessionID, snap)
-}
-
-// HandlePreCompact records pre-compaction state.
-func (a *CodexAdapter) HandlePreCompact(sessionID string) error {
-	snap, err := state.LoadSnapshot(a.Paths, schema.ClientCodex, sessionID)
-	if err != nil || snap == nil {
-		return nil
-	}
-	snap.Compaction.Pending = true
-	snap.Session.LastEventAt = time.Now().UTC()
-	return state.SaveSnapshot(a.Paths, schema.ClientCodex, sessionID, snap)
-}
-
-// HandlePostCompact records post-compaction metrics.
-func (a *CodexAdapter) HandlePostCompact(sessionID string) error {
-	snap, err := state.LoadSnapshot(a.Paths, schema.ClientCodex, sessionID)
-	if err != nil || snap == nil {
+	if sessionID == "" {
 		return nil
 	}
 	now := time.Now().UTC()
-	if snap.Compaction.Pending && snap.LiveContext != nil && snap.LiveContext.FreshInputTokens != nil {
-		postTokens := *snap.LiveContext.FreshInputTokens
-		reductionPct := engine.ComputeCompactionReduction(0, postTokens)
-		snap.Compaction.LastResult = &schema.CompactionResult{
-			At:           now,
-			PostTokens:   &postTokens,
-			ReductionPct: &reductionPct,
+	err := state.UpdateSnapshot(a.Paths, schema.ClientCodex, sessionID, nil,
+		func(snap *schema.Snapshot) error {
+			inactive := false
+			snap.Activity.TurnActive = &inactive
+			snap.Activity.TurnEndedAt = &now
+			snap.Session.LastEventAt = now
+			return nil
+		})
+	if err == nil {
+		appendCodexEvent(a.Paths, sessionID, state.Event{Type: state.EventTurnStopped})
+	}
+	return err
+}
+
+// HandlePreCompact records that compaction started. Codex provides no token
+// snapshot, so no pre-compaction token count is stored.
+func (a *CodexAdapter) HandlePreCompact(input *schema.CodexHookInput, sessionID string) error {
+	if sessionID == "" {
+		return nil
+	}
+	now := time.Now().UTC()
+	err := state.UpdateSnapshot(a.Paths, schema.ClientCodex, sessionID, nil,
+		func(snap *schema.Snapshot) error {
+			snap.Compaction.Pending = true
+			snap.Compaction.InitiatedAt = &now
+			if input != nil && input.Trigger != "" {
+				trigger := input.Trigger
+				snap.Compaction.Trigger = &trigger
+			}
+			snap.Session.LastEventAt = now
+			return nil
+		})
+	if err == nil {
+		trigger := ""
+		if input != nil {
+			trigger = input.Trigger
 		}
+		appendCodexEvent(a.Paths, sessionID, state.Event{Type: state.EventCompactionStarted, Detail: trigger})
 	}
-	snap.Compaction.Pending = false
-	snap.Session.LastEventAt = now
-	return state.SaveSnapshot(a.Paths, schema.ClientCodex, sessionID, snap)
+	return err
 }
 
-// MarshalWarningJSON serializes a CodexWarningOutput to JSON.
+// HandlePostCompact records that compaction occurred. Codex has no token
+// telemetry, so no reduction percentage is ever reported.
+func (a *CodexAdapter) HandlePostCompact(input *schema.CodexHookInput, sessionID string) error {
+	if sessionID == "" {
+		return nil
+	}
+	now := time.Now().UTC()
+	err := state.UpdateSnapshot(a.Paths, schema.ClientCodex, sessionID, nil,
+		func(snap *schema.Snapshot) error {
+			trigger := ""
+			if snap.Compaction.Trigger != nil {
+				trigger = *snap.Compaction.Trigger
+			}
+			if input != nil && input.Trigger != "" {
+				trigger = input.Trigger
+			}
+			snap.Compaction.Pending = false
+			snap.Compaction.AwaitingPostObservation = false
+			snap.Compaction.LastResult = &schema.CompactionResult{
+				At:      now,
+				Trigger: trigger,
+			}
+			snap.Session.LastEventAt = now
+			return nil
+		})
+	if err == nil {
+		appendCodexEvent(a.Paths, sessionID, state.Event{Type: state.EventCompactionCompleted})
+	}
+	return err
+}
+
+// HandleStopFailure records a structured failure from the StopFailure hook.
+// The raw reason text is never persisted — only a sanitized category.
+func (a *CodexAdapter) HandleStopFailure(input *schema.CodexHookInput, sessionID string) error {
+	if sessionID == "" || input.Reason == "" {
+		return nil
+	}
+	category := sanitizeCodexFailureCategory(input.Reason)
+	now := time.Now().UTC()
+	err := state.UpdateSnapshot(a.Paths, schema.ClientCodex, sessionID, nil,
+		func(snap *schema.Snapshot) error {
+			inactive := false
+			snap.Activity.TurnActive = &inactive
+			snap.Activity.TurnEndedAt = &now
+			snap.LastFailure = &schema.FailureRecord{
+				Category:   category,
+				ObservedAt: now,
+				Source:     "codex_stop_failure",
+			}
+			snap.Session.LastEventAt = now
+			return nil
+		})
+	if err == nil {
+		appendCodexEvent(a.Paths, sessionID, state.Event{Type: state.EventTurnFailed, Detail: category})
+	}
+	return err
+}
+
+// MarshalCodexWarning serializes a CodexWarningOutput to JSON.
 func MarshalCodexWarning(w *schema.CodexWarningOutput) ([]byte, error) {
 	return json.Marshal(w)
+}
+
+// appendCodexEvent is the codex-side mirror of appendEventBestEffort.
+// It swallows all errors so event logging never blocks the client.
+func appendCodexEvent(paths state.Paths, sessionID string, ev state.Event) {
+	_ = paths.EnsureSessionDir(schema.ClientCodex, sessionID)
+	_ = state.AppendEvent(paths, schema.ClientCodex, sessionID, ev)
+	_ = state.RotateEvents(paths, schema.ClientCodex, sessionID)
+}
+
+// sanitizeCodexFailureCategory collapses a raw failure reason into a short,
+// shareable category. Same scheme as the Claude adapter so reports are
+// consistent across clients.
+func sanitizeCodexFailureCategory(raw string) string {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	switch {
+	case strings.Contains(raw, "rate") && strings.Contains(raw, "limit"):
+		return "rate_limit"
+	case strings.Contains(raw, "overload"):
+		return "overloaded"
+	case strings.Contains(raw, "auth") || strings.Contains(raw, "unauthor") || strings.Contains(raw, "api key"):
+		return "authentication_failed"
+	case strings.Contains(raw, "not found") || strings.Contains(raw, "model_not_found"):
+		return "model_not_found"
+	case strings.Contains(raw, "max_output") || strings.Contains(raw, "max tokens"):
+		return "max_output_tokens"
+	case strings.Contains(raw, "invalid"):
+		return "invalid_request"
+	case strings.Contains(raw, "server") || strings.Contains(raw, "503") || strings.Contains(raw, "500"):
+		return "server_error"
+	}
+	return "unknown"
 }

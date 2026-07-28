@@ -1,20 +1,20 @@
 ---
 name: fi-dashboard
-description: This skill opens the FreeInference service status dashboard in the default web browser. Use when the user wants to see real-time provider status, model availability, latency graphs, or the FreeInference health overview page.
-argument-hint: no arguments
+description: This skill opens the FreeInference service status dashboard in the default web browser. Use when the user wants to see real-time provider status, model availability, latency graphs, or the FreeInference health overview page. Community-built and unofficial. Not affiliated with or endorsed by FreeInference.
+argument-hint: "no arguments"
 allowed-tools: Bash
 ---
 
 # FreeInference Dashboard
 
-Open the FreeInference model status dashboard in the default web browser.
+Open the FreeInference model status dashboard in the default web browser. Community-built and unofficial. Not affiliated with or endorsed by FreeInference.
 
 ## Usage
 
 Run `fi dashboard` to open:
 
 ```
-https://status.staging.freeinference.org/
+https://status.freeinference.org/
 ```
 
 The dashboard shows:

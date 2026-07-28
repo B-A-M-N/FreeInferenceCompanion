@@ -4,13 +4,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
+	"strings"
 	"time"
 
-	"github.com/bamn/freeinference-companion/internal/engine"
-	"github.com/bamn/freeinference-companion/internal/state"
-	"github.com/bamn/freeinference-companion/pkg/schema"
+	"github.com/b-a-m-n/freeinference-companion/internal/engine"
+	"github.com/b-a-m-n/freeinference-companion/internal/secure"
+	"github.com/b-a-m-n/freeinference-companion/internal/state"
+	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
+
+// PluginVersion is stamped onto new snapshots.
+const PluginVersion = "0.1.0"
 
 // ClaudeAdapter handles Claude Code-specific integration logic.
 type ClaudeAdapter struct {
@@ -31,35 +35,23 @@ func (a *ClaudeAdapter) ParseStatusLineInput(r io.Reader) (*schema.ClaudeStatusL
 	return &input, nil
 }
 
-// ParseHookEvent reads and parses a Claude hook event from stdin.
-func (a *ClaudeAdapter) ParseHookEvent(r io.Reader) (*schema.ClaudeHookEvent, error) {
-	var event schema.ClaudeHookEvent
-	if err := json.NewDecoder(r).Decode(&event); err != nil {
+// ParseHookInput reads and parses a flat Claude hook event from stdin.
+func (a *ClaudeAdapter) ParseHookInput(r io.Reader) (*schema.ClaudeHookInput, error) {
+	var input schema.ClaudeHookInput
+	if err := json.NewDecoder(r).Decode(&input); err != nil {
 		return nil, fmt.Errorf("parse hook event: %w", err)
 	}
-	return &event, nil
+	return &input, nil
 }
 
-// HandleSessionStart initializes a new session state.
-func (a *ClaudeAdapter) HandleSessionStart(event *schema.ClaudeHookEvent) error {
-	sessionID := event.Payload.SessionID
-	if sessionID == "" {
-		sessionID = fmt.Sprintf("sess_%d", time.Now().UnixNano())
+// newClaudeSnapshot builds a fresh snapshot for a newly seen session.
+func newClaudeSnapshot(sessionID, modelID string, now time.Time) *schema.Snapshot {
+	if modelID == "" {
+		modelID = "unknown"
 	}
-
-	now := time.Now().UTC()
-	modelID := "unknown"
-	if event.Payload.Model != nil {
-		modelID = *event.Payload.Model
-	}
-	ctxLen := 200000
-	if event.Payload.ContextLength != nil {
-		ctxLen = *event.Payload.ContextLength
-	}
-
-	snap := &schema.Snapshot{
+	return &schema.Snapshot{
 		SchemaVersion: schema.StateVersion,
-		PluginVersion: "0.1.0",
+		PluginVersion: PluginVersion,
 		Client: schema.ClientInfo{
 			Type: schema.ClientClaudeCode,
 		},
@@ -69,323 +61,598 @@ func (a *ClaudeAdapter) HandleSessionStart(event *schema.ClaudeHookEvent) error 
 			LastEventAt: now,
 			Status:      schema.SessionActive,
 		},
+		Provider: DetectProvider().ToProviderInfo(),
 		Model: schema.ModelInfo{
-			ID:              modelID,
-			Provider:        "freeinference",
-			ContextLength:   ctxLen,
-			MaxOutputTokens: ctxLen / 2, // conservative default
-			MetadataSource:  "client_statusline",
-			AccessState:     schema.AccessUnknown,
+			ID:             modelID,
+			MetadataSource: "client_hook",
+			AccessState:    schema.AccessUnknown,
 		},
 		Pressure: schema.PressureState{
-			State:              schema.PressureUnknown,
-			PreviousState:      schema.PressureUnknown,
-			ProjectionConfidence: engine.ProjectionConfidenceLow,
-			ChangedAt:          now,
+			State:     schema.PressureUnknown,
+			ChangedAt: now,
 		},
 		Activity: schema.ActivityState{
 			Confidence: schema.ConfidenceClientLifecycle,
 		},
-		Compaction: schema.CompactionState{},
 	}
+}
 
-	return state.SaveSnapshot(a.Paths, schema.ClientClaudeCode, sessionID, snap)
+// HandleSessionStart initializes session state. Existing snapshots (which may
+// already carry status-line telemetry) are preserved — only lifecycle fields
+// and provider detection are refreshed.
+func (a *ClaudeAdapter) HandleSessionStart(input *schema.ClaudeHookInput) error {
+	sessionID := input.SessionID
+	if sessionID == "" {
+		return nil
+	}
+	now := time.Now().UTC()
+	provider := DetectProvider()
+
+	err := state.UpdateSnapshot(a.Paths, schema.ClientClaudeCode, sessionID,
+		func() *schema.Snapshot {
+			return newClaudeSnapshot(sessionID, input.Model, now)
+		},
+		func(snap *schema.Snapshot) error {
+			snap.Session.Status = schema.SessionActive
+			snap.Session.LastEventAt = now
+			snap.Session.EndedAt = nil
+			snap.Provider = provider.ToProviderInfo()
+			// Only fill in the model if we don't already know a better one.
+			if input.Model != "" && (snap.Model.ID == "" || snap.Model.ID == "unknown") {
+				snap.Model.ID = input.Model
+				snap.Model.MetadataSource = "client_hook"
+			}
+			return nil
+		})
+	if err == nil {
+		appendEventBestEffort(a.Paths, schema.ClientClaudeCode, sessionID,
+			state.Event{Type: state.EventSessionStarted, Model: input.Model, Provider: provider.Name})
+	}
+	return err
 }
 
 // HandleStatusLineUpdate processes a status line input and updates session state.
-// This is the primary mechanism for updating live context data.
-// IMPORTANT: Does NOT accumulate values — status line may be refreshed multiple times per response.
+// Status line updates upsert the session if it doesn't exist yet (handles the
+// async SessionStart race). Values are never accumulated — each update is one
+// observation of the current context, deduplicated by fingerprint.
 func (a *ClaudeAdapter) HandleStatusLineUpdate(input *schema.ClaudeStatusLineInput, sessionID string) error {
-	snap, err := state.LoadSnapshot(a.Paths, schema.ClientClaudeCode, sessionID)
-	if err != nil || snap == nil {
-		return fmt.Errorf("no session to update")
-	}
-
-	now := time.Now().UTC()
-
-	// Update model info from status line
-	snap.Model.ID = input.Model.ID
-	if input.ContextWindow.ContextWindowSize > 0 {
-		snap.Model.ContextLength = int(input.ContextWindow.ContextWindowSize)
-	}
-
-	// Update live context snapshot (NOT cumulative — single observation)
-	freshInput := input.ContextWindow.CurrentUsage.InputTokens
-	cacheRead := input.ContextWindow.CurrentUsage.CacheReadInputTokens
-	cacheCreate := input.ContextWindow.CurrentUsage.CacheCreationInputTokens
-	output := input.ContextWindow.CurrentUsage.OutputTokens
-	usedPct := input.ContextWindow.UsedPercentage
-	ctxSize := input.ContextWindow.ContextWindowSize
-
-	snap.LiveContext = &schema.LiveContext{
-		Source:                   "claude_statusline",
-		ObservedAt:               now,
-		FreshInputTokens:         &freshInput,
-		CacheCreationInputTokens: &cacheCreate,
-		CacheReadInputTokens:     &cacheRead,
-		OutputTokens:             &output,
-		ContextWindowSize:        &ctxSize,
-		UsedPercentage:           &usedPct,
-	}
-
-	// Compute pressure state
-	newState, reason := engine.ClassifyPressure(usedPct, snap.Pressure.State)
-	snap.Pressure.PreviousState = snap.Pressure.State
-	snap.Pressure.State = newState
-	snap.Pressure.Reason = reason
-	snap.Pressure.ChangedAt = now
-
-	// Update session timestamp
-	snap.Session.LastEventAt = now
-
-	return state.SaveSnapshot(a.Paths, schema.ClientClaudeCode, sessionID, snap)
-}
-
-// HandleUserPromptSubmit processes a prompt submission and produces warnings.
-func (a *ClaudeAdapter) HandleUserPromptSubmit(event *schema.ClaudeHookEvent, sessionID string) (out *schema.ClaudeWarningOutput, err error) {
-	snap, err := state.LoadSnapshot(a.Paths, schema.ClientClaudeCode, sessionID)
-	if err != nil || snap == nil {
-		// Fail open — no state, no warning
-		return &schema.ClaudeWarningOutput{Continue: true}, nil
-	}
-
-	now := time.Now().UTC()
-
-	// Estimate prompt length from the prompt text
-	var estimatedPrompt int64
-	if event.Payload.Prompt != nil {
-		estimatedPrompt = estimateTokenCount(*event.Payload.Prompt)
-	}
-
-	// Compute projected context
-	currentTokens := int64(0)
-	if snap.LiveContext != nil && snap.LiveContext.FreshInputTokens != nil {
-		currentTokens = *snap.LiveContext.FreshInputTokens
-	}
-	if snap.LiveContext != nil && snap.LiveContext.CacheReadInputTokens != nil {
-		currentTokens += *snap.LiveContext.CacheReadInputTokens
-	}
-
-	proj := engine.EstimateProjectedContext(
-		currentTokens,
-		int64(snap.Model.ContextLength),
-		estimatedPrompt,
-		engine.DefaultOutputReserve,
-	)
-
-	// Store projection in pressure state
-	pct := proj.ProjectedPercent
-	snap.Pressure.ProjectedPercentage = &pct
-	snap.Pressure.ProjectionConfidence = proj.Confidence
-
-	// Check pressure and build warnings
-	warnings := a.buildWarnings(snap, proj, now)
-	if len(warnings) > 0 {
-		msg := warnings[0] // show the most important warning
-		out = &schema.ClaudeWarningOutput{
-			Continue:       true,
-			SystemMessage:  msg,
-			SuppressOutput: true,
-		}
-	} else {
-		out = &schema.ClaudeWarningOutput{Continue: true}
-	}
-
-	snap.Session.LastEventAt = now
-	state.SaveSnapshot(a.Paths, schema.ClientClaudeCode, sessionID, snap)
-	return out, nil
-}
-
-// HandlePreCompact records pre-compaction state.
-func (a *ClaudeAdapter) HandlePreCompact(sessionID string) error {
-	snap, err := state.LoadSnapshot(a.Paths, schema.ClientClaudeCode, sessionID)
-	if err != nil || snap == nil {
-		return nil // fail open
-	}
-
-	snap.Compaction.Pending = true
-	now := time.Now().UTC()
-	snap.Session.LastEventAt = now
-	return state.SaveSnapshot(a.Paths, schema.ClientClaudeCode, sessionID, snap)
-}
-
-// HandlePostCompact records post-compaction metrics.
-func (a *ClaudeAdapter) HandlePostCompact(sessionID string) error {
-	snap, err := state.LoadSnapshot(a.Paths, schema.ClientClaudeCode, sessionID)
-	if err != nil || snap == nil {
-		return nil // fail open
-	}
-
-	now := time.Now().UTC()
-
-	// If we have a pending compact and live context, calculate reduction
-	if snap.Compaction.Pending && snap.LiveContext != nil && snap.LiveContext.FreshInputTokens != nil {
-		preTokens := int64(0)
-		postTokens := *snap.LiveContext.FreshInputTokens
-
-		reductionPct := engine.ComputeCompactionReduction(preTokens, postTokens)
-		snap.Compaction.LastResult = &schema.CompactionResult{
-			At:           now,
-			PreTokens:    &preTokens,
-			PostTokens:   &postTokens,
-			ReductionPct: &reductionPct,
-		}
-	}
-
-	snap.Compaction.Pending = false
-	snap.Session.LastEventAt = now
-	return state.SaveSnapshot(a.Paths, schema.ClientClaudeCode, sessionID, snap)
-}
-
-// HandleStopFailure records a structured failure from StopFailure hook.
-func (a *ClaudeAdapter) HandleStopFailure(event *schema.ClaudeHookEvent, sessionID string) error {
-	if event.Payload.ErrorCategory == nil {
+	if sessionID == "" {
 		return nil
 	}
+	var sawCompactionCompletion bool
+	err := state.UpdateSnapshot(a.Paths, schema.ClientClaudeCode, sessionID,
+		func() *schema.Snapshot {
+			return newClaudeSnapshot(sessionID, input.Model.ID, time.Now().UTC())
+		},
+		func(snap *schema.Snapshot) error {
+			now := time.Now().UTC()
 
-	snap, err := state.LoadSnapshot(a.Paths, schema.ClientClaudeCode, sessionID)
-	if err != nil || snap == nil {
-		return nil // fail open
+			// Model info from status line (authoritative). The display name
+			// never replaces the model ID.
+			if input.Model.ID != "" {
+				snap.Model.ID = input.Model.ID
+				snap.Model.MetadataSource = "client_statusline"
+			}
+			if input.Model.DisplayName != "" {
+				// The display name is client-controlled and could in theory
+				// carry a value the user pasted with a secret in it. Redact
+				// defensively before persisting.
+				displayName := secure.Redact(input.Model.DisplayName)
+				snap.Model.DisplayName = &displayName
+			}
+			if input.ContextWindow.ContextWindowSize > 0 {
+				size := input.ContextWindow.ContextWindowSize
+				snap.Model.ContextLength = &size
+			}
+
+			snap.Provider = DetectProvider().ToProviderInfo()
+
+			// Latest request usage (may be nil before first response or
+			// immediately after compaction).
+			var latest *schema.RequestUsage
+			if input.ContextWindow.CurrentUsage != nil {
+				cu := input.ContextWindow.CurrentUsage
+				fresh := cu.InputTokens
+				cacheRead := cu.CacheReadInputTokens
+				cacheCreate := cu.CacheCreationInputTokens
+				output := cu.OutputTokens
+				latest = &schema.RequestUsage{
+					FreshInputTokens:         &fresh,
+					CacheCreationInputTokens: &cacheCreate,
+					CacheReadInputTokens:     &cacheRead,
+					OutputTokens:             &output,
+				}
+			}
+
+			var totalInput, totalOutput *int64
+			if input.ContextWindow.TotalInputTokens > 0 {
+				t := input.ContextWindow.TotalInputTokens
+				totalInput = &t
+			}
+			if input.ContextWindow.TotalOutputTokens > 0 {
+				t := input.ContextWindow.TotalOutputTokens
+				totalOutput = &t
+			}
+			var ctxSize *int64
+			if input.ContextWindow.ContextWindowSize > 0 {
+				s := input.ContextWindow.ContextWindowSize
+				ctxSize = &s
+			}
+			usedPct := input.ContextWindow.UsedPercentage
+			var remainingPct *float64
+			if usedPct != nil {
+				r := 100.0 - *usedPct
+				remainingPct = &r
+			}
+
+			snap.LiveContext = &schema.LiveContext{
+				Source:              "claude_statusline",
+				ObservedAt:          now,
+				TotalInputTokens:    totalInput,
+				TotalOutputTokens:   totalOutput,
+				ContextWindowSize:   ctxSize,
+				UsedPercentage:      usedPct,
+				RemainingPercentage: remainingPct,
+				LatestRequest:       latest,
+			}
+
+			// Record a unique usage observation (deduped by fingerprint) and
+			// refresh rolling cache analysis.
+			newObservation := false
+			if latest != nil {
+				obs := schema.UsageObservation{
+					Fingerprint: engine.ObservationFingerprint(
+						snap.Model.ID,
+						deref(totalInput), deref(totalOutput),
+						latest.FreshInputTokens, latest.CacheReadInputTokens,
+						latest.CacheCreationInputTokens, latest.OutputTokens),
+					ObservedAt:               now,
+					ModelID:                  snap.Model.ID,
+					TotalInputTokens:         deref(totalInput),
+					TotalOutputTokens:        deref(totalOutput),
+					FreshInputTokens:         latest.FreshInputTokens,
+					CacheReadInputTokens:     latest.CacheReadInputTokens,
+					CacheCreationInputTokens: latest.CacheCreationInputTokens,
+					OutputTokens:             latest.OutputTokens,
+				}
+				newObservation = engine.AddObservation(snap, obs)
+			}
+			engine.AnalyzeCache(snap, ActiveContextTokens(snap), now)
+
+			// Pressure state from the authoritative used percentage.
+			if usedPct != nil {
+				newState, reason := engine.ClassifyPressure(*usedPct, snap.Pressure.State)
+				if newState != snap.Pressure.State {
+					snap.Pressure.PreviousState = snap.Pressure.State
+					snap.Pressure.ChangedAt = now
+				}
+				snap.Pressure.State = newState
+				snap.Pressure.Reason = reason
+			}
+
+			// Complete a pending compaction measurement on the first changed
+			// observation after PostCompact.
+			if snap.Compaction.AwaitingPostObservation && newObservation {
+				completeCompaction(snap, now)
+				sawCompactionCompletion = true
+			}
+
+			snap.Session.LastEventAt = now
+			return nil
+		})
+	if err == nil {
+		appendEventBestEffort(a.Paths, schema.ClientClaudeCode, sessionID,
+			state.Event{Type: state.EventStatusObserved, Model: input.Model.ID})
+		if sawCompactionCompletion {
+			appendEventBestEffort(a.Paths, schema.ClientClaudeCode, sessionID,
+				state.Event{Type: state.EventCompactionCompleted})
+		}
 	}
+	return err
+}
 
+// completeCompaction calculates the reduction from pre/post context totals.
+func completeCompaction(snap *schema.Snapshot, now time.Time) {
+	snap.Compaction.AwaitingPostObservation = false
+	pre := snap.Compaction.PreTokens
+	post := ActiveContextTokens(snap)
+
+	result := &schema.CompactionResult{
+		At:        now,
+		PreTokens: pre,
+	}
+	if post > 0 {
+		result.PostTokens = &post
+	}
+	if pre != nil && *pre > 0 && post > 0 {
+		reduction := float64(*pre-post) / float64(*pre) * 100
+		result.ReductionPct = &reduction
+	}
+	if snap.Compaction.Trigger != nil {
+		result.Trigger = *snap.Compaction.Trigger
+	}
+	snap.Compaction.LastResult = result
+}
+
+// ActiveContextTokens returns the best estimate of the current active context
+// size in tokens: live totals first, then the latest request's input sum,
+// then used-percentage × window size. Zero means unknown.
+func ActiveContextTokens(snap *schema.Snapshot) int64 {
+	if snap.LiveContext == nil {
+		return 0
+	}
+	lc := snap.LiveContext
+	if lc.TotalInputTokens != nil {
+		total := *lc.TotalInputTokens
+		if lc.TotalOutputTokens != nil {
+			total += *lc.TotalOutputTokens
+		}
+		if total > 0 {
+			return total
+		}
+	}
+	if lc.LatestRequest != nil {
+		var sum int64
+		lr := lc.LatestRequest
+		if lr.FreshInputTokens != nil {
+			sum += *lr.FreshInputTokens
+		}
+		if lr.CacheReadInputTokens != nil {
+			sum += *lr.CacheReadInputTokens
+		}
+		if lr.CacheCreationInputTokens != nil {
+			sum += *lr.CacheCreationInputTokens
+		}
+		if sum > 0 {
+			return sum
+		}
+	}
+	if lc.UsedPercentage != nil && lc.ContextWindowSize != nil {
+		return int64(*lc.UsedPercentage / 100.0 * float64(*lc.ContextWindowSize))
+	}
+	return 0
+}
+
+// HandleUserPromptSubmit activates the turn and produces warnings.
+// Returns (nil, nil) when there is nothing to show — no stdout output.
+func (a *ClaudeAdapter) HandleUserPromptSubmit(input *schema.ClaudeHookInput, sessionID string) (*schema.ClaudeWarningOutput, error) {
+	if sessionID == "" {
+		return nil, nil
+	}
+	var output *schema.ClaudeWarningOutput
+	var warningActive, warningResolved bool
+	var warningDetail string
 	now := time.Now().UTC()
-	snap.LastFailure = &schema.FailureRecord{
-		Category:   *event.Payload.ErrorCategory,
-		ObservedAt: now,
-		Source:     "claude_stop_failure",
+
+	err := state.UpdateSnapshot(a.Paths, schema.ClientClaudeCode, sessionID,
+		func() *schema.Snapshot {
+			return newClaudeSnapshot(sessionID, "", now)
+		},
+		func(snap *schema.Snapshot) error {
+			active := true
+			snap.Activity.TurnActive = &active
+			snap.Activity.TurnStartedAt = &now
+			snap.Session.Status = schema.SessionActive
+			snap.Session.LastEventAt = now
+			snap.Provider = DetectProvider().ToProviderInfo()
+
+			// Never warn during a non-FreeInference session.
+			if !IsConfirmedFreeInference(snap.Provider) {
+				return nil
+			}
+
+			// Context pressure warning (authoritative used percentage).
+			var warningMsg string
+			var severity string
+			if snap.LiveContext != nil && snap.LiveContext.UsedPercentage != nil {
+				usedPct := *snap.LiveContext.UsedPercentage
+				switch {
+				case usedPct >= 90.0:
+					severity = schema.WarningSeverityCritical
+					warningMsg = fmt.Sprintf("FreeInference: context usage is %.0f%% on %s. Compact or start a fresh session.", usedPct, snap.Model.ID)
+				case usedPct >= 80.0:
+					severity = schema.WarningSeverityWarn
+					warningMsg = fmt.Sprintf("FreeInference: context usage is %.0f%% on %s. Consider compacting soon.", usedPct, snap.Model.ID)
+				}
+			}
+			if warningMsg != "" && shouldShowContextWarning(snap, severity, now) {
+				snap.Warnings.ContextSeverity = severity
+				snap.Warnings.LastContextShownAt = &now
+				snap.Warnings.HistoryCount++
+				output = &schema.ClaudeWarningOutput{
+					Continue:       true,
+					SystemMessage:  warningMsg,
+					SuppressOutput: true,
+				}
+				warningActive = true
+				warningDetail = "context:" + severity
+				return nil
+			}
+
+			// Advisory projection warning: estimate the next request's
+			// output budget. This catches "context isn't critical yet, but
+			// the next prompt will leave too little room for the reply" — a
+			// common cause of output-truncation failures that waste tokens.
+			if shouldShowProjectionWarning(snap, now) {
+				projection := engine.ProjectNextRequest(
+					ActiveContextTokens(snap),
+					promptByteSize(input),
+					snap.Model.ContextLength,
+					engine.DefaultOutputReserve,
+				)
+				if proj := projection.AdvisoryMessage(); proj != "" {
+					snap.Warnings.ContextSeverity = "projection_overflow"
+					snap.Warnings.LastContextShownAt = &now
+					snap.Warnings.HistoryCount++
+					output = &schema.ClaudeWarningOutput{
+						Continue:       true,
+						SystemMessage:  proj,
+						SuppressOutput: true,
+					}
+					warningActive = true
+					warningDetail = "projection_overflow"
+					return nil
+				}
+			}
+
+			// Rolling cache-low warning.
+			decision := engine.QualifyCacheWarning(snap, ActiveContextTokens(snap), true, now)
+			switch {
+			case decision.Warn:
+				share := 0.0
+				if decision.Share != nil {
+					share = *decision.Share
+				}
+				snap.Warnings.CacheLowActive = true
+				snap.Warnings.LastCacheShownAt = &now
+				snap.Warnings.HistoryCount++
+				output = &schema.ClaudeWarningOutput{
+					Continue: true,
+					SystemMessage: fmt.Sprintf(
+						"FreeInference: cache reuse is low (read share %.0f%% over recent requests). Repeated full-context re-reads increase latency and cost.",
+						share*100),
+					SuppressOutput: true,
+				}
+				warningActive = true
+				warningDetail = "cache_low"
+			case decision.Resolved:
+				snap.Warnings.CacheLowActive = false
+				warningResolved = true
+			}
+			return nil
+		})
+
+	if err != nil {
+		// Fail open — hooks must never block the client.
+		return nil, nil
 	}
-	snap.Session.LastEventAt = now
-	return state.SaveSnapshot(a.Paths, schema.ClientClaudeCode, sessionID, snap)
+	appendEventBestEffort(a.Paths, schema.ClientClaudeCode, sessionID,
+		state.Event{Type: state.EventPromptSubmitted})
+	if warningActive {
+		appendEventBestEffort(a.Paths, schema.ClientClaudeCode, sessionID,
+			state.Event{Type: state.EventWarningShown, Detail: warningDetail})
+	}
+	if warningResolved {
+		appendEventBestEffort(a.Paths, schema.ClientClaudeCode, sessionID,
+			state.Event{Type: state.EventWarningResolved})
+	}
+	return output, nil
+}
+
+// promptByteSize returns the byte length of the incoming prompt, or 0 if
+// unavailable. The prompt itself is never persisted — only its size enters
+// the local projection math.
+func promptByteSize(input *schema.ClaudeHookInput) int {
+	if input == nil {
+		return 0
+	}
+	return len(input.Prompt)
+}
+
+// shouldShowProjectionWarning gates projection warnings on the same cooldown
+// as context warnings so the user is not nagged on every prompt. Projection
+// is suppressed entirely below the watch threshold — there is no value in
+// warning about output reserve when context is comfortably empty.
+func shouldShowProjectionWarning(snap *schema.Snapshot, now time.Time) bool {
+	if snap.LiveContext == nil || snap.LiveContext.UsedPercentage == nil {
+		return false
+	}
+	if *snap.LiveContext.UsedPercentage < 60.0 {
+		return false
+	}
+	if snap.Warnings.LastContextShownAt != nil &&
+		now.Sub(*snap.Warnings.LastContextShownAt) < engine.ContextWarningCooldown {
+		// Already showed a context-family warning recently — give the user
+		// time to act before re-flagging.
+		return false
+	}
+	return true
+}
+
+// shouldShowContextWarning determines if a context warning should be shown
+// based on cooldown and severity escalation.
+func shouldShowContextWarning(snap *schema.Snapshot, severity string, now time.Time) bool {
+	if snap.Warnings.LastContextShownAt == nil {
+		return true
+	}
+	if severityOrder(severity) > severityOrder(snap.Warnings.ContextSeverity) {
+		return true
+	}
+	return now.Sub(*snap.Warnings.LastContextShownAt) >= engine.ContextWarningCooldown
+}
+
+func severityOrder(s string) int {
+	switch s {
+	case schema.WarningSeverityCritical:
+		return 3
+	case schema.WarningSeverityWarn:
+		return 2
+	case schema.WarningSeverityWatch:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// HandlePreCompact records pre-compaction state: the active context total,
+// the hook trigger, and the initiation time.
+func (a *ClaudeAdapter) HandlePreCompact(input *schema.ClaudeHookInput, sessionID string) error {
+	if sessionID == "" {
+		return nil
+	}
+	now := time.Now().UTC()
+	err := state.UpdateSnapshot(a.Paths, schema.ClientClaudeCode, sessionID, nil,
+		func(snap *schema.Snapshot) error {
+			snap.Compaction.Pending = true
+			snap.Compaction.InitiatedAt = &now
+			if input != nil && input.Trigger != "" {
+				trigger := input.Trigger
+				snap.Compaction.Trigger = &trigger
+			}
+			if pre := ActiveContextTokens(snap); pre > 0 {
+				snap.Compaction.PreTokens = &pre
+			}
+			snap.Session.LastEventAt = now
+			return nil
+		})
+	if err == nil {
+		trigger := ""
+		if input != nil {
+			trigger = input.Trigger
+		}
+		appendEventBestEffort(a.Paths, schema.ClientClaudeCode, sessionID,
+			state.Event{Type: state.EventCompactionStarted, Detail: trigger})
+	}
+	return err
+}
+
+// HandlePostCompact marks compaction as awaiting the next changed status-line
+// observation, which completes the reduction calculation.
+func (a *ClaudeAdapter) HandlePostCompact(input *schema.ClaudeHookInput, sessionID string) error {
+	if sessionID == "" {
+		return nil
+	}
+	now := time.Now().UTC()
+	return state.UpdateSnapshot(a.Paths, schema.ClientClaudeCode, sessionID, nil,
+		func(snap *schema.Snapshot) error {
+			snap.Compaction.Pending = false
+			if snap.Compaction.PreTokens != nil {
+				snap.Compaction.AwaitingPostObservation = true
+			}
+			if input != nil && input.Trigger != "" && snap.Compaction.Trigger == nil {
+				trigger := input.Trigger
+				snap.Compaction.Trigger = &trigger
+			}
+			snap.Session.LastEventAt = now
+			return nil
+		})
+}
+
+// HandleStopFailure records a structured failure from the StopFailure hook.
+func (a *ClaudeAdapter) HandleStopFailure(input *schema.ClaudeHookInput, sessionID string) error {
+	if sessionID == "" || input.Error == "" {
+		return nil
+	}
+	category := sanitizeFailureCategory(input.Error)
+	now := time.Now().UTC()
+	err := state.UpdateSnapshot(a.Paths, schema.ClientClaudeCode, sessionID, nil,
+		func(snap *schema.Snapshot) error {
+			inactive := false
+			snap.Activity.TurnActive = &inactive
+			snap.Activity.TurnEndedAt = &now
+			snap.LastFailure = &schema.FailureRecord{
+				Category:   category,
+				ObservedAt: now,
+				Source:     "claude_stop_failure",
+			}
+			snap.Session.LastEventAt = now
+			return nil
+		})
+	if err == nil {
+		appendEventBestEffort(a.Paths, schema.ClientClaudeCode, sessionID,
+			state.Event{Type: state.EventTurnFailed, Detail: category})
+	}
+	return err
 }
 
 // HandleSessionEnd marks a session as completed.
 func (a *ClaudeAdapter) HandleSessionEnd(sessionID string) error {
-	snap, err := state.LoadSnapshot(a.Paths, schema.ClientClaudeCode, sessionID)
-	if err != nil || snap == nil {
-		return nil // fail open
+	if sessionID == "" {
+		return nil
 	}
-
 	now := time.Now().UTC()
-	snap.Session.Status = schema.SessionCompleted
-	snap.Session.LastEventAt = now
-	return state.SaveSnapshot(a.Paths, schema.ClientClaudeCode, sessionID, snap)
+	err := state.UpdateSnapshot(a.Paths, schema.ClientClaudeCode, sessionID, nil,
+		func(snap *schema.Snapshot) error {
+			inactive := false
+			snap.Session.Status = schema.SessionCompleted
+			snap.Session.EndedAt = &now
+			snap.Session.LastEventAt = now
+			snap.Activity.TurnActive = &inactive
+			return nil
+		})
+	if err == nil {
+		appendEventBestEffort(a.Paths, schema.ClientClaudeCode, sessionID,
+			state.Event{Type: state.EventSessionEnded})
+	}
+	return err
 }
 
-// HandleStop marks a session as stopped.
+// HandleStop marks the turn as inactive without ending the session.
 func (a *ClaudeAdapter) HandleStop(sessionID string) error {
-	snap, err := state.LoadSnapshot(a.Paths, schema.ClientClaudeCode, sessionID)
-	if err != nil || snap == nil {
-		return nil // fail open
+	if sessionID == "" {
+		return nil
 	}
-
 	now := time.Now().UTC()
-	snap.Session.Status = schema.SessionStopped
-	snap.Session.LastEventAt = now
-	snap.Activity.TurnActive = false
-	return state.SaveSnapshot(a.Paths, schema.ClientClaudeCode, sessionID, snap)
+	err := state.UpdateSnapshot(a.Paths, schema.ClientClaudeCode, sessionID, nil,
+		func(snap *schema.Snapshot) error {
+			inactive := false
+			snap.Activity.TurnActive = &inactive
+			snap.Activity.TurnEndedAt = &now
+			snap.Session.LastEventAt = now
+			return nil
+		})
+	if err == nil {
+		appendEventBestEffort(a.Paths, schema.ClientClaudeCode, sessionID,
+			state.Event{Type: state.EventTurnStopped})
+	}
+	return err
 }
 
-// buildWarnings constructs warning messages based on current state.
-func (a *ClaudeAdapter) buildWarnings(snap *schema.Snapshot, proj engine.ProjectedContext, now time.Time) []string {
-	var warnings []string
-
-	// Check for projected overflow
-	if proj.ProjectedPercent > 95 && proj.Confidence != engine.ProjectionConfidenceLow {
-		warnings = append(warnings, engine.BuildProjectedOverflowWarning(proj))
+// sanitizeFailureCategory maps a raw StopFailure.Error string to a short,
+// shareable category. The raw error is never persisted — only the category.
+func sanitizeFailureCategory(raw string) string {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	switch {
+	case strings.Contains(raw, "rate") && strings.Contains(raw, "limit"):
+		return "rate_limit"
+	case strings.Contains(raw, "overload"):
+		return "overloaded"
+	case strings.Contains(raw, "auth") || strings.Contains(raw, "unauthor") || strings.Contains(raw, "api key"):
+		return "authentication_failed"
+	case strings.Contains(raw, "not found") || strings.Contains(raw, "model_not_found"):
+		return "model_not_found"
+	case strings.Contains(raw, "max_output") || strings.Contains(raw, "max tokens"):
+		return "max_output_tokens"
+	case strings.Contains(raw, "invalid"):
+		return "invalid_request"
+	case strings.Contains(raw, "server") || strings.Contains(raw, "503") || strings.Contains(raw, "500"):
+		return "server_error"
 	}
-
-	// Check context pressure
-	if snap.Pressure.State == schema.PressureCritical || snap.Pressure.State == schema.PressureWarn {
-		usedPct := 0.0
-		if snap.LiveContext != nil && snap.LiveContext.UsedPercentage != nil {
-			usedPct = *snap.LiveContext.UsedPercentage
-		}
-		msg := engine.BuildContextWarning(usedPct, proj.ProjectedPercent, snap.Model.ID, int64(snap.Model.ContextLength))
-		warnings = append(warnings, msg)
-	}
-
-	// Check cache health (if we have data)
-	if snap.CacheAnalysis != nil {
-		window := &engine.CacheWindowResult{
-			RequestSamples:     snap.CacheAnalysis.RequestSamples,
-			TotalObservedInput: 0,
-			CacheReadShare:     readShareOrDefault(snap.CacheAnalysis.CacheReadShare),
-			Trend:              snap.CacheAnalysis.Trend,
-		}
-		if engine.ShouldWarnCache(window) && !engine.ShouldResolveCacheWarning(window) {
-			msg := engine.BuildCacheWarning(window.CacheReadShare, window.RequestSamples)
-			warnings = append(warnings, msg)
-		}
-	}
-
-	return warnings
+	// Unknown failures get a generic bucket so the raw text is never stored.
+	return "unknown"
 }
 
-// ============================================================
-// Utility functions
-// ============================================================
-
-// estimateTokenCount provides a rough token estimate for a text string.
-// Uses a simple heuristic: ~4 characters per token for English text.
-// This is explicitly an approximation — labeled as such in all output.
-func estimateTokenCount(text string) int64 {
-	return int64(len(text) / 4)
-}
-
-// readShareOrDefault returns the cache read share or a default if nil.
-func readShareOrDefault(share *float64) float64 {
-	if share == nil {
+func deref(p *int64) int64 {
+	if p == nil {
 		return 0
 	}
-	return *share
+	return *p
 }
 
-// FormatStatusLineCompact renders a single-line compact status for the Claude status bar.
-func FormatStatusLineCompact(snap *schema.Snapshot, health *schema.HealthCache) string {
-	if snap == nil {
-		return "FI: no data"
-	}
-
-	model := snap.Model.ID
-	if model == "" {
-		model = "?"
-	}
-
-	// Health indicator
-	healthChar := "●"
-	if health != nil && health.UnhealthyCount != nil && *health.UnhealthyCount > 0 {
-		healthChar = "◐"
-	}
-	if snap.LastFailure != nil {
-		healthChar = "✗"
-	}
-
-	// Context percentage
-	ctxStr := "ctx ?"
-	if snap.LiveContext != nil && snap.LiveContext.UsedPercentage != nil {
-		ctxStr = fmt.Sprintf("ctx %.0f%%", *snap.LiveContext.UsedPercentage)
-	}
-
-	// Cache percentage (read share)
-	cacheStr := ""
-	if snap.CacheAnalysis != nil && snap.CacheAnalysis.CacheReadShare != nil {
-		pct := int(*snap.CacheAnalysis.CacheReadShare * 100)
-		cacheStr = fmt.Sprintf(" cache %d%%", pct)
-	}
-
-	// Pressure indicator
-	pressureStr := ""
-	switch snap.Pressure.State {
-	case schema.PressureWatch:
-		pressureStr = " WATCH"
-	case schema.PressureWarn:
-		pressureStr = " WARN"
-	case schema.PressureCritical:
-		pressureStr = " CRIT"
-	}
-
-	return fmt.Sprintf("FI %s %s | %s%s%s", model, healthChar, ctxStr, cacheStr, pressureStr)
+// appendEventBestEffort records a sanitized lifecycle event. Any failure is
+// swallowed because event logging must never block the client.
+func appendEventBestEffort(paths state.Paths, clientType, sessionID string, ev state.Event) {
+	_ = paths.EnsureSessionDir(clientType, sessionID)
+	_ = state.AppendEvent(paths, clientType, sessionID, ev)
+	_ = state.RotateEvents(paths, clientType, sessionID)
 }
-
-// init ensures the module can compile standalone
-var _ = os.Stdin

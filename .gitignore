@@ -1,0 +1,12 @@
+/build/
+/fi
+/.claude/
+/.crush/
+*.test
+*.out
+*.prof
+coverage.out
+coverage.txt
+.DS_Store
+.idea/
+.vscode/

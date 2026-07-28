@@ -1,0 +1,216 @@
+package engine
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"time"
+
+	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
+)
+
+// ============================================================
+// Rolling cache analysis
+// ============================================================
+
+const (
+	// MaxUsageObservations bounds the per-session observation window.
+	MaxUsageObservations = 20
+	// AnalysisWindow is how many recent unique observations feed rolling shares.
+	AnalysisWindow = 5
+	// MinObservationsForWarning is the minimum sample count before a
+	// cache-low warning may qualify.
+	MinObservationsForWarning = 3
+	// MinContextTokensForWarning gates warnings on meaningful active context.
+	MinContextTokensForWarning = 50000
+	// CacheReadLowThreshold is the read share below which reuse counts as low.
+	CacheReadLowThreshold = 0.20
+	// CacheReadRecoveredThreshold is the read share above which reuse counts recovered.
+	CacheReadRecoveredThreshold = 0.40
+	// ConsecutiveToWarn is how many sequential low observations activate a warning.
+	ConsecutiveToWarn = 3
+	// ConsecutiveToResolve is how many sequential good observations resolve it.
+	ConsecutiveToResolve = 3
+	// CacheWarningCooldown suppresses repeat cache-low warnings.
+	CacheWarningCooldown = 30 * time.Minute
+	// TrendThreshold is the read-share delta (in share points) that marks a trend.
+	TrendThreshold = 0.05
+)
+
+// ObservationFingerprint builds a stable fingerprint for a usage sample so
+// re-renders of the same status-line data are not double-counted.
+func ObservationFingerprint(modelID string, totalInput, totalOutput int64, fresh, cacheRead, cacheCreation, output *int64) string {
+	var buf []byte
+	buf = fmt.Appendf(buf, "%s|%d|%d|%d|%d|%d|%d", modelID, totalInput, totalOutput,
+		derefI64(fresh), derefI64(cacheRead), derefI64(cacheCreation), derefI64(output))
+	sum := sha256.Sum256(buf)
+	return hex.EncodeToString(sum[:16])
+}
+
+func derefI64(p *int64) int64 {
+	if p == nil {
+		return -1
+	}
+	return *p
+}
+
+// AddObservation appends a unique observation to the snapshot.
+// Returns true if the observation was new (fingerprint not seen before).
+func AddObservation(snap *schema.Snapshot, obs schema.UsageObservation) bool {
+	for i := range snap.UsageObservations {
+		if snap.UsageObservations[i].Fingerprint == obs.Fingerprint {
+			return false
+		}
+	}
+	snap.UsageObservations = append(snap.UsageObservations, obs)
+	if len(snap.UsageObservations) > MaxUsageObservations {
+		snap.UsageObservations = snap.UsageObservations[len(snap.UsageObservations)-MaxUsageObservations:]
+	}
+	return true
+}
+
+// observationInput sums the observed input components of one observation.
+func observationInput(o schema.UsageObservation) (fresh, read, creation int64, ok bool) {
+	if o.FreshInputTokens == nil || o.CacheReadInputTokens == nil || o.CacheCreationInputTokens == nil {
+		return 0, 0, 0, false
+	}
+	return *o.FreshInputTokens, *o.CacheReadInputTokens, *o.CacheCreationInputTokens, true
+}
+
+// AnalyzeCache recomputes the rolling cache analysis on the snapshot from its
+// unique usage observations. currentContextTokens is the best available
+// estimate of the active context size (used for warning qualification).
+func AnalyzeCache(snap *schema.Snapshot, currentContextTokens int64, now time.Time) {
+	if snap.CacheAnalysis == nil {
+		snap.CacheAnalysis = &schema.CacheAnalysis{}
+	}
+	analysis := snap.CacheAnalysis
+
+	obs := snap.UsageObservations
+	analysis.RequestSamples = len(obs)
+
+	window := obs
+	if len(window) > AnalysisWindow {
+		window = window[len(window)-AnalysisWindow:]
+	}
+
+	var totalFresh, totalRead, totalCreation int64
+	var counted int
+	for _, o := range window {
+		fresh, read, creation, ok := observationInput(o)
+		if !ok {
+			continue
+		}
+		totalFresh += fresh
+		totalRead += read
+		totalCreation += creation
+		counted++
+	}
+
+	if counted == 0 {
+		analysis.CacheReadShare = nil
+		analysis.CacheCreationShare = nil
+		analysis.FreshInputShare = nil
+		analysis.Trend = schema.TrendInsufficientData
+		return
+	}
+
+	totalInput := totalFresh + totalRead + totalCreation
+	if totalInput <= 0 {
+		analysis.CacheReadShare = nil
+		analysis.CacheCreationShare = nil
+		analysis.FreshInputShare = nil
+		analysis.Trend = schema.TrendInsufficientData
+		return
+	}
+
+	readShare := float64(totalRead) / float64(totalInput)
+	creationShare := float64(totalCreation) / float64(totalInput)
+	freshShare := float64(totalFresh) / float64(totalInput)
+
+	// Trend vs. previous share (±5 percentage points).
+	if analysis.CacheReadShare != nil {
+		analysis.PreviousReadShare = analysis.CacheReadShare
+		delta := readShare - *analysis.PreviousReadShare
+		switch {
+		case delta >= TrendThreshold:
+			analysis.Trend = schema.TrendRising
+		case delta <= -TrendThreshold:
+			analysis.Trend = schema.TrendDeclining
+		default:
+			analysis.Trend = schema.TrendStable
+		}
+	} else {
+		analysis.PreviousReadShare = nil
+		analysis.Trend = schema.TrendInsufficientData
+	}
+
+	analysis.CacheReadShare = &readShare
+	analysis.CacheCreationShare = &creationShare
+	analysis.FreshInputShare = &freshShare
+
+	// Consecutive low / recovered counters drive warning activation & resolution.
+	if readShare < CacheReadLowThreshold {
+		analysis.ConsecutiveLow++
+		analysis.ConsecutiveRecovered = 0
+	} else if readShare > CacheReadRecoveredThreshold {
+		analysis.ConsecutiveRecovered++
+		analysis.ConsecutiveLow = 0
+	} else {
+		analysis.ConsecutiveLow = 0
+		analysis.ConsecutiveRecovered = 0
+	}
+}
+
+// CacheWarningDecision is the outcome of cache-low warning qualification.
+type CacheWarningDecision struct {
+	Warn     bool
+	Resolved bool
+	Share    *float64
+}
+
+// QualifyCacheWarning decides whether a cache-low warning should fire,
+// resolve, or stay quiet. All gates must pass:
+//   - enough unique observations
+//   - active context above the minimum size
+//   - read share below threshold for enough sequential observations
+//   - provider confirmed as FreeInference
+//   - cooldown elapsed since the last shown cache warning
+func QualifyCacheWarning(snap *schema.Snapshot, currentContextTokens int64, providerConfirmed bool, now time.Time) CacheWarningDecision {
+	decision := CacheWarningDecision{}
+	analysis := snap.CacheAnalysis
+	if analysis == nil {
+		return decision
+	}
+	decision.Share = analysis.CacheReadShare
+
+	if !providerConfirmed {
+		return decision
+	}
+	if analysis.RequestSamples < MinObservationsForWarning {
+		return decision
+	}
+	if currentContextTokens < MinContextTokensForWarning {
+		return decision
+	}
+
+	// Resolution: share recovered above threshold for enough observations.
+	if snap.Warnings.CacheLowActive &&
+		analysis.ConsecutiveRecovered >= ConsecutiveToResolve {
+		decision.Resolved = true
+		return decision
+	}
+
+	// Activation: share below threshold for enough sequential observations.
+	if analysis.ConsecutiveLow >= ConsecutiveToWarn {
+		// Cooldown since last shown warning.
+		if snap.Warnings.LastCacheShownAt != nil &&
+			now.Sub(*snap.Warnings.LastCacheShownAt) < CacheWarningCooldown {
+			return decision
+		}
+		decision.Warn = true
+		return decision
+	}
+
+	return decision
+}

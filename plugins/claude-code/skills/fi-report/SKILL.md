@@ -1,13 +1,13 @@
 ---
 name: fi-report
-description: This skill is triggered when the user asks to generate a support report, a troubleshooting bundle, or diagnostic information for sharing with FreeInference maintainers. Use when reporting issues to FreeInference support or when asked for session diagnostics.
-argument-hint: [--session <id>]
+description: This skill is triggered when the user asks to generate a support report, a troubleshooting bundle, or diagnostic information for sharing with FreeInference maintainers. Use when reporting issues to FreeInference support or when asked for session diagnostics. Community-built and unofficial. Not affiliated with or endorsed by FreeInference.
+argument-hint: "[--session <id>] [--format markdown|json]"
 allowed-tools: Bash
 ---
 
 # FreeInference Report
 
-Generate a sanitized support report for FreeInference maintainers.
+Generate a sanitized support report for FreeInference maintainers. Community-built and unofficial. Not affiliated with or endorsed by FreeInference.
 
 ## Usage
 
@@ -38,31 +38,27 @@ The report explicitly excludes:
 ```
 FreeInference Companion Report
 ============================================================
-Plugin Version: 0.1.0
-Client:         claude-code
-Session:        sess_abc123
-Status:         active
-Model:          minimax-m3
+Version:    0.1.0
+Generated:  2026-07-27T20:30:00Z
 
---- Live Context ---
-Used:           42.5%
-Fresh Input:    48K
-Cache Read:     1.2M
+--- Session ---
+Client:   claude-code
+Session:  sess_abc123 (active)
+Started:  2026-07-27T19:00:00Z
+Model:    minimax-m3
+Provider: freeinference (confirmed: true)
+Context:  42.5% used
+Limit:    1.0M
+Pressure: warn
+Cache:    78% read share over 12 samples (trend: stable)
 
---- Pressure ---
-State:          warn
-Projected:      84%
-
---- Provider Health ---
-Status:         ok
-Checked:        2026-07-27T20:30:00Z
-
---- Sanitized ---
-No API keys, prompts, responses, or repository contents included.
+--- Note ---
+This report is designed to exclude known sensitive fields. Review it before sharing.
 ```
 
 ### Notes
 
-- Reports are safe to share with FreeInference support
-- Run `fi doctor` before creating a report to include diagnostic results
-- Without `--session`, shows global state summary
+- Review the report before sharing — it is designed to exclude sensitive fields
+- Run `fi doctor` before creating a report to check diagnostic results
+- Without `--session`, the most recent session is resolved from the local session index
+- Use `--format json` for a machine-readable report

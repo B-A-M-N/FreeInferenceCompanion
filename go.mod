@@ -1,3 +1,7 @@
-module github.com/bamn/freeinference-companion
+module github.com/b-a-m-n/freeinference-companion
 
-go 1.25.9
+go 1.25.0
+
+require golang.org/x/term v0.45.0
+
+require golang.org/x/sys v0.47.0 // indirect

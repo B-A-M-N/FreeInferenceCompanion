@@ -1,13 +1,13 @@
 ---
 name: fi-status
-description: This skill is automatically triggered when the user asks about FreeInference session status, current metrics, token usage, or context consumption. Use when the user wants to see their current session's token counts, cache performance, model information, or context pressure level.
-argument-hint: [--compact]
+description: This skill is automatically triggered when the user asks about FreeInference session status, current metrics, token usage, or context consumption. Use when the user wants to see their current session's token counts, cache performance, model information, or context pressure level. Community-built and unofficial. Not affiliated with or endorsed by FreeInference.
+argument-hint: "[--compact]"
 allowed-tools: Bash
 ---
 
 # FreeInference Status
 
-Display current session metrics for the FreeInference Companion.
+Display current session metrics for the FreeInference Companion. Community-built and unofficial. Not affiliated with or endorsed by FreeInference.
 
 ## Usage
 
@@ -28,28 +28,30 @@ Run `fi status` to show:
 
 ```
 FreeInference Companion 0.1.0
-Session: sess_abc123 (active)
-Model:   minimax-m3 (1048576 context)
+Session:  sess_abc123 (active)
+Client:   claude-code
+Provider: freeinference (source: FREEINFERENCE_API_KEY)
+Model:    minimax-m3 (1.0M context)
 
 Live Context (from claude_statusline):
-  Window:     1.0M (42.5% used)
-  Fresh:      48K
-  Cache Read: 1.2M
-  Cache New:  94K
-  Output:     38K
+  Context:    446K / 1.0M (42.5% used)
+  Latest request:
+    Fresh:      48K
+    Cache read: 380K
+    Cache new:  18K
+    Output:     3K
 
-Pressure:   warn (projected 84%, confidence: high)
-  Reason:   context above warn threshold
+Pressure: warn
+Turn:     active
 
-Cache Analysis (15 samples):
-  Read Share:  78%
-  New Share:   6%
-  Fresh Share: 16%
+Cache Analysis (12 unique samples):
+  Read share:  78%
+  New share:   6%
+  Fresh share: 16%
   Trend:       stable
 ```
 
 ### Notes
 
 - Context data comes from the Claude Code status line (live, authoritative)
-- Cache analysis uses a rolling window of recent requests
-- Pressure projections are estimates labeled with confidence
+- Cache analysis uses a rolling window of the last 5 unique requests (duplicate status-line renders are deduplicated)
