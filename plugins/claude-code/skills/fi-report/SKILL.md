@@ -59,6 +59,6 @@ This report is designed to exclude known sensitive fields. Review it before shar
 ### Notes
 
 - Review the report before sharing — it is designed to exclude sensitive fields
-- Run `fi doctor` before creating a report to check diagnostic results
+- Run `fi doctor` first to diagnose any connectivity or configuration issues separately
 - Without `--session`, the most recent session is resolved from the local session index
 - Use `--format json` for a machine-readable report

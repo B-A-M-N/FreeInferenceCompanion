@@ -276,14 +276,12 @@ func checkClaudeHookConfig() api.CheckResult {
 		return api.CheckResult{State: api.CheckUnknown, Detail: "no home directory"}
 	}
 	// Plugin installation places hooks under ~/.claude/plugins.
-	candidates := []string{
-		filepath.Join(home, ".claude", "plugins", "freeinference-companion", "hooks", "hooks.json"),
-		filepath.Join(home, ".claude", "statusline-freeinference.sh"),
-	}
-	for _, c := range candidates {
-		if _, err := os.Stat(c); err == nil {
-			return api.CheckResult{State: api.CheckPass}
-		}
+	// NOTE: the status-line wrapper is a SEPARATE check (checkStatusLineWrapper).
+	// Do not conflate the two — a pass here must mean hooks are installed,
+	// not just the status-line wrapper.
+	primaryHook := filepath.Join(home, ".claude", "plugins", "freeinference-companion", "hooks", "hooks.json")
+	if _, err := os.Stat(primaryHook); err == nil {
+		return api.CheckResult{State: api.CheckPass, Detail: primaryHook}
 	}
 	// Scan plugin cache for our hooks file. Match on the exact hook runner
 	// path that our installer writes, not a loose substring that could

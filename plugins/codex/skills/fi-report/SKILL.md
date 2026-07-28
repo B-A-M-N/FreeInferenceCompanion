@@ -35,8 +35,7 @@ The report explicitly excludes:
 
 ### Notes
 
-- Reports are safe to share with FreeInference support
-- Run `fi doctor` before creating a report to include diagnostic results
+- Review the report before sharing — it is designed to exclude sensitive fields
+- Run `fi doctor` first to diagnose any connectivity or configuration issues separately
 - Without `--session`, the most recent session is resolved from the local session index.
 - Use `--format json` for a machine-readable report.
-- Review the report before sharing — it is designed to exclude sensitive fields.

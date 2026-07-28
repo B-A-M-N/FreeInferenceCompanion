@@ -14,6 +14,7 @@ import (
 )
 
 // PluginVersion is stamped onto new snapshots.
+// It must match cli.Version — kept in sync via TestVersionConsistency.
 const PluginVersion = "0.1.0"
 
 // ClaudeAdapter handles Claude Code-specific integration logic.

@@ -10,7 +10,10 @@ import (
 )
 
 // Version and Commit are stamped by main from ldflags.
+// Canonical version source for the CLI binary and plugin manifests.
 var (
+	// Version is the semver string injected at build time via -ldflags.
+	// The fallback matches the plugin manifest versions.
 	Version = "0.1.0"
 	Commit  = "dev"
 )

@@ -29,6 +29,6 @@ an explicit probe — doctor never infers them from API key presence.
 ### Notes
 
 - The `--probe` flag sends a real (but minimal) inference request. It consumes service resources.
-- Synthetic probes are marked with `X-Probe: synthetic` header and do not affect FreeInference metrics.
+- Synthetic probes are marked with `X-Probe: synthetic` header for server-side identification. Whether the request is excluded from FreeInference accounting is determined by the server — the companion cannot guarantee it.
 - Doctor checks are non-destructive except for `--probe`: they create and remove a temporary cache write probe to verify writability.
 - If the endpoint is unreachable, check your `FREEINFERENCE_BASE_URL` environment variable.

@@ -2,7 +2,7 @@
 name: fi-install-statusline
 description: Install or uninstall the FreeInference status line for the Claude Code bottom bar. This configures Claude Code to show real-time model, context, and cache metrics. Community-built and unofficial. Not affiliated with or endorsed by FreeInference.
 argument-hint: "install|uninstall"
-allowed-tools: Bash, Read, Write
+allowed-tools: Bash
 disable-model-invocation: true
 ---
 

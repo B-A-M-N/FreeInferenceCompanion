@@ -88,6 +88,7 @@ surfaces the user already has:
 | `fi report [--client <type>] [--session <id>] [--format markdown\|json]` | Generate a sanitized support report |
 | `fi dashboard` | Open FreeInference status page in browser |
 | `fi context [--session <id>]` | Show context pressure information |
+| `fi cache [--session <id>]` | Show cache efficiency analysis and recommendations |
 | `fi refresh [--force] [--if-stale --detach] [--worker models\|health]` | Refresh cached provider metadata |
 | `fi hook <client> <event>` | Process a lifecycle hook event (internal) |
 | `fi status-line install\|uninstall` | Manage the Claude Code status line |
