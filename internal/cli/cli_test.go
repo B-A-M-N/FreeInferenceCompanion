@@ -118,8 +118,8 @@ func TestRefreshWorkerFlag(t *testing.T) {
 func TestRefreshWorkerUnknownName(t *testing.T) {
 	var out, errOut strings.Builder
 	code := cmdRefresh(testPaths(t), []string{"--worker", "bogus"}, &out, &errOut)
-	if code != 0 {
-		t.Errorf("unknown worker should be a quiet skip, exit = %d", code)
+	if code != 2 {
+		t.Errorf("unknown worker should be a usage error, exit = %d, want 2", code)
 	}
 }
 

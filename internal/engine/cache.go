@@ -39,10 +39,16 @@ const (
 
 // ObservationFingerprint builds a stable fingerprint for a usage sample so
 // re-renders of the same status-line data are not double-counted.
-func ObservationFingerprint(modelID string, totalInput, totalOutput int64, fresh, cacheRead, cacheCreation, output *int64) string {
+// When promptID is non-empty it is the primary discriminator (each request
+// gets a unique ID). The token-based fallback handles older clients.
+func ObservationFingerprint(modelID, promptID string, totalInput, totalOutput int64, fresh, cacheRead, cacheCreation, output *int64) string {
 	var buf []byte
-	buf = fmt.Appendf(buf, "%s|%d|%d|%d|%d|%d|%d", modelID, totalInput, totalOutput,
-		derefI64(fresh), derefI64(cacheRead), derefI64(cacheCreation), derefI64(output))
+	if promptID != "" {
+		buf = fmt.Appendf(buf, "pid:%s", promptID)
+	} else {
+		buf = fmt.Appendf(buf, "tok|%s|%d|%d|%d|%d|%d|%d", modelID, totalInput, totalOutput,
+			derefI64(fresh), derefI64(cacheRead), derefI64(cacheCreation), derefI64(output))
+	}
 	sum := sha256.Sum256(buf)
 	return hex.EncodeToString(sum[:16])
 }

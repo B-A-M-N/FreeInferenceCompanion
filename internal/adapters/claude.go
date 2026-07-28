@@ -189,7 +189,12 @@ func (a *ClaudeAdapter) HandleStatusLineUpdate(input *schema.ClaudeStatusLineInp
 			}
 			usedPct := input.ContextWindow.UsedPercentage
 			var remainingPct *float64
-			if usedPct != nil {
+			if input.ContextWindow.RemainingPercentage != nil {
+				// Prefer the authoritative value from the status line.
+				r := *input.ContextWindow.RemainingPercentage
+				remainingPct = &r
+			} else if usedPct != nil {
+				// Fallback for older clients that don't expose it.
 				r := 100.0 - *usedPct
 				remainingPct = &r
 			}
@@ -212,6 +217,7 @@ func (a *ClaudeAdapter) HandleStatusLineUpdate(input *schema.ClaudeStatusLineInp
 				obs := schema.UsageObservation{
 					Fingerprint: engine.ObservationFingerprint(
 						snap.Model.ID,
+						input.PromptID,
 						deref(totalInput), deref(totalOutput),
 						latest.FreshInputTokens, latest.CacheReadInputTokens,
 						latest.CacheCreationInputTokens, latest.OutputTokens),

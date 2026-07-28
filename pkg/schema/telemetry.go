@@ -35,6 +35,7 @@ type ClaudeStatusLineInput struct {
 	Cost           CostStatus          `json:"cost,omitempty"`
 	RateLimits     RateLimitStatus     `json:"rate_limits,omitempty"`
 	Workspace      WorkspaceStatus     `json:"workspace,omitempty"`
+	PromptID       string              `json:"prompt_id,omitempty"`
 }
 
 // ModelStatus from Claude status line.
@@ -49,11 +50,12 @@ type ModelStatus struct {
 // (reported by Claude before the first response) is preserved and never collapsed
 // to nil. Null means "not reported"; zero means "explicitly zero".
 type ContextWindowStatus struct {
-	TotalInputTokens  *int64        `json:"total_input_tokens"`
-	TotalOutputTokens *int64        `json:"total_output_tokens"`
-	CurrentUsage      *CurrentUsage `json:"current_usage"`
-	ContextWindowSize int64         `json:"context_window_size"`
-	UsedPercentage    *float64      `json:"used_percentage"`
+	TotalInputTokens    *int64        `json:"total_input_tokens"`
+	TotalOutputTokens   *int64        `json:"total_output_tokens"`
+	CurrentUsage        *CurrentUsage `json:"current_usage"`
+	ContextWindowSize   int64         `json:"context_window_size"`
+	UsedPercentage      *float64      `json:"used_percentage"`
+	RemainingPercentage *float64      `json:"remaining_percentage"`
 }
 
 // CurrentUsage breaks down the latest API response token usage.

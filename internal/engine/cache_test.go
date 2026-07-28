@@ -11,7 +11,7 @@ func i64(v int64) *int64 { return &v }
 
 func obs(model string, totalIn, totalOut, fresh, read, creation, output int64) schema.UsageObservation {
 	return schema.UsageObservation{
-		Fingerprint:              ObservationFingerprint(model, totalIn, totalOut, i64(fresh), i64(read), i64(creation), i64(output)),
+		Fingerprint:              ObservationFingerprint(model, "", totalIn, totalOut, i64(fresh), i64(read), i64(creation), i64(output)),
 		ObservedAt:               time.Now(),
 		ModelID:                  model,
 		TotalInputTokens:         totalIn,
@@ -220,5 +220,31 @@ func TestAnalyzeCacheIdempotentCounters(t *testing.T) {
 	}
 	if snap.CacheAnalysis.ConsecutiveRecovered != 0 {
 		t.Fatalf("after reanalysis, consecutive recovered = %d, want 0", snap.CacheAnalysis.ConsecutiveRecovered)
+	}
+}
+
+func TestObservationFingerprintWithPromptID(t *testing.T) {
+	// Same token counts but different prompt IDs → distinct fingerprints.
+	fp1 := ObservationFingerprint("m", "prompt-aaa", 100000, 1000, i64(5000), i64(90000), i64(5000), i64(1000))
+	fp2 := ObservationFingerprint("m", "prompt-bbb", 100000, 1000, i64(5000), i64(90000), i64(5000), i64(1000))
+	if fp1 == fp2 {
+		t.Fatal("different prompt IDs must produce different fingerprints")
+	}
+
+	// Same prompt ID → same fingerprint even with different tokens (prompt_id wins).
+	fp3 := ObservationFingerprint("m", "prompt-aaa", 200000, 2000, i64(10000), i64(180000), i64(10000), i64(2000))
+	if fp1 != fp3 {
+		t.Fatal("same prompt ID must produce same fingerprint")
+	}
+
+	// No prompt ID → falls back to token-based fingerprint.
+	fp4 := ObservationFingerprint("m", "", 100000, 1000, i64(5000), i64(90000), i64(5000), i64(1000))
+	fp5 := ObservationFingerprint("m", "", 100000, 1000, i64(5000), i64(90000), i64(5000), i64(1000))
+	if fp4 != fp5 {
+		t.Fatal("token-based fallback must be deterministic")
+	}
+	fp6 := ObservationFingerprint("m", "", 100001, 1000, i64(5000), i64(90000), i64(5000), i64(1000))
+	if fp4 == fp6 {
+		t.Fatal("different token counts must produce different fingerprints without prompt_id")
 	}
 }

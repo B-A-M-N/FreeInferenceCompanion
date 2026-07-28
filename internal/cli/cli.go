@@ -95,7 +95,7 @@ Usage:
   fi report [--client <type>] [--session <id>] [--format markdown|json]
   fi dashboard
   fi context [--client <type>] [--session <id>]
-  fi refresh [--force] [--if-stale --detach] [--worker models|health]
+  fi cache [--client <type>] [--session <id>]
   fi hook <client> <event>
   fi status-line install|uninstall
 

@@ -214,17 +214,36 @@ func checkCacheDir(paths state.Paths) api.CheckResult {
 }
 
 func checkStateReadable(paths state.Paths) api.CheckResult {
-	gs, _ := state.LoadGlobal(paths)
-	// An empty cache (first run) is not a failure. Only fail if files exist
-	// but could not be loaded — indicated by all fields being nil while at
-	// least one global file is present on disk.
-	if gs.Health == nil && gs.Models == nil && gs.AccountUsage == nil && len(gs.CircuitBreakers) == 0 {
-		globalDir := paths.GlobalDir()
-		if entries, err := os.ReadDir(globalDir); err == nil && len(entries) > 0 {
-			return api.CheckResult{State: api.CheckFail, Detail: "global state files present but unreadable"}
-		}
+	globalDir := paths.GlobalDir()
+	entries, err := os.ReadDir(globalDir)
+	if err != nil || len(entries) == 0 {
 		return api.CheckResult{State: api.CheckPass, Detail: "no state yet (first run)"}
 	}
+
+	// Count JSON resources vs. non-state files (locks, temp files, etc.).
+	jsonCount := 0
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") {
+			jsonCount++
+		}
+	}
+	if jsonCount == 0 {
+		return api.CheckResult{State: api.CheckPass, Detail: "no state yet (first run)"}
+	}
+
+	// Verify each global resource loads. LoadGlobal quarantines corrupt
+	// files, so a load error here means something more serious.
+	gs, loadErr := state.LoadGlobal(paths)
+	if loadErr != nil {
+		// Check if the load produced partial state (some resources OK).
+		allNil := gs.Health == nil && gs.Models == nil &&
+			gs.AccountUsage == nil && len(gs.CircuitBreakers) == 0
+		if allNil {
+			return api.CheckResult{State: api.CheckFail, Detail: "global state files present but unreadable"}
+		}
+		return api.CheckResult{State: api.CheckWarn, Detail: "some global state resources failed to load (corrupt files quarantined)"}
+	}
+	_ = gs
 	return api.CheckResult{State: api.CheckPass}
 }
 

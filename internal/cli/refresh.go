@@ -59,6 +59,15 @@ func cmdRefresh(paths state.Paths, args []string, stdout, stderr io.Writer) int 
 	// Worker mode: do the actual fetch under a cross-process lock.
 	if worker != "" {
 		result := refresher.WorkerRefresh(worker)
+		if result.Skipped {
+			if result.SkipReason == "unknown worker" {
+				fmt.Fprintf(stderr, "error: unknown worker %q (valid: models, health)\n", worker)
+				return 2
+			}
+			// Another worker is running — not an error, but report it.
+			fmt.Fprintf(stdout, "Worker %s: %s.\n", worker, result.SkipReason)
+			return 0
+		}
 		if result.ModelsRefreshed {
 			fmt.Fprintln(stdout, "Models refreshed.")
 		}
