@@ -142,34 +142,25 @@ details. Rotation kicks in past 256 KiB or 1,000 events per session.
 Sessions older than 30 days are cleaned up opportunistically by
 `CleanupStaleSessions`.
 
-## Codex installation
+## Codex integration
 
-The Codex plugin bundles skills and optional lifecycle hooks using Codex's
-native plugin layout: `.codex-plugin/plugin.json` (manifest), `hooks/hooks.json`
-(lifecycle hooks), and `skills/` (skills). Codex automatically discovers
-`hooks/hooks.json` from an enabled plugin — no separate installer is needed
-and nothing is written to `~/.codex/hooks/`.
+The Codex plugin bundles skills using Codex's native plugin layout:
+`.codex-plugin/plugin.json` (manifest) and `skills/` (skills). Codex
+automatically discovers the skills from an enabled plugin.
 
-After installing the plugin in Codex:
+**Codex session lifecycle hooks are NOT currently functional.** Current Codex
+releases do not load plugin-local hooks, so the hooks defined under
+`plugins/codex/hooks/` are dormant. The CI workflow at
+`.github/workflows/ci.yml` explicitly notes this. Until a verified Codex
+runtime actually loads plugin-local hooks, the Codex integration provides
+skills only.
 
-1. Start Codex
-2. Run `/hooks`
-3. Review and trust the FreeInference Companion hooks
-
-Plugin hooks do not run merely because the plugin is installed. Codex requires
-you to review and trust the exact hook definition; changed hooks require review
-again. Until you trust them, command hooks are skipped — but the skills remain
-fully usable, so `$fi-status`, `$fi-models`, `$fi-doctor`, `$fi-report`, and
-`$fi-dashboard` work regardless of hook trust state.
-
-Once trusted, the hooks record session lifecycle events (start/end, prompt
-submissions, turns, compaction) to the same local cache Claude Code uses, and
-the skills read that cache.
+After installing the plugin in Codex, the following skills are available:
+`$fi-status`, `$fi-models`, `$fi-doctor`, `$fi-report`, `$fi-dashboard`,
+`$fi-cache`. These work regardless of hook trust state.
 
 Codex exposes no live token telemetry, so context and cache metrics stay
-`unknown` for Codex sessions — they are never fabricated. The hooks fire on
-lifecycle events only; they do not intercept prompts (only the byte length is
-read, never the contents) and they add no inference traffic.
+`unknown` for Codex sessions — they are never fabricated.
 
 ## Development
 

@@ -6,6 +6,8 @@
     "name": "b-a-m-n",
     "url": "https://github.com/b-a-m-n"
   },
-  "hooks": "./hooks/hooks.json",
-  "skills": "./skills/"
+  "interface": {
+    "hooks": "./hooks/hooks.json",
+    "skills": "./skills/"
+  }
 }
