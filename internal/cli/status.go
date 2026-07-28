@@ -100,20 +100,21 @@ func printFullStatus(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalS
 		lc := snap.LiveContext
 		fmt.Fprintf(stdout, "Live Context (from %s at %s):\n", lc.Source, lc.ObservedAt.Format(time.RFC3339))
 		if lc.TotalInputTokens != nil {
-			total := *lc.TotalInputTokens
+			fmt.Fprintf(stdout, "  Total input:  %s", formatTokenPtr(lc.TotalInputTokens))
 			if lc.TotalOutputTokens != nil {
-				total += *lc.TotalOutputTokens
+				fmt.Fprintf(stdout, "\n  Total output: %s", formatTokenPtr(lc.TotalOutputTokens))
+				total := *lc.TotalInputTokens + *lc.TotalOutputTokens
+				fmt.Fprintf(stdout, "\n  Combined:     %s", formatTokenCount(total))
 			}
-			fmt.Fprintf(stdout, "  Context:    %s", formatTokenCount(total))
 			if lc.ContextWindowSize != nil {
-				fmt.Fprintf(stdout, " / %s", formatTokenCount(*lc.ContextWindowSize))
+				fmt.Fprintf(stdout, "\n  Window:       %s", formatTokenCount(*lc.ContextWindowSize))
 			}
 			if lc.UsedPercentage != nil {
-				fmt.Fprintf(stdout, " (%.1f%% used)", *lc.UsedPercentage)
+				fmt.Fprintf(stdout, "\n  Used:         %.1f%%", *lc.UsedPercentage)
 			}
 			fmt.Fprintln(stdout)
 		} else if lc.UsedPercentage != nil {
-			fmt.Fprintf(stdout, "  Context:    %.1f%% used\n", *lc.UsedPercentage)
+			fmt.Fprintf(stdout, "  Used:         %.1f%%\n", *lc.UsedPercentage)
 		}
 		if lc.LatestRequest != nil {
 			fmt.Fprintln(stdout, "  Latest request:")

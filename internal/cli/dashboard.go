@@ -14,6 +14,7 @@ func cmdDashboard(stdout, stderr io.Writer) int {
 	if err := openBrowser(dashboardURL); err != nil {
 		fmt.Fprintf(stderr, "could not open browser: %v\n", err)
 		fmt.Fprintf(stdout, "Visit: %s\n", dashboardURL)
+		return 1
 	}
 	return 0
 }

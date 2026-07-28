@@ -44,6 +44,7 @@ const (
 //   - Must be HTTPS, unless it's loopback AND FI_ALLOW_INSECURE_LOCALHOST=1.
 //   - Must not contain userinfo.
 //   - Must not have a fragment.
+//
 // Returns the normalized URL string on success, or an error.
 func ValidateBaseURL(rawURL string) (string, error) {
 	u, err := url.Parse(rawURL)

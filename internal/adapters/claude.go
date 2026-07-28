@@ -63,7 +63,7 @@ func newClaudeSnapshot(sessionID, modelID string, now time.Time) *schema.Snapsho
 		},
 		Provider: DetectProvider().ToProviderInfo(),
 		Model: schema.ModelInfo{
-			ID:             modelID,
+			ID:             secure.SanitizeField(modelID),
 			MetadataSource: "client_hook",
 			AccessState:    schema.AccessUnknown,
 		},
@@ -99,7 +99,7 @@ func (a *ClaudeAdapter) HandleSessionStart(input *schema.ClaudeHookInput) error 
 			snap.Provider = provider.ToProviderInfo()
 			// Only fill in the model if we don't already know a better one.
 			if input.Model != "" && (snap.Model.ID == "" || snap.Model.ID == "unknown") {
-				snap.Model.ID = input.Model
+				snap.Model.ID = secure.SanitizeField(input.Model)
 				snap.Model.MetadataSource = "client_hook"
 			}
 			return nil
@@ -120,6 +120,7 @@ func (a *ClaudeAdapter) HandleStatusLineUpdate(input *schema.ClaudeStatusLineInp
 		return nil
 	}
 	var sawCompactionCompletion bool
+	var compactionReductionPct *float64
 	err := state.UpdateSnapshot(a.Paths, schema.ClientClaudeCode, sessionID,
 		func() *schema.Snapshot {
 			return newClaudeSnapshot(sessionID, input.Model.ID, time.Now().UTC())
@@ -127,10 +128,11 @@ func (a *ClaudeAdapter) HandleStatusLineUpdate(input *schema.ClaudeStatusLineInp
 		func(snap *schema.Snapshot) error {
 			now := time.Now().UTC()
 
-			// Model info from status line (authoritative). The display name
-			// never replaces the model ID.
+			// Model info from status line (authoritative). The model ID is
+			// client-controlled and sanitized to prevent terminal injection
+			// when the value is later rendered.
 			if input.Model.ID != "" {
-				snap.Model.ID = input.Model.ID
+				snap.Model.ID = secure.SanitizeField(input.Model.ID)
 				snap.Model.MetadataSource = "client_statusline"
 			}
 			if input.Model.DisplayName != "" {
@@ -244,6 +246,9 @@ func (a *ClaudeAdapter) HandleStatusLineUpdate(input *schema.ClaudeStatusLineInp
 			if snap.Compaction.AwaitingPostObservation && newObservation {
 				completeCompaction(snap, now)
 				sawCompactionCompletion = true
+				if snap.Compaction.LastResult != nil {
+					compactionReductionPct = snap.Compaction.LastResult.ReductionPct
+				}
 			}
 
 			snap.Session.LastEventAt = now
@@ -253,8 +258,12 @@ func (a *ClaudeAdapter) HandleStatusLineUpdate(input *schema.ClaudeStatusLineInp
 		appendEventBestEffort(a.Paths, schema.ClientClaudeCode, sessionID,
 			state.Event{Type: state.EventStatusObserved, Model: input.Model.ID})
 		if sawCompactionCompletion {
+			detail := "unknown"
+			if compactionReductionPct != nil {
+				detail = fmt.Sprintf("%.0f%%", *compactionReductionPct)
+			}
 			appendEventBestEffort(a.Paths, schema.ClientClaudeCode, sessionID,
-				state.Event{Type: state.EventCompactionCompleted})
+				state.Event{Type: state.EventCompactionCompleted, Detail: detail})
 		}
 	}
 	return err

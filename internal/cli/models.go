@@ -14,29 +14,44 @@ import (
 
 // cmdModels implements `fi models`.
 func cmdModels(paths state.Paths, args []string, stdout, stderr io.Writer) int {
-	modelName := ""
-	forceRefresh := false
-
+	var modelName string
+	var forceRefresh bool
+	var flagArgs []string
 	for i := 0; i < len(args); i++ {
-		switch args[i] {
+		a := args[i]
+		switch a {
 		case "--model":
-			if i+1 < len(args) {
-				i++
-				modelName = args[i]
+			if i+1 >= len(args) {
+				fmt.Fprintln(stderr, "usage error: --model requires a value")
+				return 2
 			}
+			i++
+			modelName = args[i]
 		case "--refresh":
 			forceRefresh = true
+		default:
+			if strings.HasPrefix(a, "--") {
+				fmt.Fprintf(stderr, "usage error: unknown flag %q\n", a)
+				return 2
+			}
+			flagArgs = append(flagArgs, a)
 		}
 	}
+	_ = flagArgs
 
 	gs := loadGlobal(paths)
 
 	if forceRefresh {
 		client := newAPIClient()
+		if client == nil {
+			fmt.Fprintln(stderr, "error: FREEINFERENCE_BASE_URL is invalid (must be HTTPS, no userinfo)")
+			return 1
+		}
 		refresher := background.NewRefresher(client, paths, os.Getenv("FI_HEALTH_URL"))
 		result := refresher.ForceRefresh()
 		if result.Error != "" {
 			fmt.Fprintf(stderr, "refresh error: %s\n", result.Error)
+			return 1
 		}
 		gs = loadGlobal(paths)
 	}

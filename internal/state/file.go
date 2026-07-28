@@ -135,13 +135,15 @@ func (p Paths) RefreshLock(worker string) string {
 
 // EnsureDirs creates all required directories under the cache root.
 // Uses 0700 permissions for security (only the user can access session data).
+// Rejects symlinks to prevent symlink-following attacks where an attacker
+// could redirect state writes to an unintended location.
 func (p Paths) EnsureDirs() error {
 	dirs := []string{
 		p.CacheDir,
 		p.GlobalDir(),
 	}
 	for _, d := range dirs {
-		if err := os.MkdirAll(d, 0700); err != nil {
+		if err := ensureSecureDir(d); err != nil {
 			return fmt.Errorf("mkdir %s: %w", d, err)
 		}
 	}
@@ -149,8 +151,39 @@ func (p Paths) EnsureDirs() error {
 }
 
 // EnsureSessionDir creates the per-session directory with restricted permissions.
+// Rejects existing symlinks at the session path.
 func (p Paths) EnsureSessionDir(clientType, sessionID string) error {
-	return os.MkdirAll(p.SessionDir(clientType, sessionID), 0700)
+	dir := p.SessionDir(clientType, sessionID)
+	if err := ensureSecureDir(dir); err != nil {
+		return err
+	}
+	// Enforce 0700 on the session dir (in case umask or prior mode was laxer).
+	return os.Chmod(dir, 0700)
+}
+
+// ensureSecureDir creates a directory after verifying no symlink exists at
+// the target path. If a symlink is found, it is NOT followed — the error is
+// returned. If the directory already exists and is not a symlink, it is a no-op.
+func ensureSecureDir(dir string) error {
+	// Check for an existing symlink at the target path.
+	if info, err := os.Lstat(dir); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refusing to follow symlink at %s", dir)
+		}
+		// Directory already exists and is not a symlink.
+		if info.IsDir() {
+			return nil
+		}
+		// A regular file is in the way — remove it so MkdirAll can succeed.
+		if err := os.Remove(dir); err != nil {
+			return fmt.Errorf("remove non-directory at %s: %w", dir, err)
+		}
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	// Enforce 0700 even if MkdirAll skipped existing path with laxer mode.
+	return os.Chmod(dir, 0700)
 }
 
 // ============================================================
@@ -207,13 +240,25 @@ func WriteJSONAtomically(path string, v any) error {
 
 // ReadJSON reads and decodes JSON from path into v.
 // Returns os.ErrNotExist if the file does not exist.
+// Rejects files with trailing garbage after the JSON value (likely a
+// partial write or corruption) — the decode will not reach EOF.
 func ReadJSON(path string, v any) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	return json.NewDecoder(f).Decode(v)
+	dec := json.NewDecoder(f)
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	// Verify there is no trailing non-whitespace content. A truncated file
+	// or one with appended garbage from a failed write would otherwise
+	// decode successfully on the prefix and silently drop the corruption.
+	if dec.More() {
+		return fmt.Errorf("trailing data after JSON value in %s", path)
+	}
+	return nil
 }
 
 // ============================================================
@@ -333,8 +378,7 @@ func UpdateSnapshot(paths Paths, clientType, sessionID string, initialize func()
 // LoadGlobal reads the global state. Each resource is loaded independently —
 // a corrupt or unreadable file for one resource does not poison the others.
 // Missing files are silently skipped (the corresponding field stays nil).
-// JSON decode errors for a single resource are logged to diagnostics but do
-// not prevent the remaining resources from loading.
+// Corrupt files are quarantined aside so future refreshes start clean.
 func LoadGlobal(paths Paths) (*schema.GlobalState, error) {
 	gs := &schema.GlobalState{}
 
@@ -343,19 +387,45 @@ func LoadGlobal(paths Paths) (*schema.GlobalState, error) {
 	// not discard valid circuit-breaker state.
 
 	var loadErr error
-	if err := ReadJSON(paths.GlobalHealth(), &gs.Health); err != nil && !os.IsNotExist(err) {
+	if err := readJSONQuarantine(paths.GlobalHealth(), &gs.Health, "health"); err != nil {
 		loadErr = err
 	}
-	if err := ReadJSON(paths.GlobalModels(), &gs.Models); err != nil && !os.IsNotExist(err) {
+	if err := readJSONQuarantine(paths.GlobalModels(), &gs.Models, "models"); err != nil {
 		loadErr = err
 	}
-	if err := ReadJSON(paths.GlobalAccountUsage(), &gs.AccountUsage); err != nil && !os.IsNotExist(err) {
+	if err := readJSONQuarantine(paths.GlobalAccountUsage(), &gs.AccountUsage, "account-usage"); err != nil {
 		loadErr = err
 	}
-	if err := ReadJSON(paths.GlobalCircuitBreakers(), &gs.CircuitBreakers); err != nil && !os.IsNotExist(err) {
+	if err := readJSONQuarantine(paths.GlobalCircuitBreakers(), &gs.CircuitBreakers, "circuit-breakers"); err != nil {
 		loadErr = err
 	}
 	return gs, loadErr
+}
+
+// readJSONQuarantine reads JSON from path into v, quarantining the file if it
+// cannot be decoded. The resource name is used in the quarantine filename.
+func readJSONQuarantine(path string, v any, resourceName string) error {
+	if err := ReadJSON(path, v); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		// Corrupt file: quarantine it so future refreshes do not see stale
+		// or invalid data.
+		quarantineGlobalFile(path, resourceName, schema.QuarantineReason(err))
+		return fmt.Errorf("quarantined %s: %w", resourceName, err)
+	}
+	return nil
+}
+
+// quarantineGlobalFile renames a corrupt global resource file aside so
+// subsequent refreshes start fresh. Best-effort — errors are ignored.
+func quarantineGlobalFile(path, resourceName, reason string) {
+	if path == "" {
+		return
+	}
+	dst := path + ".quarantine-" + resourceName + "-" + reason
+	_ = os.Rename(path, dst)
+	_ = os.Remove(path + ChecksumFileSuffix)
 }
 
 // SaveHealth writes the health cache atomically.

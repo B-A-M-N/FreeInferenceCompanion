@@ -3,6 +3,7 @@ package schema
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 )
 
@@ -61,11 +62,71 @@ func ValidateSnapshot(s *Snapshot) error {
 		return fmt.Errorf("invalid model access state %q", s.Model.AccessState)
 	}
 
-	// Used percentage, when present, must be in [0, 100].
+	// Used percentage, when present, must be in [0, 100] and finite.
 	if s.LiveContext != nil && s.LiveContext.UsedPercentage != nil {
 		p := *s.LiveContext.UsedPercentage
+		if math.IsNaN(p) || math.IsInf(p, 0) {
+			return fmt.Errorf("used_percentage is not finite: %v", p)
+		}
 		if p < 0 || p > 100 {
 			return fmt.Errorf("used_percentage out of range: %f", p)
+		}
+	}
+
+	// Remaining percentage, when present, must be in [0, 100] and finite.
+	if s.LiveContext != nil && s.LiveContext.RemainingPercentage != nil {
+		r := *s.LiveContext.RemainingPercentage
+		if math.IsNaN(r) || math.IsInf(r, 0) {
+			return fmt.Errorf("remaining_percentage is not finite: %v", r)
+		}
+		if r < 0 || r > 100 {
+			return fmt.Errorf("remaining_percentage out of range: %f", r)
+		}
+	}
+
+	// Token counts must be non-negative when present.
+	if s.LiveContext != nil {
+		lc := s.LiveContext
+		if lc.TotalInputTokens != nil && *lc.TotalInputTokens < 0 {
+			return fmt.Errorf("total_input_tokens is negative: %d", *lc.TotalInputTokens)
+		}
+		if lc.TotalOutputTokens != nil && *lc.TotalOutputTokens < 0 {
+			return fmt.Errorf("total_output_tokens is negative: %d", *lc.TotalOutputTokens)
+		}
+		if lc.ContextWindowSize != nil && *lc.ContextWindowSize < 0 {
+			return fmt.Errorf("context_window_size is negative: %d", *lc.ContextWindowSize)
+		}
+	}
+
+	// Cache analysis shares, when present, must be in [0, 1] and finite.
+	if s.CacheAnalysis != nil {
+		ca := s.CacheAnalysis
+		if ca.CacheReadShare != nil {
+			v := *ca.CacheReadShare
+			if math.IsNaN(v) || math.IsInf(v, 0) {
+				return fmt.Errorf("cache_read_share is not finite: %v", v)
+			}
+			if v < 0 || v > 1 {
+				return fmt.Errorf("cache_read_share out of range [0,1]: %f", v)
+			}
+		}
+		if ca.CacheCreationShare != nil {
+			v := *ca.CacheCreationShare
+			if math.IsNaN(v) || math.IsInf(v, 0) {
+				return fmt.Errorf("cache_creation_share is not finite: %v", v)
+			}
+			if v < 0 || v > 1 {
+				return fmt.Errorf("cache_creation_share out of range [0,1]: %f", v)
+			}
+		}
+		if ca.FreshInputShare != nil {
+			v := *ca.FreshInputShare
+			if math.IsNaN(v) || math.IsInf(v, 0) {
+				return fmt.Errorf("fresh_input_share is not finite: %v", v)
+			}
+			if v < 0 || v > 1 {
+				return fmt.Errorf("fresh_input_share out of range [0,1]: %f", v)
+			}
 		}
 	}
 
@@ -93,9 +154,11 @@ func ValidateSnapshot(s *Snapshot) error {
 // version. Returns ErrUnsupportedSchema when the version is too old to migrate
 // or newer than this binary understands.
 //
-// Migrations are strictly additive: they populate new fields with their null
-// defaults and bump SchemaVersion. They never invent data the older snapshot
-// did not contain.
+// Migrations are strictly additive where possible: they populate new fields
+// from legacy equivalents and bump SchemaVersion. When a legacy field has no
+// modern equivalent (because the newer schema splits what was a single value
+// into several), the migration leaves the newer fields null and drops the
+// legacy value — reconstructing a synthesized split would be fabrication.
 func MigrateSnapshot(s *Snapshot) error {
 	if s == nil {
 		return errors.New("nil snapshot")
@@ -104,15 +167,22 @@ func MigrateSnapshot(s *Snapshot) error {
 		return fmt.Errorf("%w: file=%d, current=%d", ErrUnsupportedSchema, s.SchemaVersion, CurrentSchemaVersion)
 	}
 
-	// v1 → v2: split cumulative totals from latest-request usage and add the
-	// rolling cache analysis. A v1 snapshot may have only the legacy fields;
-	// everything else is left null.
 	for s.SchemaVersion < CurrentSchemaVersion {
 		switch s.SchemaVersion {
 		case 0, 1:
-			// v1 only had a flat request-usage block; the v2 LiveContext
-			// pointer is populated by the caller before persisting. Nothing
-			// to fabricate here.
+			// v1 → v2: v1 stored session totals and latest-request usage in a
+			// flat structure. v2 splits these into LiveContext.Total* (session
+			// totals) and LiveContext.LatestRequest (per-request breakdown).
+			// The v1 flat representation cannot be cleanly decomposed: it had
+			// a single "input_tokens" and "output_tokens" that represented
+			// the latest request, and no separate session-total concept.
+			// We migrate by leaving LiveContext null (rather than fabricating
+			// a split) — the next status-line update will populate it fresh.
+			s.LiveContext = nil
+			// v2 also introduced the rolling CacheAnalysis. A v1 snapshot had
+			// observations but no derived analysis. Leave it nil — AnalyzeCache
+			// will rebuild it on the next status-line update.
+			s.CacheAnalysis = nil
 			s.SchemaVersion = 2
 		default:
 			return fmt.Errorf("%w: no migration from %d", ErrUnsupportedSchema, s.SchemaVersion)

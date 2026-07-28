@@ -262,7 +262,8 @@ func ReadEvents(paths Paths, clientType, sessionID string, max int) ([]Event, er
 }
 
 // CleanupStaleSessions removes session directories whose newest file is older
-// than MaxSessionAge. Best-effort.
+// than MaxSessionAge. Best-effort. Also prunes stale entries from the session
+// index so the index does not accumulate dead references.
 func CleanupStaleSessions(paths Paths, now time.Time) error {
 	sessionsRoot := paths.CacheDir + "/sessions"
 	entries, err := os.ReadDir(sessionsRoot)
@@ -291,7 +292,51 @@ func CleanupStaleSessions(paths Paths, now time.Time) error {
 			}
 		}
 	}
-	return nil
+	// Prune stale entries from the index.
+	return pruneStaleIndexEntries(paths, now)
+}
+
+// pruneStaleIndexEntries removes index entries whose session directories no
+// longer exist (already GC'd) or whose last event exceeds MaxSessionAge.
+// Best-effort; errors are returned but callers treat them as advisory.
+func pruneStaleIndexEntries(paths Paths, now time.Time) error {
+	// Nonblocking: cleanup is opportunistic. If the lock is held, skip this
+	// round — a later refresh or hook will retry.
+	fl := NewFileLock(paths.GlobalSessionIndexLock())
+	if err := fl.Acquire(); err != nil {
+		if IsLockBusy(err) {
+			return nil
+		}
+		return err
+	}
+	defer fl.Release()
+
+	idx, err := LoadSessionIndex(paths)
+	if err != nil {
+		return err
+	}
+	if len(idx.Sessions) == 0 {
+		return nil
+	}
+
+	var live []SessionIndexEntry
+	for _, e := range idx.Sessions {
+		// Drop entries whose last event exceeds the retention window.
+		if now.Sub(e.LastEventAt) > MaxSessionAge {
+			continue
+		}
+		// Drop entries whose session directory no longer exists.
+		dir := paths.SessionDir(e.Client, e.SessionID)
+		if _, err := os.Stat(dir); os.IsNotExist(err) {
+			continue
+		}
+		live = append(live, e)
+	}
+	if len(live) == len(idx.Sessions) {
+		return nil
+	}
+	idx.Sessions = live
+	return WriteJSONAtomically(paths.GlobalSessionIndex(), idx)
 }
 
 func isStale(dir string, now time.Time) bool {

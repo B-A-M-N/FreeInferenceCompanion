@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/background"
@@ -23,7 +24,8 @@ func cmdRefresh(paths state.Paths, args []string, stdout, stderr io.Writer) int 
 	worker := ""
 
 	for i := 0; i < len(args); i++ {
-		switch args[i] {
+		a := args[i]
+		switch a {
 		case "--force":
 			force = true
 		case "--if-stale":
@@ -31,10 +33,19 @@ func cmdRefresh(paths state.Paths, args []string, stdout, stderr io.Writer) int 
 		case "--detach":
 			detach = true
 		case "--worker":
-			if i+1 < len(args) {
-				i++
-				worker = args[i]
+			if i+1 >= len(args) {
+				fmt.Fprintln(stderr, "usage error: --worker requires a value")
+				return 2
 			}
+			i++
+			worker = args[i]
+		default:
+			if strings.HasPrefix(a, "--") {
+				fmt.Fprintf(stderr, "usage error: unknown flag %q\n", a)
+				return 2
+			}
+			fmt.Fprintf(stderr, "usage error: unexpected argument %q\n", a)
+			return 2
 		}
 	}
 
