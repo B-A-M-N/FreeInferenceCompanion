@@ -48,13 +48,13 @@ func statusInput(sessionID, modelID string, totalIn, totalOut, ctxSize int64, us
 		Model:     schema.ModelStatus{ID: modelID, DisplayName: "Display " + modelID},
 		SessionID: sessionID,
 		ContextWindow: schema.ContextWindowStatus{
-			TotalInputTokens:  totalIn,
-			TotalOutputTokens: totalOut,
+			TotalInputTokens:  &totalIn,
+			TotalOutputTokens: &totalOut,
 			CurrentUsage: &schema.CurrentUsage{
-				InputTokens:              fresh,
-				OutputTokens:             output,
-				CacheCreationInputTokens: cacheCreate,
-				CacheReadInputTokens:     cacheRead,
+				InputTokens:              &fresh,
+				OutputTokens:             &output,
+				CacheCreationInputTokens: &cacheCreate,
+				CacheReadInputTokens:     &cacheRead,
 			},
 			ContextWindowSize: ctxSize,
 			UsedPercentage:    &usedPct,
@@ -270,6 +270,41 @@ func TestClaudeDuplicateStatusRenderIgnored(t *testing.T) {
 	}
 }
 
+// TestClaudeDuplicateRenderDoesNotInflateCounters is the P1-5 regression
+// test: submitting the identical status payload ten times must not inflate
+// the consecutive cache counters beyond the single unique observation.
+func TestClaudeDuplicateRenderDoesNotInflateCounters(t *testing.T) {
+	confirmFreeInference(t)
+	paths := testPaths(t)
+	a := NewClaudeAdapter(paths)
+
+	// Low-cache observation (10% read share).
+	input := statusInput("s1", "glm-5.1", 160000, 2000, 200000, 80,
+		150000, 5000, 5000, 2000)
+
+	// Submit the same payload ten times.
+	for i := 0; i < 10; i++ {
+		if err := a.HandleStatusLineUpdate(input, "s1"); err != nil {
+			t.Fatalf("status update %d: %v", i, err)
+		}
+	}
+
+	snap := loadClaude(t, paths, "s1")
+	if len(snap.UsageObservations) != 1 {
+		t.Errorf("observations = %d, want 1", len(snap.UsageObservations))
+	}
+	if snap.CacheAnalysis == nil {
+		t.Fatal("cache analysis missing")
+	}
+	if snap.CacheAnalysis.ConsecutiveLow != 1 {
+		t.Errorf("consecutive low = %d, want 1 (duplicate renders must not inflate counters)",
+			snap.CacheAnalysis.ConsecutiveLow)
+	}
+	if snap.CacheAnalysis.ConsecutiveRecovered != 0 {
+		t.Errorf("consecutive recovered = %d, want 0", snap.CacheAnalysis.ConsecutiveRecovered)
+	}
+}
+
 func TestClaudeCompactionFlow(t *testing.T) {
 	confirmFreeInference(t)
 	paths := testPaths(t)
@@ -356,6 +391,36 @@ func TestClaudeCompactionWithoutPreTokensStaysUnknown(t *testing.T) {
 	}
 	if snap.Compaction.LastResult != nil && snap.Compaction.LastResult.ReductionPct != nil {
 		t.Error("reduction must stay unknown without token data")
+	}
+}
+
+// TestClaudeCompactionPostGreaterThanPreNoNegative is the P1-12 regression
+// test: if the post-compaction observation has more tokens than pre, the
+// result must be recorded as unknown — never as a negative reduction.
+func TestClaudeCompactionPostGreaterThanPreNoNegative(t *testing.T) {
+	confirmFreeInference(t)
+	paths := testPaths(t)
+	a := NewClaudeAdapter(paths)
+
+	// Seed: 162K active.
+	_ = a.HandleStatusLineUpdate(statusInput("s1", "glm-5.1", 160000, 2000, 200000, 81, 5000, 150000, 5000, 2000), "s1")
+	_ = a.HandlePreCompact(&schema.ClaudeHookInput{SessionID: "s1", Trigger: "manual"}, "s1")
+	_ = a.HandlePostCompact(&schema.ClaudeHookInput{SessionID: "s1", Trigger: "manual"}, "s1")
+
+	// Post-compaction observation with MORE tokens than pre (should not happen
+	// in practice, but the guard must prevent a negative reduction).
+	_ = a.HandleStatusLineUpdate(statusInput("s1", "glm-5.1", 200000, 2000, 200000, 100, 5000, 190000, 5000, 2000), "s1")
+
+	snap := loadClaude(t, paths, "s1")
+	if snap.Compaction.AwaitingPostObservation {
+		t.Error("measurement should have completed")
+	}
+	r := snap.Compaction.LastResult
+	if r == nil {
+		t.Fatal("no compaction result")
+	}
+	if r.ReductionPct != nil {
+		t.Errorf("post > pre must not produce a negative reduction, got %.2f%%", *r.ReductionPct)
 	}
 }
 
@@ -507,6 +572,55 @@ func TestClaudeTotalsVsLatestRequestSeparation(t *testing.T) {
 	// And the latest-request fresh input must not have leaked into totals.
 	if lc.TotalInputTokens != nil && *lc.TotalInputTokens == 5000 {
 		t.Error("latest-request fresh input leaked into session totals")
+	}
+}
+
+// TestClaudeZeroTelemetryPreserved is the P1-6 regression test: explicit zero
+// totals and current-usage values must be preserved as zero, not converted to
+// nil. Absent fields stay nil; zero values stay zero.
+func TestClaudeZeroTelemetryPreserved(t *testing.T) {
+	confirmFreeInference(t)
+	paths := testPaths(t)
+	a := NewClaudeAdapter(paths)
+
+	// Zero totals and zero current-usage (Claude reports zeros before first response).
+	input := statusInput("s1", "glm-5.1", 0, 0, 200000, 0, 0, 0, 0, 0)
+	if err := a.HandleStatusLineUpdate(input, "s1"); err != nil {
+		t.Fatalf("status update: %v", err)
+	}
+
+	snap := loadClaude(t, paths, "s1")
+	if snap.LiveContext == nil {
+		t.Fatal("live context missing")
+	}
+	lc := snap.LiveContext
+
+	// Zero totals must be preserved (not collapsed to nil).
+	if lc.TotalInputTokens == nil {
+		t.Error("TotalInputTokens: zero was converted to nil (lost explicit zero)")
+	} else if *lc.TotalInputTokens != 0 {
+		t.Errorf("TotalInputTokens = %d, want 0", *lc.TotalInputTokens)
+	}
+	if lc.TotalOutputTokens == nil {
+		t.Error("TotalOutputTokens: zero was converted to nil (lost explicit zero)")
+	} else if *lc.TotalOutputTokens != 0 {
+		t.Errorf("TotalOutputTokens = %d, want 0", *lc.TotalOutputTokens)
+	}
+
+	// Zero current-usage fields must be preserved.
+	if lc.LatestRequest == nil {
+		t.Fatal("latest request missing")
+	}
+	lr := lc.LatestRequest
+	if lr.FreshInputTokens == nil {
+		t.Error("FreshInputTokens: zero was converted to nil")
+	} else if *lr.FreshInputTokens != 0 {
+		t.Errorf("FreshInputTokens = %d, want 0", *lr.FreshInputTokens)
+	}
+	if lr.CacheReadInputTokens == nil {
+		t.Error("CacheReadInputTokens: zero was converted to nil")
+	} else if *lr.CacheReadInputTokens != 0 {
+		t.Errorf("CacheReadInputTokens = %d, want 0", *lr.CacheReadInputTokens)
 	}
 }
 

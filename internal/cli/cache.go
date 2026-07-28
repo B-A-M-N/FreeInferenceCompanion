@@ -76,27 +76,25 @@ func cmdCache(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 
 	if readPct < 20 && ca.RequestSamples >= 3 {
 		fmt.Fprintln(stdout, "  🔴 CRITICAL: Cache read share < 20%")
-		fmt.Fprintln(stdout, "     → Use a consistent system prompt / prefix across requests")
-		fmt.Fprintln(stdout, "     → Keep the first ~1000 tokens identical between requests")
-		fmt.Fprintln(stdout, "     → Avoid varying instructions, timestamps, or random seeds at the top")
+		fmt.Fprintln(stdout, "     → Use a consistent system prompt / prefix across requests (heuristic)")
+		fmt.Fprintln(stdout, "     → Keep early tokens identical between requests — avoid timestamps or random seeds")
 		hasRecs = true
 	} else if readPct < 50 {
 		fmt.Fprintln(stdout, "  🟡 LOW: Cache read share < 50%")
-		fmt.Fprintln(stdout, "     → Standardize common context (docs, schemas, examples) at the start")
-		fmt.Fprintln(stdout, "     → Consider fewer, larger requests vs many small ones")
+		fmt.Fprintln(stdout, "     → Standardize common context (docs, schemas, examples) at the start (heuristic)")
 		hasRecs = true
 	}
 
 	if createPct > 30 && readPct < 50 {
 		fmt.Fprintln(stdout, "  🟡 HIGH CACHE CREATION: New cache > 30% but reads low")
 		fmt.Fprintln(stdout, "     → You're creating cache entries but not reusing them")
-		fmt.Fprintln(stdout, "     → Check if session is being reset or context window sliding")
+		fmt.Fprintln(stdout, "     → Check if session is being reset or context window sliding (heuristic)")
 		hasRecs = true
 	}
 
 	if lc != nil && lc.UsedPercentage != nil && *lc.UsedPercentage > 70 {
 		fmt.Fprintf(stdout, "  🟡 CONTEXT PRESSURE: %.0f%% used\n", *lc.UsedPercentage)
-		fmt.Fprintln(stdout, "     → Compact earlier (fi context --compact at 60%)")
+		fmt.Fprintln(stdout, "     → Compact earlier — for Claude Code use /compact; for other clients use their compaction command")
 		fmt.Fprintln(stdout, "     → Drop older history; keep only relevant context")
 		hasRecs = true
 	}
@@ -117,7 +115,7 @@ func cmdCache(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintln(stdout, "  1. Fixed prefix: Put system prompt + few-shots + static docs FIRST")
 	fmt.Fprintln(stdout, "  2. Session reuse: Continue same session (don't 'new chat' for related tasks)")
 	fmt.Fprintln(stdout, "  3. Batch related: Group similar queries in one session")
-	fmt.Fprintln(stdout, "  4. Compact early: Run compaction at 60-70% not 90%")
+	fmt.Fprintln(stdout, "  4. Compact early: Use your client's compaction command at 60-70%, not 90%")
 
 	return 0
 }

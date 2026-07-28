@@ -2,9 +2,11 @@ package background
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -334,5 +336,77 @@ func TestNoInferenceEndpointDuringMonitoring(t *testing.T) {
 
 	if inferenceHits.Load() != 0 {
 		t.Errorf("monitoring must never hit inference or unknown endpoints: %d hits", inferenceHits.Load())
+	}
+}
+
+// TestConcurrentCircuitBreakerUpdates is the P1-2 regression test: two workers
+// (models and health) simultaneously recording failures and resets must not
+// lose each other's updates. Before the fix, LoadGlobal → modify → SaveCB ran
+// without a shared lock, so one worker's save could clobber the other's.
+func TestConcurrentCircuitBreakerUpdates(t *testing.T) {
+	paths := state.NewPathsWithDir(t.TempDir())
+	if err := paths.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Use a real refresher with a guaranteed-to-fail client so recordFailure
+	// always fires.
+	client := api.NewClient("http://127.0.0.1:1", "", 100*time.Millisecond)
+	r := NewRefresher(client, paths, "http://127.0.0.1:1/health")
+
+	var wg sync.WaitGroup
+	now := time.Now()
+
+	// Goroutine A: record models failures concurrently.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 20; i++ {
+			r.recordFailure(WorkerModels, errors.New("fail"), now)
+		}
+	}()
+
+	// Goroutine B: record health failures concurrently.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 20; i++ {
+			r.recordFailure(WorkerHealth, errors.New("fail"), now)
+		}
+	}()
+
+	// Goroutine C: reset models breaker concurrently (race against A).
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 20; i++ {
+			r.resetCircuitBreaker(WorkerModels)
+		}
+	}()
+
+	wg.Wait()
+
+	// After all concurrent operations, both endpoints must have a circuit
+	// breaker record. The exact final state depends on the race between
+	// recordFailure and reset, but neither endpoint's record should be lost.
+	cbs, err := state.LoadGlobal(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundModels := false
+	foundHealth := false
+	for _, cb := range cbs.CircuitBreakers {
+		if cb.Endpoint == WorkerModels {
+			foundModels = true
+		}
+		if cb.Endpoint == WorkerHealth {
+			foundHealth = true
+		}
+	}
+	if !foundModels {
+		t.Error("models circuit breaker was lost in concurrent updates")
+	}
+	if !foundHealth {
+		t.Error("health circuit breaker was lost in concurrent updates")
 	}
 }

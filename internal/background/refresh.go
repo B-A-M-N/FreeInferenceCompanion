@@ -162,13 +162,14 @@ func (r *Refresher) RefreshIfStale() *RefreshResult {
 }
 
 // ForceRefresh synchronously refreshes regardless of staleness or breaker
-// state (explicit user request). Breaker state is still updated.
+// state (explicit user request). Still routes through the worker locking path
+// so concurrent refreshes coalesce properly (no lost-update on circuit breakers).
 func (r *Refresher) ForceRefresh() *RefreshResult {
 	result := &RefreshResult{}
 	now := time.Now()
-	r.refreshModels(result, now)
+	r.forceRefreshModels(result, now)
 	if r.HealthURL != "" {
-		r.refreshHealth(result, now)
+		r.forceRefreshHealth(result, now)
 	}
 	return result
 }
@@ -330,52 +331,59 @@ func (r *Refresher) refreshHealth(result *RefreshResult, now time.Time) {
 
 // recordFailure opens the circuit breaker with escalating backoff.
 // A server-supplied Retry-After overrides the computed backoff.
+//
+// This uses UpdateCircuitBreaker so concurrent models/health workers cannot
+// lose each other's breaker updates (lost-update race).
 func (r *Refresher) recordFailure(endpoint string, cause error, now time.Time) {
-	gs, err := state.LoadGlobal(r.Paths)
-	if err != nil {
-		return
-	}
-
-	cb := findOrCreateCB(&gs.CircuitBreakers, endpoint)
-	cb.FailureCount++
-	cb.LastFailureAt = &now
-	cb.State = schema.CircuitOpen
-
 	interval := time.Duration(0)
 	var he *api.HTTPError
 	if errors.As(cause, &he) && he.RetryAfter > 0 {
 		interval = he.RetryAfter
-	} else {
-		idx := cb.FailureCount - 1
-		if idx >= len(backoffIntervals) {
-			idx = len(backoffIntervals) - 1
-		}
-		if idx < 0 {
-			idx = 0
-		}
-		interval = backoffIntervals[idx]
 	}
 
-	nextRetry := now.Add(interval)
-	cb.NextRetryAt = &nextRetry
+	err := state.UpdateCircuitBreakers(r.Paths, func(cbs []schema.CircuitBreaker) ([]schema.CircuitBreaker, error) {
+		cb := findOrCreateCB(&cbs, endpoint)
+		cb.FailureCount++
+		cb.LastFailureAt = &now
+		cb.State = schema.CircuitOpen
 
-	_ = state.SaveCircuitBreakers(r.Paths, gs.CircuitBreakers)
+		if interval == 0 {
+			idx := cb.FailureCount - 1
+			if idx >= len(backoffIntervals) {
+				idx = len(backoffIntervals) - 1
+			}
+			if idx < 0 {
+				idx = 0
+			}
+			interval = backoffIntervals[idx]
+		}
+
+		nextRetry := now.Add(interval)
+		cb.NextRetryAt = &nextRetry
+		return cbs, nil
+	})
+	if err != nil && !state.IsLockBusy(err) {
+		// Lock contention is fail-open; only log unexpected errors.
+		// (In production this would use structured logging.)
+		_ = err
+	}
 }
 
 func (r *Refresher) resetCircuitBreaker(endpoint string) {
-	gs, err := state.LoadGlobal(r.Paths)
-	if err != nil {
-		return
-	}
-	for i := range gs.CircuitBreakers {
-		if gs.CircuitBreakers[i].Endpoint == endpoint {
-			gs.CircuitBreakers[i].State = schema.CircuitClosed
-			gs.CircuitBreakers[i].FailureCount = 0
-			gs.CircuitBreakers[i].LastFailureAt = nil
-			gs.CircuitBreakers[i].NextRetryAt = nil
+	err := state.UpdateCircuitBreakers(r.Paths, func(cbs []schema.CircuitBreaker) ([]schema.CircuitBreaker, error) {
+		for i := range cbs {
+			if cbs[i].Endpoint == endpoint {
+				cbs[i].State = schema.CircuitClosed
+				cbs[i].FailureCount = 0
+				cbs[i].LastFailureAt = nil
+				cbs[i].NextRetryAt = nil
+			}
 		}
+		return cbs, nil
+	})
+	if err != nil && !state.IsLockBusy(err) {
+		_ = err
 	}
-	_ = state.SaveCircuitBreakers(r.Paths, gs.CircuitBreakers)
 }
 
 func findOrCreateCB(cbs *[]schema.CircuitBreaker, endpoint string) *schema.CircuitBreaker {
@@ -389,4 +397,38 @@ func findOrCreateCB(cbs *[]schema.CircuitBreaker, endpoint string) *schema.Circu
 		State:    schema.CircuitClosed,
 	})
 	return &(*cbs)[len(*cbs)-1]
+}
+
+// forceRefreshModels refreshes models under the worker lock but without the
+// staleness / circuit-breaker gates. Used by ForceRefresh.
+func (r *Refresher) forceRefreshModels(result *RefreshResult, now time.Time) {
+	fl := state.NewFileLock(r.Paths.RefreshLock(WorkerModels))
+	if err := fl.Acquire(); err != nil {
+		if state.IsLockBusy(err) {
+			result.Skipped = true
+			result.SkipReason = "another worker running"
+		} else {
+			result.Error = "acquire lock"
+		}
+		return
+	}
+	defer fl.Release()
+	r.refreshModels(result, now)
+}
+
+// forceRefreshHealth refreshes health under the worker lock but without the
+// staleness / circuit-breaker gates. Used by ForceRefresh.
+func (r *Refresher) forceRefreshHealth(result *RefreshResult, now time.Time) {
+	fl := state.NewFileLock(r.Paths.RefreshLock(WorkerHealth))
+	if err := fl.Acquire(); err != nil {
+		if state.IsLockBusy(err) {
+			result.Skipped = true
+			result.SkipReason = "another worker running"
+		} else {
+			result.Error = "acquire lock"
+		}
+		return
+	}
+	defer fl.Release()
+	r.refreshHealth(result, now)
 }

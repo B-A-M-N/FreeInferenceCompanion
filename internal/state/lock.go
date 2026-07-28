@@ -45,6 +45,22 @@ func (l *FileLock) Acquire() error {
 	return nil
 }
 
+// AcquireBlocking opens the lock file and acquires an exclusive blocking flock.
+// Unlike Acquire, this blocks until the lock is available. Use this for
+// background workers (not hooks) where a brief wait is acceptable.
+func (l *FileLock) AcquireBlocking() error {
+	f, err := os.OpenFile(l.path, os.O_RDWR|os.O_CREATE, 0600)
+	if err != nil {
+		return fmt.Errorf("open lock file: %w", err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		f.Close()
+		return fmt.Errorf("acquire blocking lock: %w", err)
+	}
+	l.f = f
+	return nil
+}
+
 // Release releases the flock and closes the file.
 func (l *FileLock) Release() error {
 	if l.f == nil {

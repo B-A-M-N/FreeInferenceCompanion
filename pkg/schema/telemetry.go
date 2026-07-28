@@ -45,9 +45,12 @@ type ModelStatus struct {
 
 // ContextWindowStatus from Claude status line.
 // CurrentUsage may be null before the first response and immediately after compaction.
+// TotalInputTokens and TotalOutputTokens are pointers so that an explicit zero
+// (reported by Claude before the first response) is preserved and never collapsed
+// to nil. Null means "not reported"; zero means "explicitly zero".
 type ContextWindowStatus struct {
-	TotalInputTokens  int64         `json:"total_input_tokens"`
-	TotalOutputTokens int64         `json:"total_output_tokens"`
+	TotalInputTokens  *int64       `json:"total_input_tokens"`
+	TotalOutputTokens *int64       `json:"total_output_tokens"`
 	CurrentUsage      *CurrentUsage `json:"current_usage"`
 	ContextWindowSize int64         `json:"context_window_size"`
 	UsedPercentage    *float64      `json:"used_percentage"`
@@ -55,11 +58,12 @@ type ContextWindowStatus struct {
 
 // CurrentUsage breaks down the latest API response token usage.
 // This is null when Claude has not yet produced a response in the current turn.
+// All fields are pointers so explicit zero values are preserved (null ≠ zero).
 type CurrentUsage struct {
-	InputTokens              int64 `json:"input_tokens"`
-	OutputTokens             int64 `json:"output_tokens"`
-	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
-	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+	InputTokens              *int64 `json:"input_tokens"`
+	OutputTokens             *int64 `json:"output_tokens"`
+	CacheCreationInputTokens *int64 `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     *int64 `json:"cache_read_input_tokens"`
 }
 
 // CostStatus from Claude status line.

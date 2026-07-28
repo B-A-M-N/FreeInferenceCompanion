@@ -152,25 +152,32 @@ func (a *ClaudeAdapter) HandleStatusLineUpdate(input *schema.ClaudeStatusLineInp
 			var latest *schema.RequestUsage
 			if input.ContextWindow.CurrentUsage != nil {
 				cu := input.ContextWindow.CurrentUsage
-				fresh := cu.InputTokens
-				cacheRead := cu.CacheReadInputTokens
-				cacheCreate := cu.CacheCreationInputTokens
-				output := cu.OutputTokens
-				latest = &schema.RequestUsage{
-					FreshInputTokens:         &fresh,
-					CacheCreationInputTokens: &cacheCreate,
-					CacheReadInputTokens:     &cacheRead,
-					OutputTokens:             &output,
+				latest = &schema.RequestUsage{}
+				if cu.InputTokens != nil {
+					v := *cu.InputTokens
+					latest.FreshInputTokens = &v
+				}
+				if cu.CacheReadInputTokens != nil {
+					v := *cu.CacheReadInputTokens
+					latest.CacheReadInputTokens = &v
+				}
+				if cu.CacheCreationInputTokens != nil {
+					v := *cu.CacheCreationInputTokens
+					latest.CacheCreationInputTokens = &v
+				}
+				if cu.OutputTokens != nil {
+					v := *cu.OutputTokens
+					latest.OutputTokens = &v
 				}
 			}
 
 			var totalInput, totalOutput *int64
-			if input.ContextWindow.TotalInputTokens > 0 {
-				t := input.ContextWindow.TotalInputTokens
+			if input.ContextWindow.TotalInputTokens != nil {
+				t := *input.ContextWindow.TotalInputTokens
 				totalInput = &t
 			}
-			if input.ContextWindow.TotalOutputTokens > 0 {
-				t := input.ContextWindow.TotalOutputTokens
+			if input.ContextWindow.TotalOutputTokens != nil {
+				t := *input.ContextWindow.TotalOutputTokens
 				totalOutput = &t
 			}
 			var ctxSize *int64
@@ -217,7 +224,9 @@ func (a *ClaudeAdapter) HandleStatusLineUpdate(input *schema.ClaudeStatusLineInp
 				}
 				newObservation = engine.AddObservation(snap, obs)
 			}
-			engine.AnalyzeCache(snap, ActiveContextTokens(snap), now)
+			if newObservation {
+				engine.AnalyzeCache(snap, ActiveContextTokens(snap), now)
+			}
 
 			// Pressure state from the authoritative used percentage.
 			if usedPct != nil {
@@ -252,6 +261,14 @@ func (a *ClaudeAdapter) HandleStatusLineUpdate(input *schema.ClaudeStatusLineInp
 }
 
 // completeCompaction calculates the reduction from pre/post context totals.
+// Guards against false and negative reductions:
+//   - pre must be a valid positive token count
+//   - post must be a valid positive token count
+//   - post must be <= pre (compaction cannot increase context)
+//   - the completion must happen within a bounded timeout of PostCompact
+//
+// If any guard fails, the result is recorded as unknown (no ReductionPct)
+// rather than as a misleading or negative reduction.
 func completeCompaction(snap *schema.Snapshot, now time.Time) {
 	snap.Compaction.AwaitingPostObservation = false
 	pre := snap.Compaction.PreTokens
@@ -261,13 +278,41 @@ func completeCompaction(snap *schema.Snapshot, now time.Time) {
 		At:        now,
 		PreTokens: pre,
 	}
-	if post > 0 {
-		result.PostTokens = &post
+
+	// Valid pre-compaction observation is required.
+	if pre == nil || *pre <= 0 {
+		snap.Compaction.LastResult = result
+		return
 	}
-	if pre != nil && *pre > 0 && post > 0 {
-		reduction := float64(*pre-post) / float64(*pre) * 100
-		result.ReductionPct = &reduction
+
+	// Bounded completion timeout: if too much time has passed since
+	// PostCompact, the post observation may not represent the compacted
+	// context — record as unknown.
+	if snap.Compaction.InitiatedAt != nil {
+		const compactionCompletionTimeout = 5 * time.Minute
+		if now.Sub(*snap.Compaction.InitiatedAt) > compactionCompletionTimeout {
+			snap.Compaction.LastResult = result
+			return
+		}
 	}
+
+	// Valid post observation required.
+	if post <= 0 {
+		snap.Compaction.LastResult = result
+		return
+	}
+
+	// Compaction cannot increase context. If post >= pre, the observation
+	// does not represent a successful compaction — record as unknown rather
+	// than a false or negative reduction.
+	if post >= *pre {
+		snap.Compaction.LastResult = result
+		return
+	}
+
+	result.PostTokens = &post
+	reduction := float64(*pre-post) / float64(*pre) * 100
+	result.ReductionPct = &reduction
 	if snap.Compaction.Trigger != nil {
 		result.Trigger = *snap.Compaction.Trigger
 	}

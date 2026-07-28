@@ -92,6 +92,11 @@ func (p Paths) GlobalAccountUsage() string {
 	return filepath.Join(p.GlobalDir(), "account-usage.json")
 }
 
+// GlobalCircuitBreakersLock returns the path to the circuit breaker state lock.
+func (p Paths) GlobalCircuitBreakersLock() string {
+	return filepath.Join(p.GlobalDir(), "circuit-breakers.lock")
+}
+
 // GlobalCircuitBreakers returns the path to the circuit breaker state.
 func (p Paths) GlobalCircuitBreakers() string {
 	return filepath.Join(p.GlobalDir(), "circuit-breakers.json")
@@ -355,4 +360,35 @@ func SaveCircuitBreakers(paths Paths, cbs []schema.CircuitBreaker) error {
 		return err
 	}
 	return WriteJSONAtomically(paths.GlobalCircuitBreakers(), cbs)
+}
+
+// UpdateCircuitBreakers applies a mutation to the circuit breaker state under a
+// cross-process lock. This prevents the lost-update race where two workers
+// (models and health) both read-modify-write the same circuit-breakers file
+// concurrently. The lock is held for the duration of the mutation. Unlike the
+// session locks (which are non-blocking because they serve hooks), this lock
+// blocks briefly — it is only called from background refreshers, where a short
+// wait is acceptable to guarantee no updates are dropped.
+func UpdateCircuitBreakers(paths Paths, mutate func(cbs []schema.CircuitBreaker) ([]schema.CircuitBreaker, error)) error {
+	lockPath := paths.GlobalCircuitBreakersLock()
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0700); err != nil {
+		return err
+	}
+	// Blocking acquire: background workers can wait; hooks never call this.
+	fl := NewFileLock(lockPath)
+	if err := fl.AcquireBlocking(); err != nil {
+		return err
+	}
+	defer fl.Release()
+
+	var cbs []schema.CircuitBreaker
+	if err := ReadJSON(paths.GlobalCircuitBreakers(), &cbs); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("load circuit breakers: %w", err)
+	}
+
+	updated, err := mutate(cbs)
+	if err != nil {
+		return err
+	}
+	return SaveCircuitBreakers(paths, updated)
 }

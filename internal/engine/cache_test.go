@@ -192,3 +192,33 @@ func TestQualifyCacheWarningResolvesAfterRecovery(t *testing.T) {
 		t.Error("three recovered observations should resolve the warning")
 	}
 }
+
+// TestAnalyzeCacheIdempotentCounters verifies that re-running analysis on
+// unchanged state never inflates consecutive counters — duplicate status-line
+// renders of the same response cannot manufacture a cache-low warning.
+func TestAnalyzeCacheIdempotentCounters(t *testing.T) {
+	snap := &schema.Snapshot{}
+	now := time.Now()
+	// Add three low-cache observations (10% read share).
+	for _, total := range []int64{100000, 101000, 102000} {
+		AddObservation(snap, obs("m", total, 1000, total-10000, 5000, 5000, 1000))
+	}
+
+	// Analyze once.
+	AnalyzeCache(snap, 100000, now)
+	if snap.CacheAnalysis.ConsecutiveLow != 3 {
+		t.Fatalf("after first analysis, consecutive low = %d, want 3", snap.CacheAnalysis.ConsecutiveLow)
+	}
+
+	// Analyze the same state ten more times.
+	for i := 0; i < 10; i++ {
+		AnalyzeCache(snap, 100000, now)
+	}
+
+	if snap.CacheAnalysis.ConsecutiveLow != 3 {
+		t.Fatalf("after reanalysis, consecutive low = %d, want 3 (counters must be idempotent)", snap.CacheAnalysis.ConsecutiveLow)
+	}
+	if snap.CacheAnalysis.ConsecutiveRecovered != 0 {
+		t.Fatalf("after reanalysis, consecutive recovered = %d, want 0", snap.CacheAnalysis.ConsecutiveRecovered)
+	}
+}

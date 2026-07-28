@@ -80,6 +80,11 @@ func observationInput(o schema.UsageObservation) (fresh, read, creation int64, o
 // AnalyzeCache recomputes the rolling cache analysis on the snapshot from its
 // unique usage observations. currentContextTokens is the best available
 // estimate of the active context size (used for warning qualification).
+//
+// This function is idempotent: consecutive counters are recomputed from the
+// observation sequence on every call, so re-running it on unchanged state
+// never inflates them. Duplicate status-line renders of the same response
+// cannot manufacture a cache-low warning.
 func AnalyzeCache(snap *schema.Snapshot, currentContextTokens int64, now time.Time) {
 	if snap.CacheAnalysis == nil {
 		snap.CacheAnalysis = &schema.CacheAnalysis{}
@@ -112,6 +117,8 @@ func AnalyzeCache(snap *schema.Snapshot, currentContextTokens int64, now time.Ti
 		analysis.CacheCreationShare = nil
 		analysis.FreshInputShare = nil
 		analysis.Trend = schema.TrendInsufficientData
+		analysis.ConsecutiveLow = 0
+		analysis.ConsecutiveRecovered = 0
 		return
 	}
 
@@ -121,6 +128,8 @@ func AnalyzeCache(snap *schema.Snapshot, currentContextTokens int64, now time.Ti
 		analysis.CacheCreationShare = nil
 		analysis.FreshInputShare = nil
 		analysis.Trend = schema.TrendInsufficientData
+		analysis.ConsecutiveLow = 0
+		analysis.ConsecutiveRecovered = 0
 		return
 	}
 
@@ -149,17 +158,59 @@ func AnalyzeCache(snap *schema.Snapshot, currentContextTokens int64, now time.Ti
 	analysis.CacheCreationShare = &creationShare
 	analysis.FreshInputShare = &freshShare
 
-	// Consecutive low / recovered counters drive warning activation & resolution.
-	if readShare < CacheReadLowThreshold {
-		analysis.ConsecutiveLow++
-		analysis.ConsecutiveRecovered = 0
-	} else if readShare > CacheReadRecoveredThreshold {
-		analysis.ConsecutiveRecovered++
-		analysis.ConsecutiveLow = 0
-	} else {
-		analysis.ConsecutiveLow = 0
-		analysis.ConsecutiveRecovered = 0
+	// Idempotent consecutive counters: walk the observation sequence from
+	// most recent backward, counting how many consecutive observations had
+	// read share below / above the thresholds. Recomputing from scratch
+	// (rather than incrementing) guarantees that re-running analysis on
+	// unchanged state never inflates the counters — duplicate status-line
+	// renders cannot manufacture a warning.
+	analysis.ConsecutiveLow = 0
+	analysis.ConsecutiveRecovered = 0
+	var streak int // 0 = unset, -1 = low, +1 = recovered
+	for i := len(obs) - 1; i >= 0; i-- {
+		share := observationReadShare(obs[i])
+		if share == nil {
+			break // incomplete observation breaks the streak
+		}
+		var bucket int // -1 low, 0 neutral, +1 recovered
+		switch {
+		case *share < CacheReadLowThreshold:
+			bucket = -1
+		case *share > CacheReadRecoveredThreshold:
+			bucket = 1
+		default:
+			bucket = 0
+		}
+		if bucket == 0 {
+			break // neutral zone breaks any streak
+		}
+		if streak == 0 {
+			streak = bucket
+		}
+		if bucket != streak {
+			break // direction changed — stop counting
+		}
+		if bucket < 0 {
+			analysis.ConsecutiveLow++
+		} else {
+			analysis.ConsecutiveRecovered++
+		}
 	}
+}
+
+// observationReadShare returns the cache read share for a single observation,
+// or nil if the observation has no valid input breakdown.
+func observationReadShare(o schema.UsageObservation) *float64 {
+	fresh, read, creation, ok := observationInput(o)
+	if !ok {
+		return nil
+	}
+	total := fresh + read + creation
+	if total <= 0 {
+		return nil
+	}
+	share := float64(read) / float64(total)
+	return &share
 }
 
 // CacheWarningDecision is the outcome of cache-low warning qualification.
