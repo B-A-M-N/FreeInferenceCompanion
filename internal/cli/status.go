@@ -23,7 +23,7 @@ func cmdStatus(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 			flagArgs = append(flagArgs, a)
 		}
 	}
-	clientType, sessionID, _, _, err := parseClientSessionFlags(flagArgs)
+	clientType, sessionID, _, reveal, err := parseClientSessionFlags(flagArgs)
 	if err != nil {
 		fmt.Fprintf(stderr, "usage error: %v\n", err)
 		return 2
@@ -76,13 +76,13 @@ func cmdStatus(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 		return 0
 	}
 
-	printFullStatus(stdout, resolved.Snap, gs)
+	printFullStatus(stdout, resolved.Snap, gs, reveal)
 	return 0
 }
 
-func printFullStatus(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalState) {
+func printFullStatus(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalState, reveal bool) {
 	fmt.Fprintf(stdout, "FreeInference Companion %s\n", Version)
-	fmt.Fprintf(stdout, "Session:  %s (%s)\n", snap.Session.ID, snap.Session.Status)
+	fmt.Fprintf(stdout, "Session:  %s (%s)\n", displaySessionID(snap.Session.ID, reveal), snap.Session.Status)
 	fmt.Fprintf(stdout, "Client:   %s\n", snap.Client.Type)
 	provider := snap.Provider.Name
 	if !snap.Provider.Confirmed {

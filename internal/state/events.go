@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/secure"
@@ -58,6 +59,19 @@ const (
 	MaxDetailLen            = 200
 )
 
+// droppedEvents counts events that were dropped because the per-session event
+// lock was held by another process (AppendEvent runs on the hook path and
+// must not block). Exposed via DroppedEvents() for observability. A rising
+// count under load indicates event contention; events are best-effort.
+var droppedEvents int64
+
+// DroppedEvents returns the count of events dropped due to lock contention
+// since process start. AppendEvent is nonblocking on the hook path — under
+// contention it increments this counter and returns ErrLockBusy.
+func DroppedEvents() int64 {
+	return atomic.LoadInt64(&droppedEvents)
+}
+
 // AppendEvent appends one sanitized event to the per-session events.jsonl.
 // Rotation/retention runs opportunistically. AppendEvent is best-effort: any
 // I/O error returns an error but callers (hooks) should treat it as fail-open.
@@ -104,10 +118,16 @@ func AppendEvent(paths Paths, clientType, sessionID string, ev Event) error {
 	line = append(line, '\n')
 
 	// Hold the per-session event lock so concurrent appends don't lose data
-	// during rotation (which replaces the file). Rotation uses the same lock.
+	// during rotation (which replaces the file). The lock is NONBLOCKING
+	// because AppendEvent runs on the hook path (25 ms p95 budget). If the
+	// lock is held by another process, we drop the event and increment
+	// droppedEvents rather than stall the hook.
 	lockPath := path + ".lock"
 	fl := NewFileLock(lockPath)
-	if err := fl.AcquireBlocking(); err != nil {
+	if err := fl.Acquire(); err != nil {
+		if IsLockBusy(err) {
+			atomic.AddInt64(&droppedEvents, 1)
+		}
 		return err
 	}
 	defer fl.Release()
@@ -135,9 +155,13 @@ func RotateEvents(paths Paths, clientType, sessionID string) error {
 	dir := paths.SessionDir(clientType, sessionID)
 	lockPath := path + ".lock"
 
-	// Acquire the event lock so concurrent appends wait for rotation to finish.
+	// Nonblocking: rotation runs on the hook path. If the lock is held,
+	// skip rotation this time — it will be retried on the next event.
 	fl := NewFileLock(lockPath)
-	if err := fl.AcquireBlocking(); err != nil {
+	if err := fl.Acquire(); err != nil {
+		if IsLockBusy(err) {
+			return nil // best-effort; don't stall the hook
+		}
 		return err
 	}
 	defer fl.Release()
@@ -225,8 +249,10 @@ func ReadEvents(paths Paths, clientType, sessionID string, max int) ([]Event, er
 		}
 		all = append(all, ev)
 	}
-	if max > 0 && len(all) > max {
-		all = all[len(all)-max:]
+	if max > 0 {
+		if len(all) > max {
+			all = all[len(all)-max:]
+		}
 		// Reverse to newest-first.
 		for i, j := 0, len(all)-1; i < j; i, j = i+1, j-1 {
 			all[i], all[j] = all[j], all[i]

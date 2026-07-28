@@ -3,6 +3,7 @@ package state
 import (
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -63,6 +64,31 @@ func TestReadEventsReturnsChronological(t *testing.T) {
 	}
 	if events[0].Type != EventSessionStarted || events[2].Type != EventTurnStopped {
 		t.Errorf("order wrong: %v", events)
+	}
+}
+
+// TestReadEventsMaxNewestFirst verifies that ReadEvents with max > 0 always
+// returns newest-first, even when the file contains fewer events than max.
+func TestReadEventsMaxNewestFirst(t *testing.T) {
+	paths := testPaths(t)
+	if err := paths.EnsureSessionDir(schema.ClientClaudeCode, "s1"); err != nil {
+		t.Fatal(err)
+	}
+	for _, ty := range []string{EventSessionStarted, EventPromptSubmitted, EventTurnStopped} {
+		if err := AppendEvent(paths, schema.ClientClaudeCode, "s1", Event{Type: ty}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// max=10 but only 3 events exist — must still reverse.
+	events, err := ReadEvents(paths, schema.ClientClaudeCode, "s1", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("want 3 events, got %d", len(events))
+	}
+	if events[0].Type != EventTurnStopped || events[2].Type != EventSessionStarted {
+		t.Errorf("expected newest-first, got %v", events)
 	}
 }
 
@@ -145,4 +171,75 @@ func markDirOld(dir string, t time.Time) error {
 		_ = os.Chtimes(dir+"/"+e.Name(), t, t)
 	}
 	return nil
+}
+
+// TestEventAppendNonblocking verifies that AppendEvent does not block when the
+// event lock is held — it drops the event and returns ErrLockBusy immediately.
+// This is the hook-latency contract: a stalled lock holder must not stall a hook.
+func TestEventAppendNonblocking(t *testing.T) {
+	paths := testPaths(t)
+	if err := paths.EnsureSessionDir(schema.ClientClaudeCode, "s1"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Hold the event lock from this process.
+	eventPath := paths.SessionEvents(schema.ClientClaudeCode, "s1")
+	lockPath := eventPath + ".lock"
+	fl := NewFileLock(lockPath)
+	if err := fl.Acquire(); err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	defer fl.Release()
+
+	// AppendEvent must return immediately with ErrLockBusy, not block.
+	start := time.Now()
+	err := AppendEvent(paths, schema.ClientClaudeCode, "s1",
+		Event{Type: EventPromptSubmitted})
+	elapsed := time.Since(start)
+
+	if !IsLockBusy(err) {
+		t.Errorf("expected ErrLockBusy, got %v", err)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("AppendEvent blocked for %v, must return immediately", elapsed)
+	}
+	if DroppedEvents() < 1 {
+		t.Errorf("droppedEvents = %d, want >= 1", DroppedEvents())
+	}
+}
+
+// TestConcurrentEventAppend verifies that concurrent appends from multiple
+// goroutines do not lose data and that rotation does not block.
+func TestConcurrentEventAppend(t *testing.T) {
+	paths := testPaths(t)
+	if err := paths.EnsureSessionDir(schema.ClientClaudeCode, "s1"); err != nil {
+		t.Fatal(err)
+	}
+
+	before := DroppedEvents()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				_ = AppendEvent(paths, schema.ClientClaudeCode, "s1",
+					Event{Type: EventPromptSubmitted})
+			}
+		}()
+	}
+	wg.Wait()
+
+	events, err := ReadEvents(paths, schema.ClientClaudeCode, "s1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Some events may be dropped under lock contention, but the total
+	// (persisted + dropped) must equal 500.
+	dropped := DroppedEvents() - before
+	if int64(len(events))+dropped != 500 {
+		t.Errorf("events(%d) + dropped(%d) = %d, want 500", len(events), dropped, int64(len(events))+dropped)
+	}
 }

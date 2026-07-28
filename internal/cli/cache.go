@@ -12,7 +12,7 @@ import (
 // cmdCache implements `fi cache` — analyzes cache efficiency and gives
 // actionable, zero-risk recommendations to improve cache hit rates.
 func cmdCache(paths state.Paths, args []string, stdout, stderr io.Writer) int {
-	clientType, sessionID, _, _, err := parseClientSessionFlags(args)
+	clientType, sessionID, _, reveal, err := parseClientSessionFlags(args)
 	if err != nil {
 		fmt.Fprintf(stderr, "usage error: %v\n", err)
 		return 2
@@ -32,7 +32,7 @@ func cmdCache(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 	ca := snap.CacheAnalysis
 	lc := snap.LiveContext
 
-	fmt.Fprintf(stdout, "Cache Analysis for %s (%s)\n", snap.Session.ID, snap.Client.Type)
+	fmt.Fprintf(stdout, "Cache Analysis for %s (%s)\n", displaySessionID(snap.Session.ID, reveal), snap.Client.Type)
 	fmt.Fprintln(stdout, strings.Repeat("-", 60))
 
 	if ca == nil || ca.RequestSamples == 0 {

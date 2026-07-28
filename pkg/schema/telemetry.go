@@ -49,8 +49,8 @@ type ModelStatus struct {
 // (reported by Claude before the first response) is preserved and never collapsed
 // to nil. Null means "not reported"; zero means "explicitly zero".
 type ContextWindowStatus struct {
-	TotalInputTokens  *int64       `json:"total_input_tokens"`
-	TotalOutputTokens *int64       `json:"total_output_tokens"`
+	TotalInputTokens  *int64        `json:"total_input_tokens"`
+	TotalOutputTokens *int64        `json:"total_output_tokens"`
 	CurrentUsage      *CurrentUsage `json:"current_usage"`
 	ContextWindowSize int64         `json:"context_window_size"`
 	UsedPercentage    *float64      `json:"used_percentage"`

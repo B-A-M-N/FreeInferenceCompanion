@@ -7,12 +7,23 @@ import (
 	"time"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/adapters"
+	"github.com/b-a-m-n/freeinference-companion/internal/secure"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
 
 // cmdSessions implements `fi sessions`.
-func cmdSessions(paths state.Paths, _ []string, stdout, stderr io.Writer) int {
+func cmdSessions(paths state.Paths, args []string, stdout, stderr io.Writer) int {
+	reveal := false
+	var flagArgs []string
+	for _, a := range args {
+		if a == "--include-identifiers" {
+			reveal = true
+		} else {
+			flagArgs = append(flagArgs, a)
+		}
+	}
+	_ = flagArgs // no other flags currently accepted
 	idx, err := state.LoadSessionIndex(paths)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
@@ -24,11 +35,11 @@ func cmdSessions(paths state.Paths, _ []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "%-12s %-40s %-20s %-10s %s\n", "CLIENT", "SESSION", "MODEL", "STATUS", "LAST EVENT")
 	for _, e := range idx.Sessions {
-		sessionID := e.SessionID
+		sessionID := displaySessionID(e.SessionID, reveal)
 		if len(sessionID) > 40 {
 			sessionID = sessionID[:37] + "..."
 		}
-		model := e.ModelID
+		model := secure.SanitizeField(e.ModelID)
 		if len(model) > 20 {
 			model = model[:17] + "..."
 		}
