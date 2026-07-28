@@ -94,23 +94,33 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 
 	// 8. Model catalog reachable.
 	client := newAPIClient()
-	probeResult := client.Probe()
-	add("API endpoint", probeResult.Endpoint)
-	add("Model catalog", probeResult.Catalog)
-
-	// Authentication is only claimed when verified by a real authenticated
-	// operation — never inferred from key presence.
-	if os.Getenv("FREEINFERENCE_API_KEY") != "" {
-		if api.VerifyAPIKey(os.Getenv("FREEINFERENCE_API_KEY")) {
-			add("API key format", api.CheckResult{State: api.CheckPass, Detail: "present, format valid (not verified)"})
-		} else {
-			add("API key format", api.CheckResult{State: api.CheckUnknown, Detail: "unusual format"})
-		}
+	if client == nil {
+		// newAPIClient returned nil because the base URL failed validation.
+		// Don't make a request — report the configuration error.
+		add("API endpoint", api.CheckResult{State: api.CheckFail, Detail: "FREEINFERENCE_BASE_URL is invalid (must be HTTPS, no userinfo)"})
+		add("Model catalog", api.CheckResult{State: api.CheckUnknown, Detail: "skipped due to invalid endpoint"})
+		add("API key format", api.CheckResult{State: api.CheckUnknown, Detail: "skipped due to invalid endpoint"})
+		add("Authentication", api.CheckResult{State: api.CheckUnknown, Detail: "skipped due to invalid endpoint"})
+		add("Model access", api.CheckResult{State: api.CheckUnknown, Detail: "skipped due to invalid endpoint"})
 	} else {
-		add("API key format", api.CheckResult{State: api.CheckUnknown, Detail: "not set"})
+		probeResult := client.Probe()
+		add("API endpoint", probeResult.Endpoint)
+		add("Model catalog", probeResult.Catalog)
+
+		// Authentication is only claimed when verified by a real authenticated
+		// operation — never inferred from key presence.
+		if os.Getenv("FREEINFERENCE_API_KEY") != "" {
+			if api.VerifyAPIKey(os.Getenv("FREEINFERENCE_API_KEY")) {
+				add("API key format", api.CheckResult{State: api.CheckPass, Detail: "present, format valid (not verified)"})
+			} else {
+				add("API key format", api.CheckResult{State: api.CheckUnknown, Detail: "unusual format"})
+			}
+		} else {
+			add("API key format", api.CheckResult{State: api.CheckUnknown, Detail: "not set"})
+		}
+		add("Authentication", probeResult.Authentication)
+		add("Model access", probeResult.ModelAccess)
 	}
-	add("Authentication", probeResult.Authentication)
-	add("Model access", probeResult.ModelAccess)
 
 	// 9. Optional synthetic inference probe (explicit consent required).
 	if probe {

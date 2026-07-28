@@ -16,11 +16,16 @@ import (
 )
 
 // newAPIClient builds an API client from the environment.
+// Validates the base URL: requires HTTPS (except loopback with opt-in),
+// rejects userinfo/fragments. Returns nil if the URL is invalid.
 func newAPIClient() *api.Client {
 	baseURL := os.Getenv("FREEINFERENCE_BASE_URL")
 	apiKey := os.Getenv("FREEINFERENCE_API_KEY")
 	if baseURL == "" {
 		baseURL = api.DefaultBaseURL
+	}
+	if _, err := api.ValidateBaseURL(baseURL); err != nil {
+		return nil
 	}
 	client := api.NewClient(baseURL, apiKey, 30*time.Second)
 	client.Version = Version

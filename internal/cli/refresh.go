@@ -39,6 +39,10 @@ func cmdRefresh(paths state.Paths, args []string, stdout, stderr io.Writer) int 
 	}
 
 	client := newAPIClient()
+	if client == nil {
+		fmt.Fprintln(stderr, "error: FREEINFERENCE_BASE_URL is invalid (must be HTTPS, no userinfo)")
+		return 1
+	}
 	refresher := background.NewRefresher(client, paths, os.Getenv("FI_HEALTH_URL"))
 
 	// Worker mode: do the actual fetch under a cross-process lock.

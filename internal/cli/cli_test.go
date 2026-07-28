@@ -32,6 +32,7 @@ func TestDoctorRunsAllChecksWithoutEarlyExit(t *testing.T) {
 	t.Setenv("FREEINFERENCE_BASE_URL", server.URL)
 	t.Setenv("FREEINFERENCE_API_KEY", "")
 	t.Setenv("FI_HEALTH_URL", "")
+	t.Setenv("FI_ALLOW_INSECURE_LOCALHOST", "1")
 
 	// Put the running binary on PATH so `fi` resolves correctly.
 	if exe, err := os.Executable(); err == nil {
@@ -95,8 +96,11 @@ func TestRefreshWorkerFlag(t *testing.T) {
 	}))
 	defer server.Close()
 
+	// Use the test server URL with the insecure-localhost opt-in since
+	// httptest serves on HTTP loopback.
 	t.Setenv("FREEINFERENCE_BASE_URL", server.URL)
 	t.Setenv("FREEINFERENCE_API_KEY", "")
+	t.Setenv("FI_ALLOW_INSECURE_LOCALHOST", "1")
 
 	var out, errOut strings.Builder
 	code := cmdRefresh(testPaths(t), []string{"--worker", "models"}, &out, &errOut)

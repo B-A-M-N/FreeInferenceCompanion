@@ -243,7 +243,7 @@ func TestStatusResolvesLatestSession(t *testing.T) {
 
 	runFI(t, dir, hookInput("sess-resolve"), nil, "hook", "claude-code", "SessionStart")
 
-	stdout, _, code := runFI(t, dir, "", nil, "status")
+	stdout, _, code := runFI(t, dir, "", nil, "status", "--include-identifiers")
 	if code != 0 {
 		t.Errorf("exit = %d", code)
 	}
@@ -316,7 +316,7 @@ func TestSessionsCommand(t *testing.T) {
 	dir := t.TempDir()
 	runFI(t, dir, hookInput("sess-list"), nil, "hook", "claude-code", "SessionStart")
 
-	stdout, _, code := runFI(t, dir, "", nil, "sessions")
+	stdout, _, code := runFI(t, dir, "", nil, "sessions", "--include-identifiers")
 	if code != 0 {
 		t.Errorf("exit = %d", code)
 	}

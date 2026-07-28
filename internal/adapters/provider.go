@@ -93,8 +93,11 @@ func DetectProvider() ProviderDetection {
 
 	// 5. API key with no conflicting provider configuration.
 	// A conflicting configuration is an explicit base URL pointing elsewhere.
+	// Include FREEINFERENCE_BASE_URL in the conflict check — otherwise
+	// FREEINFERENCE_BASE_URL=https://attacker.example with FREEINFERENCE_API_KEY
+	// would still be classified as confirmed FreeInference.
 	conflict := false
-	for _, env := range []string{"ANTHROPIC_BASE_URL", "OPENAI_BASE_URL"} {
+	for _, env := range []string{"FREEINFERENCE_BASE_URL", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL"} {
 		v := os.Getenv(env)
 		if v != "" && !isFreeInferenceURL(v) {
 			conflict = true

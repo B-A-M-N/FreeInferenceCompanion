@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -37,6 +38,38 @@ const (
 	SyntheticProbeValue  = "synthetic"
 )
 
+// ValidateBaseURL validates a base URL for credentialed API requests.
+// Rules:
+//   - Must be absolute (scheme + host).
+//   - Must be HTTPS, unless it's loopback AND FI_ALLOW_INSECURE_LOCALHOST=1.
+//   - Must not contain userinfo.
+//   - Must not have a fragment.
+// Returns the normalized URL string on success, or an error.
+func ValidateBaseURL(rawURL string) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid base URL: %w", err)
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("invalid base URL: must be absolute (scheme://host)")
+	}
+	if u.User != nil {
+		return "", fmt.Errorf("invalid base URL: must not contain userinfo")
+	}
+	if u.Fragment != "" {
+		return "", fmt.Errorf("invalid base URL: must not have a fragment")
+	}
+	if u.Scheme != "https" {
+		host := u.Hostname()
+		isLoopback := host == "localhost" || host == "127.0.0.1" || strings.HasPrefix(host, "127.") || host == "::1"
+		allowInsecure := os.Getenv("FI_ALLOW_INSECURE_LOCALHOST") == "1"
+		if !(isLoopback && allowInsecure) {
+			return "", fmt.Errorf("invalid base URL: must be HTTPS (set FI_ALLOW_INSECURE_LOCALHOST=1 for loopback development)")
+		}
+	}
+	return u.String(), nil
+}
+
 // Client communicates with the FreeInference API.
 type Client struct {
 	BaseURL    string
@@ -47,6 +80,9 @@ type Client struct {
 
 // NewClient creates a new FreeInference API client.
 // If apiKey is empty, requests are made without authentication.
+// baseURL is validated: must be HTTPS (except loopback with FI_ALLOW_INSECURE_LOCALHOST),
+// must not contain userinfo, and must not be a non-FreeInference host when
+// apiKey is set (to prevent credential leakage to attacker-controlled endpoints).
 func NewClient(baseURL, apiKey string, timeout time.Duration) *Client {
 	if baseURL == "" {
 		baseURL = DefaultBaseURL
@@ -62,6 +98,19 @@ func NewClient(baseURL, apiKey string, timeout time.Duration) *Client {
 				DialContext:           dialer.DialContext,
 				TLSHandshakeTimeout:   TLSHandshakeTimeout,
 				ResponseHeaderTimeout: ResponseHeaderTimeout,
+			},
+			// Strict redirect policy: reject cross-origin redirects so a
+			// malicious endpoint can't redirect our credentialed request
+			// to an attacker-controlled host.
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if len(via) >= 1 {
+					return http.ErrUseLastResponse
+				}
+				// Reject cross-origin redirects.
+				if req.URL.Host != via[0].URL.Host {
+					return http.ErrUseLastResponse
+				}
+				return nil
 			},
 		},
 	}

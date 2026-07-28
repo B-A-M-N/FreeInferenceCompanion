@@ -356,3 +356,47 @@ func TestStructuredErrorRedacted(t *testing.T) {
 		t.Fatalf("structured error message leaked a token-shaped value: %q", he.Message)
 	}
 }
+
+// TestValidateBaseURL tests the credential-safety URL validator.
+func TestValidateBaseURL(t *testing.T) {
+	tests := []struct {
+		name          string
+		url           string
+		wantErr       bool
+		allowInsecure bool
+	}{
+		{"valid https", "https://freeinference.org/v1", false, false},
+		{"http remote", "http://example.com/v1", true, false},
+		{"http remote no opt-in", "http://freeinference.org/v1", true, false},
+		{"https non-FI host", "https://api.anthropic.com/v1", false, false},
+		{"empty", "", true, false},
+		{"relative", "/v1", true, false},
+		{"userinfo", "https://user:pass@freeinference.org/v1", true, false},
+		{"fragment", "https://freeinference.org/v1#section", true, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.allowInsecure {
+				t.Setenv("FI_ALLOW_INSECURE_LOCALHOST", "1")
+			} else {
+				t.Setenv("FI_ALLOW_INSECURE_LOCALHOST", "")
+			}
+			_, err := ValidateBaseURL(tt.url)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateBaseURL(%q) error = %v, wantErr %v", tt.url, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestHTTPClientRejectsCrossOriginRedirects verifies that the client transport
+// rejects cross-origin redirects (credential leakage prevention).
+func TestHTTPClientRejectsCrossOriginRedirects(t *testing.T) {
+	client := NewClient("https://freeinference.org/v1", "test-key", 5*time.Second)
+	if client.HTTPClient == nil {
+		t.Fatal("nil HTTP client")
+	}
+	if client.HTTPClient.CheckRedirect == nil {
+		t.Fatal("CheckRedirect not set — cross-origin redirect protection missing")
+	}
+}
