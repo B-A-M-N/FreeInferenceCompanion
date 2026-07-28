@@ -103,6 +103,15 @@ func AppendEvent(paths Paths, clientType, sessionID string, ev Event) error {
 	}
 	line = append(line, '\n')
 
+	// Hold the per-session event lock so concurrent appends don't lose data
+	// during rotation (which replaces the file). Rotation uses the same lock.
+	lockPath := path + ".lock"
+	fl := NewFileLock(lockPath)
+	if err := fl.AcquireBlocking(); err != nil {
+		return err
+	}
+	defer fl.Release()
+
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
@@ -115,10 +124,24 @@ func AppendEvent(paths Paths, clientType, sessionID string, ev Event) error {
 }
 
 // RotateEvents truncates the events file when it exceeds bounds. It keeps the
-// most recent MaxEventsPerSession lines. Best-effort; errors are returned but
-// callers treat them as advisory.
+// most recent MaxEventsPerSession lines. Enforces both the byte limit AND the
+// line count limit independently — the file is rotated when either is exceeded.
+//
+// AppendEvent holds the per-session event lock during writes; RotateEvents
+// acquires the same lock so concurrent appends cannot be lost during rotation.
+// Best-effort; errors are returned but callers treat them as advisory.
 func RotateEvents(paths Paths, clientType, sessionID string) error {
 	path := paths.SessionEvents(clientType, sessionID)
+	dir := paths.SessionDir(clientType, sessionID)
+	lockPath := path + ".lock"
+
+	// Acquire the event lock so concurrent appends wait for rotation to finish.
+	fl := NewFileLock(lockPath)
+	if err := fl.AcquireBlocking(); err != nil {
+		return err
+	}
+	defer fl.Release()
+
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -127,7 +150,17 @@ func RotateEvents(paths Paths, clientType, sessionID string) error {
 		return err
 	}
 	if info.Size() <= MaxEventBytesPerSession {
-		return nil
+		// Byte limit not exceeded — but check line count anyway.
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		lines := splitLines(data)
+		if len(lines) <= MaxEventsPerSession {
+			return nil
+		}
+		// Over line count but under byte limit — still rotate.
+		return writeLines(dir, path, lines[len(lines)-MaxEventsPerSession:])
 	}
 
 	data, err := os.ReadFile(path)
@@ -140,7 +173,12 @@ func RotateEvents(paths Paths, clientType, sessionID string) error {
 		lines = lines[len(lines)-MaxEventsPerSession:]
 	}
 
-	tmp, err := os.CreateTemp(paths.SessionDir(clientType, sessionID), "events-*.jsonl")
+	return writeLines(dir, path, lines)
+}
+
+// writeLines writes the given lines to path atomically via temp file + rename.
+func writeLines(dir, path string, lines [][]byte) error {
+	tmp, err := os.CreateTemp(dir, "events-*.jsonl")
 	if err != nil {
 		return err
 	}
@@ -160,7 +198,10 @@ func RotateEvents(paths Paths, clientType, sessionID string) error {
 }
 
 // ReadEvents reads up to max events from a session event log. If max <= 0,
-// all events are read.
+// all events are read in chronological order (oldest first). If max > 0,
+// the most recent max events are returned (newest first) — this is the
+// common case for display and incident response where the latest activity
+// matters most.
 func ReadEvents(paths Paths, clientType, sessionID string, max int) ([]Event, error) {
 	path := paths.SessionEvents(clientType, sessionID)
 	f, err := os.Open(path)
@@ -172,7 +213,7 @@ func ReadEvents(paths Paths, clientType, sessionID string, max int) ([]Event, er
 	}
 	defer f.Close()
 
-	var out []Event
+	var all []Event
 	dec := json.NewDecoder(f)
 	for {
 		var ev Event
@@ -180,14 +221,18 @@ func ReadEvents(paths Paths, clientType, sessionID string, max int) ([]Event, er
 			if err == io.EOF {
 				break
 			}
-			return out, err
+			return all, err
 		}
-		out = append(out, ev)
-		if max > 0 && len(out) >= max {
-			break
+		all = append(all, ev)
+	}
+	if max > 0 && len(all) > max {
+		all = all[len(all)-max:]
+		// Reverse to newest-first.
+		for i, j := 0, len(all)-1; i < j; i, j = i+1, j-1 {
+			all[i], all[j] = all[j], all[i]
 		}
 	}
-	return out, nil
+	return all, nil
 }
 
 // CleanupStaleSessions removes session directories whose newest file is older

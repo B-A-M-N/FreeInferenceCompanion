@@ -321,8 +321,8 @@ func TestClaudeCompactionFlow(t *testing.T) {
 	if !snap.Compaction.Pending {
 		t.Error("compaction should be pending")
 	}
-	if snap.Compaction.PreTokens == nil || *snap.Compaction.PreTokens != 162000 {
-		t.Errorf("pre tokens = %v, want 162000", snap.Compaction.PreTokens)
+	if snap.Compaction.PreTokens == nil || *snap.Compaction.PreTokens != 160000 {
+		t.Errorf("pre tokens = %v, want 160000", snap.Compaction.PreTokens)
 	}
 	if snap.Compaction.Trigger == nil || *snap.Compaction.Trigger != "manual" {
 		t.Errorf("trigger = %v", snap.Compaction.Trigger)
@@ -357,16 +357,16 @@ func TestClaudeCompactionFlow(t *testing.T) {
 	if r == nil {
 		t.Fatal("no compaction result")
 	}
-	if r.PreTokens == nil || *r.PreTokens != 162000 {
+	if r.PreTokens == nil || *r.PreTokens != 160000 {
 		t.Errorf("result pre tokens = %v", r.PreTokens)
 	}
-	if r.PostTokens == nil || *r.PostTokens != 82000 {
+	if r.PostTokens == nil || *r.PostTokens != 80000 {
 		t.Errorf("result post tokens = %v", r.PostTokens)
 	}
 	if r.ReductionPct == nil {
 		t.Fatal("reduction should be computed")
 	}
-	want := float64(162000-82000) / 162000 * 100
+	want := float64(160000-80000) / 160000 * 100
 	if *r.ReductionPct < want-0.5 || *r.ReductionPct > want+0.5 {
 		t.Errorf("reduction = %.2f, want ≈%.2f", *r.ReductionPct, want)
 	}
@@ -726,6 +726,40 @@ func TestClaudeStatusLineInitializationBeforeSessionStart(t *testing.T) {
 	}
 	if snap.LiveContext == nil || snap.LiveContext.UsedPercentage == nil {
 		t.Error("status update must populate live context even before SessionStart")
+	}
+}
+
+// TestClaudeActiveContextMatchesPercentage is the P1-7 invariant test: the
+// input-only ActiveContextTokens must be mathematically compatible with the
+// displayed used_percentage within rounding tolerance. This is the contract
+// that says "the token total and the percentage describe the same thing."
+func TestClaudeActiveContextMatchesPercentage(t *testing.T) {
+	confirmFreeInference(t)
+	paths := testPaths(t)
+	a := NewClaudeAdapter(paths)
+
+	// 160K input of 200K window → 80% used.
+	_ = a.HandleStatusLineUpdate(statusInput("s1", "glm-5.1", 160000, 2000, 200000, 80, 5000, 150000, 5000, 2000), "s1")
+	snap := loadClaude(t, paths, "s1")
+
+	if snap.LiveContext == nil || snap.LiveContext.UsedPercentage == nil || snap.LiveContext.ContextWindowSize == nil {
+		t.Fatal("missing live context fields")
+	}
+
+	active := ActiveContextTokens(snap)
+	window := *snap.LiveContext.ContextWindowSize
+	pct := *snap.LiveContext.UsedPercentage
+
+	// ActiveContextTokens must equal total_input_tokens (160000), not
+	// total_input + total_output (162000).
+	if active != 160000 {
+		t.Errorf("ActiveContextTokens = %d, want 160000 (input only)", active)
+	}
+
+	// And active / window must match the percentage within rounding tolerance.
+	computedPct := float64(active) / float64(window) * 100
+	if computedPct < pct-1.0 || computedPct > pct+1.0 {
+		t.Errorf("active/window = %.1f%%, reported percentage = %.1f%% — must match within 1%% tolerance", computedPct, pct)
 	}
 }
 

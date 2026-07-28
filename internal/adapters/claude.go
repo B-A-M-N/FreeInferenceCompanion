@@ -320,21 +320,21 @@ func completeCompaction(snap *schema.Snapshot, now time.Time) {
 }
 
 // ActiveContextTokens returns the best estimate of the current active context
-// size in tokens: live totals first, then the latest request's input sum,
-// then used-percentage × window size. Zero means unknown.
+// size in tokens. This is the INPUT-ONLY context total, matching Claude's
+// documented used_percentage semantics (output tokens are not part of the
+// context-pressure calculation). Used for compaction measurement and
+// pressure-state transitions where the percentage must be mathematically
+// compatible with the token total.
+//
+// Falls back to: latest-request input sum, then used-percentage × window size.
+// Zero means unknown.
 func ActiveContextTokens(snap *schema.Snapshot) int64 {
 	if snap.LiveContext == nil {
 		return 0
 	}
 	lc := snap.LiveContext
-	if lc.TotalInputTokens != nil {
-		total := *lc.TotalInputTokens
-		if lc.TotalOutputTokens != nil {
-			total += *lc.TotalOutputTokens
-		}
-		if total > 0 {
-			return total
-		}
+	if lc.TotalInputTokens != nil && *lc.TotalInputTokens > 0 {
+		return *lc.TotalInputTokens
 	}
 	if lc.LatestRequest != nil {
 		var sum int64
@@ -356,6 +356,26 @@ func ActiveContextTokens(snap *schema.Snapshot) int64 {
 		return int64(*lc.UsedPercentage / 100.0 * float64(*lc.ContextWindowSize))
 	}
 	return 0
+}
+
+// TotalContextTokens returns the full context footprint including output
+// tokens: total_input_tokens + total_output_tokens. This is a display-only
+// metric for "how many tokens has this session consumed" — it is NOT used
+// for compaction or pressure calculations (those use ActiveContextTokens,
+// which matches Claude's input-based used_percentage).
+func TotalContextTokens(snap *schema.Snapshot) int64 {
+	if snap.LiveContext == nil {
+		return 0
+	}
+	lc := snap.LiveContext
+	var total int64
+	if lc.TotalInputTokens != nil {
+		total += *lc.TotalInputTokens
+	}
+	if lc.TotalOutputTokens != nil {
+		total += *lc.TotalOutputTokens
+	}
+	return total
 }
 
 // HandleUserPromptSubmit activates the turn and produces warnings.
