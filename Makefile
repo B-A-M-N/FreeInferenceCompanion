@@ -154,7 +154,12 @@ plugin-clean-install: package
 	for z in $(RELEASE_DIR)/freeinference-companion-*.zip; do \
 		edir="$$(mktemp -d -p "$$tmpdir" 2>/dev/null || mktemp -d)"; \
 		unzip -q "$$z" -d "$$edir" && echo "extracted $$(basename $$z)"; \
-		base="$$(ls "$$edir")"; \
+		# Handle both flat and nested zip structures
+		if [ -d "$$edir/bin" ]; then \
+			base="."; \
+		else \
+			base="$$(ls "$$edir")"; \
+		fi; \
 		test -d "$$edir/$$base/bin" || { echo "FAIL: bin/ missing in $$(basename $$z)"; exit 1; }; \
 		for bin in "$$edir/$$base/bin"/*; do \
 			while [ -d "$$bin" ]; do \
