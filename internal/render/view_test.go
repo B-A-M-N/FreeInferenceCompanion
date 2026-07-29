@@ -23,11 +23,12 @@ func fixtureSnapshot(confirmed bool) *schema.Snapshot {
 	return &schema.Snapshot{
 		SchemaVersion: schema.StateVersion,
 		Client:        schema.ClientInfo{Type: schema.ClientClaudeCode},
-		Session:       schema.SessionInfo{ID: "s1", Status: schema.SessionActive},
+		Session:       schema.SessionInfo{ID: "s1", Status: schema.SessionActive, LastEventAt: time.Now()},
 		Provider:      provider,
 		Model:         schema.ModelInfo{ID: "glm-5.1", ContextLength: i64p(200000)},
 		LiveContext: &schema.LiveContext{
 			Source:            "claude_statusline",
+			ObservedAt:        time.Now(),
 			TotalInputTokens:  i64p(158000),
 			TotalOutputTokens: i64p(2000),
 			ContextWindowSize: i64p(200000),
@@ -55,7 +56,7 @@ func fixtureSnapshot(confirmed bool) *schema.Snapshot {
 func TestLineRender(t *testing.T) {
 	vm := BuildViewModel("0.1.0", fixtureSnapshot(true), &schema.GlobalState{
 		Health: &schema.HealthCache{Status: "healthy", FetchedAt: time.Now()},
-	}, time.Now())
+	}, "", time.Now(), true, "", "")
 	rc := DefaultRenderConfig()
 	rc.ColorMode = ColorNever // Test without colors for stable string matching
 	line := vm.Line(rc)
@@ -66,7 +67,7 @@ func TestLineRender(t *testing.T) {
 	if !strings.Contains(line, "ctx 80%") {
 		t.Errorf("line = %q", line)
 	}
-	if !strings.Contains(line, "read 93%") {
+	if !strings.Contains(line, "cache 93%") {
 		t.Errorf("line = %q", line)
 	}
 	if !strings.Contains(line, "WARN") {
@@ -77,22 +78,23 @@ func TestLineRender(t *testing.T) {
 func TestLineRenderUnknownProviderHollowDot(t *testing.T) {
 	vm := BuildViewModel("0.1.0", fixtureSnapshot(false), &schema.GlobalState{
 		Health: &schema.HealthCache{Status: "healthy", FetchedAt: time.Now()},
-	}, time.Now())
+	}, "", time.Now(), true, "", "")
 	rc := DefaultRenderConfig()
 	rc.ColorMode = ColorNever
 	line := vm.Line(rc)
-	if !strings.Contains(line, "○") {
-		t.Errorf("unknown provider must not show a green health symbol: %q", line)
+	// P0-3: unconfirmed provider → Eligible=false → zero bytes output
+	if line != "" {
+		t.Errorf("unknown provider must produce no output, got %q", line)
 	}
-	if strings.Contains(line, "●") {
-		t.Errorf("green symbol forbidden for unconfirmed provider: %q", line)
+	if vm.Eligible {
+		t.Errorf("unconfirmed provider must not be eligible")
 	}
 }
 
 func TestExpandedRender(t *testing.T) {
 	vm := BuildViewModel("0.1.0", fixtureSnapshot(true), &schema.GlobalState{
 		Health: &schema.HealthCache{Status: "healthy", FetchedAt: time.Now().Add(-18 * time.Second)},
-	}, time.Now())
+	}, "", time.Now(), true, "", "")
 	rc := DefaultRenderConfig()
 	rc.ColorMode = ColorNever
 	out := vm.Expanded(rc)
@@ -117,7 +119,7 @@ func TestExpandedRender(t *testing.T) {
 }
 
 func TestJSONRoundTrip(t *testing.T) {
-	vm := BuildViewModel("0.1.0", fixtureSnapshot(true), nil, time.Now())
+	vm := BuildViewModel("0.1.0", fixtureSnapshot(true), nil, "", time.Now(), true, "", "")
 	data, err := vm.JSON()
 	if err != nil {
 		t.Fatal(err)
@@ -135,10 +137,11 @@ func TestJSONRoundTrip(t *testing.T) {
 }
 
 func TestNilSnapshotIsSafe(t *testing.T) {
-	vm := BuildViewModel("0.1.0", nil, nil, time.Now())
+	vm := BuildViewModel("0.1.0", nil, nil, "", time.Now(), true, "", "")
 	rc := DefaultRenderConfig()
-	if vm.Line(rc) == "" || vm.Expanded(rc) == "" {
-		t.Error("nil snapshot must still render")
+	// P0-3: nil snapshot → Eligible=false → Line/Expanded return ""
+	if vm.Line(rc) != "" || vm.Expanded(rc) != "" {
+		t.Error("nil snapshot must render nothing (Eligible=false)")
 	}
 	if _, err := vm.JSON(); err != nil {
 		t.Error(err)
@@ -152,13 +155,104 @@ func TestMissingMetricsStayUnknown(t *testing.T) {
 		Model:    schema.ModelInfo{ID: "glm-5.1"},
 		Pressure: schema.PressureState{State: schema.PressureUnknown},
 	}
-	vm := BuildViewModel("0.1.0", snap, nil, time.Now())
+	vm := BuildViewModel("0.1.0", snap, nil, "", time.Now(), true, "", "")
 	rc := DefaultRenderConfig()
-	out := vm.Expanded(rc)
-	if !strings.Contains(out, "Context  unknown") {
-		t.Errorf("missing context must render unknown:\n%s", out)
+	// P0-3: unconfirmed provider → Eligible=false → Expanded() returns ""
+	if vm.Eligible {
+		t.Errorf("unconfirmed codex session must not be eligible")
 	}
-	if !strings.Contains(out, "Turn  ? unknown") {
-		t.Errorf("missing turn state must render unknown:\n%s", out)
+	out := vm.Expanded(rc)
+	if out != "" {
+		t.Errorf("unconfirmed session must render nothing, got %q", out)
+	}
+}
+
+func TestLineWidthTiers(t *testing.T) {
+	vm := BuildViewModel("0.1.0", fixtureSnapshot(true), &schema.GlobalState{
+		Health: &schema.HealthCache{Status: "healthy", FetchedAt: time.Now()},
+	}, "", time.Now(), true, "", "")
+
+	rc := DefaultRenderConfig()
+	rc.ColorMode = ColorNever
+
+	// Wide: model, shield, cache, fresh, ctx, pressure
+	rc.Width = 120
+	wide := vm.Line(rc)
+	if !strings.Contains(wide, "FI glm-5.1") {
+		t.Errorf("wide should have model: %q", wide)
+	}
+	if !strings.Contains(wide, "cache 93%") {
+		t.Errorf("wide should have cache: %q", wide)
+	}
+	if !strings.Contains(wide, "fresh") {
+		t.Errorf("wide should have fresh: %q", wide)
+	}
+
+	// Medium: model, shield, cache, fresh, ctx, pressure (same set for this fixture)
+	rc.Width = 80
+	medium := vm.Line(rc)
+	if !strings.Contains(medium, "FI glm-5.1") {
+		t.Errorf("medium should have model: %q", medium)
+	}
+	if !strings.Contains(medium, "cache 93%") {
+		t.Errorf("medium should have cache: %q", medium)
+	}
+
+	// Narrow: shield, cache, ctx only — no model, no fresh
+	rc.Width = 40
+	narrow := vm.Line(rc)
+	if strings.Contains(narrow, "FI glm-5.1") {
+		t.Errorf("narrow must not have model: %q", narrow)
+	}
+	if strings.Contains(narrow, "fresh") {
+		t.Errorf("narrow must not have fresh: %q", narrow)
+	}
+	if !strings.Contains(narrow, "cache 93%") {
+		t.Errorf("narrow should have cache: %q", narrow)
+	}
+	if !strings.Contains(narrow, "ctx 80%") {
+		t.Errorf("narrow should have ctx: %q", narrow)
+	}
+}
+
+func TestLineUnknownMetricsRenderAsDash(t *testing.T) {
+	snap := &schema.Snapshot{
+		Client:   schema.ClientInfo{Type: schema.ClientClaudeCode},
+		Session:  schema.SessionInfo{ID: "s1", Status: schema.SessionActive, LastEventAt: time.Now()},
+		Provider: schema.ProviderInfo{Name: schema.ProviderFreeInference, Confirmed: true},
+		Model:    schema.ModelInfo{ID: "glm-5.1"},
+		Pressure: schema.PressureState{State: schema.PressureUnknown},
+	}
+	vm := BuildViewModel("0.1.0", snap, nil, "", time.Now(), true, "", "")
+	rc := DefaultRenderConfig()
+	rc.ColorMode = ColorNever
+	rc.Width = 120
+	line := vm.Line(rc)
+	// Unknown cache → "cache —", unknown context → "ctx —"
+	if !strings.Contains(line, "cache —") {
+		t.Errorf("unknown cache should be dash: %q", line)
+	}
+	if !strings.Contains(line, "ctx —") {
+		t.Errorf("unknown ctx should be dash: %q", line)
+	}
+	// Never fabricate zero
+	if strings.Contains(line, "0%") {
+		t.Errorf("must not fabricate 0%%: %q", line)
+	}
+}
+
+func TestDisplayWidthIgnoresANSI(t *testing.T) {
+	// Plain text
+	if dw := displayWidth("hello"); dw != 5 {
+		t.Errorf("plain: got %d", dw)
+	}
+	// ANSI-colored text — escape sequences occupy zero cells
+	colored := "\033[32mhello\033[0m"
+	if dw := displayWidth(colored); dw != 5 {
+		t.Errorf("colored: got %d", dw)
+	}
+	// Unicode shield
+	if dw := displayWidth("🛡"); dw != 1 {
+		t.Errorf("shield: got %d", dw)
 	}
 }

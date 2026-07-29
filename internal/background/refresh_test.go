@@ -37,7 +37,7 @@ func writeModelsJSON(w http.ResponseWriter) {
 func testRefresher(t *testing.T, server *httptest.Server, healthURL string) *Refresher {
 	t.Helper()
 	paths := state.NewPathsWithDir(t.TempDir())
-	client := api.NewClient(server.URL, "", 10*time.Second)
+	client := api.NewClientForTest(server.URL, "", 10*time.Second)
 	return NewRefresher(client, paths, healthURL)
 }
 
@@ -260,7 +260,7 @@ func TestTimeoutBackoffOpensBreaker(t *testing.T) {
 	defer server.Close()
 
 	paths := state.NewPathsWithDir(t.TempDir())
-	client := api.NewClient(server.URL, "", 200*time.Millisecond)
+	client := api.NewClientForTest(server.URL, "", 200*time.Millisecond)
 	r := NewRefresher(client, paths, "")
 	res := r.WorkerRefresh(WorkerModels)
 	if res.Error == "" {
@@ -327,7 +327,7 @@ func TestNoInferenceEndpointDuringMonitoring(t *testing.T) {
 	defer server.Close()
 
 	paths := state.NewPathsWithDir(t.TempDir())
-	client := api.NewClient(server.URL+"/v1", "", 5*time.Second)
+	client := api.NewClientForTest(server.URL+"/v1", "", 5*time.Second)
 	r := NewRefresher(client, paths, "")
 
 	// Multiple refresh passes.
@@ -351,7 +351,7 @@ func TestConcurrentCircuitBreakerUpdates(t *testing.T) {
 
 	// Use a real refresher with a guaranteed-to-fail client so recordFailure
 	// always fires.
-	client := api.NewClient("http://127.0.0.1:1", "", 100*time.Millisecond)
+	client := api.NewClientForTest("http://127.0.0.1:1", "", 100*time.Millisecond)
 	r := NewRefresher(client, paths, "http://127.0.0.1:1/health")
 
 	var wg sync.WaitGroup

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/adapters"
@@ -15,15 +16,17 @@ import (
 // cmdSessions implements `fi sessions`.
 func cmdSessions(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 	reveal := false
-	var flagArgs []string
 	for _, a := range args {
 		if a == "--include-identifiers" {
 			reveal = true
+		} else if strings.HasPrefix(a, "--") {
+			fmt.Fprintf(stderr, "usage error: unknown flag %q\n", a)
+			return 2
 		} else {
-			flagArgs = append(flagArgs, a)
+			fmt.Fprintf(stderr, "usage error: unexpected argument %q\n", a)
+			return 2
 		}
 	}
-	_ = flagArgs // no other flags currently accepted
 	idx, err := state.LoadSessionIndex(paths)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
@@ -81,7 +84,7 @@ func cmdSnapshot(paths state.Paths, args []string, stdin io.Reader, stdout, stde
 	}
 	if resolved == nil {
 		if jsonOut {
-			vm := buildView(nil, loadGlobal(paths))
+			vm := buildView(nil, loadGlobal(paths), "", false, "", "")
 			data, _ := vm.JSON()
 			fmt.Fprintln(stdout, string(data))
 			return 0
@@ -93,7 +96,10 @@ func cmdSnapshot(paths state.Paths, args []string, stdin io.Reader, stdout, stde
 }
 
 func printSnapshot(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalState, jsonOut bool) int {
-	vm := buildView(snap, gs)
+	// Interactive diagnostic mode: show data regardless of activation state.
+	// The strict gate only applies to the embedded footer, not to explicit
+	// human-initiated CLI queries like `fi snapshot --json`.
+	vm := buildView(snap, gs, "", true, snap.Client.Type, snap.Session.ID)
 	rc := renderConfig()
 	if jsonOut {
 		data, err := vm.JSON()
@@ -153,7 +159,8 @@ func cmdRender(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 }
 
 func printRendered(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalState, mode string) int {
-	vm := buildView(snap, gs)
+	// Interactive diagnostic mode: show data regardless of activation state.
+	vm := buildView(snap, gs, "", true, snap.Client.Type, snap.Session.ID)
 	rc := renderConfig()
 	if mode == "expanded" {
 		fmt.Fprintln(stdout, vm.Expanded(rc))

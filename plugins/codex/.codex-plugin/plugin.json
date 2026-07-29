@@ -6,8 +6,16 @@
     "name": "b-a-m-n",
     "url": "https://github.com/b-a-m-n"
   },
+  "skills": "./skills/",
   "interface": {
-    "hooks": "./hooks/hooks.json",
-    "skills": "./skills/"
+    "displayName": "FreeInference Companion",
+    "shortDescription": "FreeInference model health, session metrics, and provider status for Codex.",
+    "longDescription": "Community-built observability layer for FreeInference-powered Codex sessions. Surfaces live model health, session lifecycle metrics, and provider status without adding inference traffic or acting as a proxy. Context and cache metrics are Codex-unavailable and reported as unknown.",
+    "developerName": "B-A-M-N",
+    "category": "Developer Tools",
+    "capabilities": ["Read"],
+    "defaultPrompt": [
+      "Check my FreeInference session status."
+    ]
   }
 }

@@ -21,6 +21,10 @@ type Snapshot struct {
 	Warnings          WarningState       `json:"warnings"`
 	LastFailure       *FailureRecord     `json:"last_failure"`
 	Compaction        CompactionState    `json:"compaction"`
+	// ActivationID is the provider-level identity under which this session
+	// was recorded. Rendering only uses data from this snapshot when the
+	// current runtime activation produces the same ActivationID.
+	ActivationID string `json:"activation_id,omitempty"`
 }
 
 // ClientInfo identifies the coding-agent client.
@@ -132,6 +136,9 @@ type WarningState struct {
 	// Cache-low warning state
 	CacheLowActive   bool       `json:"cache_low_active,omitempty"`
 	LastCacheShownAt *time.Time `json:"last_cache_shown_at,omitempty"`
+	// Cache TTL expiry warning state (prompt cache evicted due to idle time)
+	CacheTTLWarningActive bool       `json:"cache_ttl_warning_active,omitempty"`
+	LastCacheTTLShownAt   *time.Time `json:"last_cache_ttl_shown_at,omitempty"`
 }
 
 // FailureRecord stores the last failure from StopFailure hooks.

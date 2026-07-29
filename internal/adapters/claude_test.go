@@ -18,10 +18,13 @@ func testPaths(t *testing.T) state.Paths {
 
 func confirmFreeInference(t *testing.T) {
 	t.Helper()
-	for _, env := range []string{"FREEINFERENCE_BASE_URL", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL"} {
+	for _, env := range []string{"ANTHROPIC_BASE_URL", "OPENAI_BASE_URL"} {
 		t.Setenv(env, "")
 	}
 	t.Setenv("FI_PROVIDER", "")
+	// P0-1: activation requires BOTH an approved FreeInference endpoint AND
+	// a credential. Key-only activation is no longer permitted.
+	t.Setenv("FREEINFERENCE_BASE_URL", "https://freeinference.org/v1")
 	t.Setenv("FREEINFERENCE_API_KEY", "hyi-test-key-12345")
 }
 
@@ -30,6 +33,8 @@ func unconfirmProvider(t *testing.T) {
 	t.Setenv("FI_PROVIDER", "")
 	t.Setenv("FREEINFERENCE_API_KEY", "")
 	t.Setenv("FREEINFERENCE_BASE_URL", "")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
 	t.Setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
 	t.Setenv("OPENAI_BASE_URL", "")
 }
@@ -848,5 +853,127 @@ func TestClaudeContextWarningDoesNotBlockCacheResolution(t *testing.T) {
 	// Context severity must be set to warn (from the 84% warning).
 	if snap.Warnings.ContextSeverity != schema.WarningSeverityWarn {
 		t.Errorf("context severity = %q, want %q", snap.Warnings.ContextSeverity, schema.WarningSeverityWarn)
+	}
+}
+
+// setLastEventAge writes a snapshot with LastEventAt set to age duration in the
+// past, simulating an idle period without actually sleeping.
+func setLastEventAge(t *testing.T, paths state.Paths, sessionID string, age time.Duration) {
+	t.Helper()
+	snap := loadClaude(t, paths, sessionID)
+	past := time.Now().UTC().Add(-age)
+	snap.Session.LastEventAt = past
+	if err := state.SaveSnapshot(paths, schema.ClientClaudeCode, sessionID, snap); err != nil {
+		t.Fatalf("save snapshot: %v", err)
+	}
+}
+
+func TestClaudeCacheTTLWarningFiresAfterIdle(t *testing.T) {
+	confirmFreeInference(t)
+	paths := testPaths(t)
+	a := NewClaudeAdapter(paths)
+
+	// Seed a session with meaningful context (>10K tokens) so the TTL gate passes.
+	// Context at 30% — below the pressure threshold so TTL is the warning that fires.
+	_ = a.HandleStatusLineUpdate(statusInput("s1", "glm-5.1", 120000, 2000, 200000, 30,
+		100000, 10000, 5000, 2000), "s1")
+
+	// Simulate 6 minutes of idle — past the 5-minute prompt cache TTL.
+	setLastEventAge(t, paths, "s1", 6*time.Minute)
+
+	out, err := a.HandleUserPromptSubmit(&schema.ClaudeHookInput{SessionID: "s1"}, "s1")
+	if err != nil {
+		t.Fatalf("prompt submit: %v", err)
+	}
+	if out == nil {
+		t.Fatal("expected a cache TTL expiry warning after 6m idle")
+	}
+	if !strings.Contains(out.SystemMessage, "prompt cache likely expired") {
+		t.Errorf("expected TTL warning text, got: %q", out.SystemMessage)
+	}
+}
+
+func TestClaudeCacheTTLWarningSuppressedUnderTTL(t *testing.T) {
+	confirmFreeInference(t)
+	paths := testPaths(t)
+	a := NewClaudeAdapter(paths)
+
+	_ = a.HandleStatusLineUpdate(statusInput("s1", "glm-5.1", 120000, 2000, 200000, 30,
+		100000, 10000, 5000, 2000), "s1")
+
+	// Only 2 minutes idle — under the 5-minute TTL. No warning.
+	setLastEventAge(t, paths, "s1", 2*time.Minute)
+
+	out, err := a.HandleUserPromptSubmit(&schema.ClaudeHookInput{SessionID: "s1"}, "s1")
+	if err != nil {
+		t.Fatalf("prompt submit: %v", err)
+	}
+	if out != nil {
+		t.Errorf("no TTL warning expected under 5m idle, got: %q", out.SystemMessage)
+	}
+}
+
+func TestClaudeCacheTTLWarningSuppressedForSmallContext(t *testing.T) {
+	confirmFreeInference(t)
+	paths := testPaths(t)
+	a := NewClaudeAdapter(paths)
+
+	// Small context (5K tokens) — below the MinActiveTokensForTTLWarning (10K).
+	_ = a.HandleStatusLineUpdate(statusInput("s1", "glm-5.1", 5000, 1000, 200000, 5,
+		3000, 1000, 500, 500), "s1")
+
+	setLastEventAge(t, paths, "s1", 10*time.Minute)
+
+	out, err := a.HandleUserPromptSubmit(&schema.ClaudeHookInput{SessionID: "s1"}, "s1")
+	if err != nil {
+		t.Fatalf("prompt submit: %v", err)
+	}
+	if out != nil {
+		t.Errorf("no TTL warning expected for small context, got: %q", out.SystemMessage)
+	}
+}
+
+func TestClaudeCacheTTLWarningCooldown(t *testing.T) {
+	confirmFreeInference(t)
+	paths := testPaths(t)
+	a := NewClaudeAdapter(paths)
+
+	_ = a.HandleStatusLineUpdate(statusInput("s1", "glm-5.1", 120000, 2000, 200000, 30,
+		100000, 10000, 5000, 2000), "s1")
+
+	// First prompt after 6m idle — should warn.
+	setLastEventAge(t, paths, "s1", 6*time.Minute)
+	out1, _ := a.HandleUserPromptSubmit(&schema.ClaudeHookInput{SessionID: "s1"}, "s1")
+	if out1 == nil {
+		t.Fatal("expected TTL warning on first idle prompt")
+	}
+
+	// Second prompt, still idle 6m later, but within cooldown (30min).
+	// The prompt submit itself updates LastEventAt, so we need to re-age it.
+	setLastEventAge(t, paths, "s1", 6*time.Minute)
+	out2, _ := a.HandleUserPromptSubmit(&schema.ClaudeHookInput{SessionID: "s1"}, "s1")
+	if out2 != nil {
+		t.Errorf("TTL warning must respect cooldown, got: %q", out2.SystemMessage)
+	}
+}
+
+func TestClaudeCacheTTLWarningGivesWayToContextWarning(t *testing.T) {
+	confirmFreeInference(t)
+	paths := testPaths(t)
+	a := NewClaudeAdapter(paths)
+
+	// Context at 85% — above the pressure threshold. Context warning must win.
+	_ = a.HandleStatusLineUpdate(statusInput("s1", "glm-5.1", 170000, 2000, 200000, 85,
+		100000, 50000, 10000, 2000), "s1")
+
+	setLastEventAge(t, paths, "s1", 10*time.Minute)
+
+	out, _ := a.HandleUserPromptSubmit(&schema.ClaudeHookInput{SessionID: "s1"}, "s1")
+	if out == nil {
+		t.Fatal("expected a warning")
+	}
+	// Context warning should fire, not TTL.
+	if !strings.Contains(out.SystemMessage, "context usage") {
+		t.Errorf("expected context warning to take priority over TTL, got: %q", out.SystemMessage)
 	}
 }

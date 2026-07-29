@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,7 +12,7 @@ import (
 )
 
 func TestEndpointJoinPreservesBasePath(t *testing.T) {
-	c := NewClient("https://freeinference.org/v1", "", time.Second)
+	c := newClientLegacy("https://freeinference.org/v1", "", time.Second)
 	got, err := c.endpoint("/models")
 	if err != nil {
 		t.Fatal(err)
@@ -36,7 +37,7 @@ func TestListModelsParsesCatalog(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient(server.URL+"/v1", "", 5*time.Second)
+	c := newClientLegacy(server.URL+"/v1", "", 5*time.Second)
 	models, err := c.ListModels()
 	if err != nil {
 		t.Fatal(err)
@@ -54,7 +55,7 @@ func TestListModelsErrorIsSanitizedAndBounded(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient(server.URL, "", 5*time.Second)
+	c := newClientLegacy(server.URL, "", 5*time.Second)
 	_, err := c.ListModels()
 	if err == nil {
 		t.Fatal("expected error")
@@ -79,7 +80,7 @@ func TestRetryAfterParsed(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient(server.URL, "", 5*time.Second)
+	c := newClientLegacy(server.URL, "", 5*time.Second)
 	_, err := c.ListModels()
 	he, ok := err.(*HTTPError)
 	if !ok {
@@ -96,7 +97,7 @@ func TestProbeDoesNotClaimAuth(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient(server.URL, "hyi-test-key-12345", 5*time.Second)
+	c := newClientLegacy(server.URL, "hyi-test-key-12345", 5*time.Second)
 	res := c.Probe()
 	if res.Endpoint.State != CheckPass {
 		t.Errorf("endpoint = %+v", res.Endpoint)
@@ -110,7 +111,7 @@ func TestProbeDoesNotClaimAuth(t *testing.T) {
 }
 
 func TestProbeUnreachable(t *testing.T) {
-	c := NewClient("http://127.0.0.1:1", "", 2*time.Second)
+	c := newClientLegacy("http://127.0.0.1:1", "", 2*time.Second)
 	res := c.Probe()
 	if res.Endpoint.State != CheckFail {
 		t.Errorf("endpoint = %+v", res.Endpoint)
@@ -131,7 +132,7 @@ func TestProbeInferenceSendsStructuredJSON(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient(server.URL, "hyi-test-key-12345", 5*time.Second)
+	c := newClientLegacy(server.URL, "hyi-test-key-12345", 5*time.Second)
 	res := c.ProbeInference("glm-5.1")
 	if res.ModelAccess.State != CheckPass {
 		t.Errorf("probe = %+v", res.ModelAccess)
@@ -159,7 +160,7 @@ func TestProbeInferenceUnauthorized(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient(server.URL, "bad-key", 5*time.Second)
+	c := newClientLegacy(server.URL, "bad-key", 5*time.Second)
 	res := c.ProbeInference("glm-5.1")
 	if res.Authentication.State != CheckFail {
 		t.Errorf("auth = %+v", res.Authentication)
@@ -167,7 +168,7 @@ func TestProbeInferenceUnauthorized(t *testing.T) {
 }
 
 func TestProbeInferenceRequiresModel(t *testing.T) {
-	c := NewClient("http://127.0.0.1:1", "", time.Second)
+	c := newClientLegacy("http://127.0.0.1:1", "", time.Second)
 	res := c.ProbeInference("")
 	if res.Endpoint.State != CheckFail {
 		t.Errorf("empty model must fail fast: %+v", res.Endpoint)
@@ -205,7 +206,7 @@ func TestGetHealthNeverSendsAPIKey(t *testing.T) {
 	// health request with no Authorization header. We reuse the public
 	// NormalizeHealthURL to build a valid https request, then swap the
 	// transport to point at our test server.
-	c := NewClient("https://freeinference.org/v1", "hyi-test-key-12345", 5*time.Second)
+	c := newClientLegacy("https://freeinference.org/v1", "hyi-test-key-12345", 5*time.Second)
 
 	// Capture whether the request would have carried auth by intercepting via
 	// a server bound to the loopback that mimics freeinference.org's health
@@ -319,7 +320,7 @@ func TestIsAllowedHealthOrigin(t *testing.T) {
 // pointing at a non-FreeInference host are refused before any network call.
 // This is the primary exfiltration defense.
 func TestGetHealthFromTrustedRejectsUnknownHost(t *testing.T) {
-	c := NewClient("https://freeinference.org/v1", "hyi-test-key-12345", 5*time.Second)
+	c := newClientLegacy("https://freeinference.org/v1", "hyi-test-key-12345", 5*time.Second)
 	called := false
 	c.HTTPClient = &http.Client{Transport: roundTripRecorder(func(req *http.Request) (*http.Response, error) {
 		called = true
@@ -346,7 +347,7 @@ func TestStructuredErrorRedacted(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient(server.URL, "hyi-test-key-12345", 5*time.Second)
+	c := newClientLegacy(server.URL, "hyi-test-key-12345", 5*time.Second)
 	_, err := c.ListModels()
 	he, ok := err.(*HTTPError)
 	if !ok {
@@ -368,7 +369,8 @@ func TestValidateBaseURL(t *testing.T) {
 		{"valid https", "https://freeinference.org/v1", false, false},
 		{"http remote", "http://example.com/v1", true, false},
 		{"http remote no opt-in", "http://freeinference.org/v1", true, false},
-		{"https non-FI host", "https://api.anthropic.com/v1", false, false},
+		// Note: https://api.anthropic.com/v1 passes ValidateBaseURL (valid HTTPS)
+		// but is rejected by NewClient when an API key is set — tested below.
 		{"empty", "", true, false},
 		{"relative", "/v1", true, false},
 		{"userinfo", "https://user:pass@freeinference.org/v1", true, false},
@@ -389,10 +391,149 @@ func TestValidateBaseURL(t *testing.T) {
 	}
 }
 
+// TestNewClient_RejectsNonFreeInferenceHostWithKey is the core P0-2 regression
+// test: NewClient MUST refuse to build a credentialed client for an arbitrary
+// HTTPS host, even if the URL is otherwise valid.
+func TestNewClient_RejectsNonFreeInferenceHostWithKey(t *testing.T) {
+	_ = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(ModelsResponse{Data: []Model{{ID: "m1"}}})
+	}))
+
+	cases := []struct {
+		name string
+		url  string
+	}{
+		{"arbitrary https", "https://api.anthropic.com/v1"},
+		{"lookalike host", "https://freeinference.org.evil.com/v1"},
+		{"subdomain lookalike", "https://evilfreeinference.org/v1"},
+		{"unrelated host", "https://evil.example.com/v1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+
+			_, err := NewClient(ClientConfig{BaseURL: tc.url, APIKey: "hyi-test-key-12345", Timeout: time.Second})
+			if err == nil {
+				t.Fatalf("NewClient must reject credentialed client for %q", tc.url)
+			}
+			var ce *CredentialError
+			if !errors.As(err, &ce) {
+				t.Fatalf("expected CredentialError, got %T: %v", err, err)
+			}
+		})
+	}
+}
+
+// TestNewClient_AllowsApprovedHostWithKey verifies that approved FreeInference
+// hosts are accepted when an API key is present.
+func TestNewClient_AllowsApprovedHostWithKey(t *testing.T) {
+	cases := []string{
+		"https://freeinference.org/v1",
+		"https://api.freeinference.org/v1",
+		"https://FREEINFERENCE.ORG/v1", // case-insensitive
+	}
+	for _, url := range cases {
+		t.Run(url, func(t *testing.T) {
+
+			_, err := NewClient(ClientConfig{BaseURL: url, APIKey: "hyi-test-key-12345", Timeout: time.Second})
+			if err != nil {
+				t.Fatalf("NewClient must accept approved host %q: %v", url, err)
+			}
+		})
+	}
+}
+
+// TestNewClient_CustomEndpointWithSeparateKey verifies that FI_CUSTOM_ENDPOINT
+// allows sending FI_CUSTOM_API_KEY to a custom host. The production
+// FREEINFERENCE_API_KEY (hyi-/sk-fi prefix) is NEVER allowed on custom hosts.
+func TestNewClient_CustomEndpointWithSeparateKey(t *testing.T) {
+	t.Setenv("FI_CUSTOM_ENDPOINT", "https://api.anthropic.com/v1")
+	t.Setenv("FI_CUSTOM_API_KEY", "sk-ant-test-key")
+	_, err := NewClient(ClientConfig{BaseURL: "https://api.anthropic.com/v1", APIKey: "sk-ant-test-key", Timeout: time.Second})
+	if err != nil {
+		t.Fatalf("custom endpoint with matching key must be accepted: %v", err)
+	}
+}
+
+// TestNewClient_FreeInferenceKeyNeverAllowedOnCustomHost verifies that the
+// production key (hyi-/sk-fi prefix) is NEVER accepted for a custom endpoint,
+// even when FI_CUSTOM_ENDPOINT is set.
+func TestNewClient_FreeInferenceKeyNeverAllowedOnCustomHost(t *testing.T) {
+	t.Setenv("FI_CUSTOM_ENDPOINT", "https://api.anthropic.com/v1")
+	_, err := NewClient(ClientConfig{BaseURL: "https://api.anthropic.com/v1", APIKey: "hyi-test-key-12345", Timeout: time.Second})
+	if err == nil {
+		t.Fatal("production FI key must never be sent to a custom endpoint")
+	}
+	var ce *CredentialError
+	if !errors.As(err, &ce) {
+		t.Fatalf("expected CredentialError, got %T: %v", err, err)
+	}
+}
+
+// TestDoRequest_NeverSendsKeyToUnapprovedHost is the defense-in-depth
+// regression: even if a Client is constructed and its BaseURL is then swapped
+// to an unapproved host (simulating a Client that bypassed NewClient), doRequest
+// must refuse to attach the Authorization header. The CredentialError is
+// returned before the transport is invoked.
+func TestDoRequest_NeverSendsKeyToUnapprovedHost(t *testing.T) {
+
+	// Build a legitimate credentialed client, then swap BaseURL to an
+	// unapproved host to simulate construction that bypassed NewClient.
+	c, err := NewClient(ClientConfig{BaseURL: "https://freeinference.org/v1", APIKey: "hyi-test-key-12345", Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.BaseURL = "https://evil.example.com/v1"
+
+	// The transport must never see an Authorization header. We use a
+	// non-blocking channel so the test hangs neither if the credential check
+	// fires before the transport nor if a request somehow slips through.
+	authSeen := make(chan string, 1)
+	c.HTTPClient = &http.Client{Transport: roundTripRecorder(func(req *http.Request) (*http.Response, error) {
+		authSeen <- req.Header.Get("Authorization")
+		return &http.Response{
+			StatusCode: 200,
+			Body:       io.NopCloser(strings.NewReader(`{"object":"list","data":[]}`)),
+			Header:     make(http.Header),
+		}, nil
+	})}
+
+	_, err = c.ListModels()
+	if err == nil {
+		t.Fatal("doRequest must refuse to send the key to an unapproved host")
+	}
+	var ce *CredentialError
+	if !errors.As(err, &ce) {
+		t.Fatalf("expected CredentialError from doRequest, got %T: %v", err, err)
+	}
+	// Drain the channel non-blocking: if the transport was invoked, it must
+	// not have seen an Authorization header. If it was never invoked (the
+	// credential check fired first), the channel is empty — which is also a
+	// pass.
+	select {
+	case got := <-authSeen:
+		if got != "" {
+			t.Fatalf("transport saw Authorization header %q; credential must never be attached to unapproved host", got)
+		}
+	default:
+		// Transport never invoked — credential check fired first. This is the
+		// defense-in-depth path working as intended.
+	}
+}
+
+// TestNewClient_NoKeyAllowsAnyHTTPS confirms that without an API key, any valid
+// HTTPS host is accepted (no credential is at stake).
+func TestNewClient_NoKeyAllowsAnyHTTPS(t *testing.T) {
+
+	_, err := NewClient(ClientConfig{BaseURL: "https://api.anthropic.com/v1", APIKey: "", Timeout: time.Second})
+	if err != nil {
+		t.Fatalf("without a key, any valid HTTPS host must be accepted: %v", err)
+	}
+}
+
 // TestHTTPClientRejectsCrossOriginRedirects verifies that the client transport
 // rejects cross-origin redirects (credential leakage prevention).
 func TestHTTPClientRejectsCrossOriginRedirects(t *testing.T) {
-	client := NewClient("https://freeinference.org/v1", "test-key", 5*time.Second)
+	client := newClientLegacy("https://freeinference.org/v1", "test-key", 5*time.Second)
 	if client.HTTPClient == nil {
 		t.Fatal("nil HTTP client")
 	}

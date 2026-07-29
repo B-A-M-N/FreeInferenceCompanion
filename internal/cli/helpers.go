@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/api"
+	"github.com/b-a-m-n/freeinference-companion/internal/engine"
 	"github.com/b-a-m-n/freeinference-companion/internal/render"
 	"github.com/b-a-m-n/freeinference-companion/internal/secure"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
@@ -17,19 +18,23 @@ import (
 
 // newAPIClient builds an API client from the environment.
 // Validates the base URL: requires HTTPS (except loopback with opt-in),
-// rejects userinfo/fragments. Returns nil if the URL is invalid.
-func newAPIClient() *api.Client {
+// rejects userinfo/fragments. Returns an error if the URL is invalid or
+// the endpoint is not an approved FreeInference host while an API key is set.
+func newAPIClient() (*api.Client, error) {
 	baseURL := os.Getenv("FREEINFERENCE_BASE_URL")
 	apiKey := os.Getenv("FREEINFERENCE_API_KEY")
 	if baseURL == "" {
 		baseURL = api.DefaultBaseURL
 	}
 	if _, err := api.ValidateBaseURL(baseURL); err != nil {
-		return nil
+		return nil, err
 	}
-	client := api.NewClient(baseURL, apiKey, 30*time.Second)
+	client, err := api.NewClient(api.ClientConfig{BaseURL: baseURL, APIKey: apiKey, Timeout: 30 * time.Second})
+	if err != nil {
+		return nil, err
+	}
 	client.Version = Version
-	return client
+	return client, nil
 }
 
 // displaySessionID returns either the masked or the raw session ID depending
@@ -168,8 +173,12 @@ func loadGlobal(paths state.Paths) *schema.GlobalState {
 }
 
 // buildView assembles the normalized view model for a snapshot.
-func buildView(snap *schema.Snapshot, gs *schema.GlobalState) *render.ViewModel {
-	return render.BuildViewModel(Version, snap, gs, time.Now())
+// currentActivationID is the activation identity from runtime.Evaluate() —
+// when non-empty, health and circuit-breaker data are only included when
+// the snapshot was recorded under the same identity.
+// runtimeActive and clientType feed the SurfaceEligibility gate set.
+func buildView(snap *schema.Snapshot, gs *schema.GlobalState, currentActivationID string, runtimeActive bool, clientType string, sessionID string) *render.ViewModel {
+	return render.BuildViewModel(Version, snap, gs, currentActivationID, time.Now(), runtimeActive, clientType, sessionID)
 }
 
 // renderConfig returns a RenderConfig with auto-detected color mode.
@@ -198,6 +207,39 @@ func formatPctPtr(p *float64) string {
 		return "unknown"
 	}
 	return fmt.Sprintf("%.0f%%", *p*100)
+}
+
+// formatQuotaPair renders a used/limit pair for reports. Either may be nil.
+func formatQuotaPair(used, limit *int64) string {
+	usedStr := "unknown"
+	if used != nil {
+		usedStr = formatTokenCount(*used)
+	}
+	limitStr := "unknown"
+	if limit != nil {
+		limitStr = formatTokenCount(*limit)
+	}
+	if used != nil && limit != nil && *limit > 0 {
+		pct := float64(*used) / float64(*limit) * 100
+		return fmt.Sprintf("%s / %s (%.1f%%)", usedStr, limitStr, pct)
+	}
+	return fmt.Sprintf("%s / %s", usedStr, limitStr)
+}
+
+// budgetIcon returns the icon for a budget status.
+func budgetIcon(status engine.BudgetStatus) string {
+	switch status {
+	case engine.BudgetCritical:
+		return "🔴"
+	case engine.BudgetLow:
+		return "🟠"
+	case engine.BudgetWatch:
+		return "🟡"
+	case engine.BudgetHealthy:
+		return "🟢"
+	default:
+		return "⚪"
+	}
 }
 
 // accessSymbol renders a catalog access state.

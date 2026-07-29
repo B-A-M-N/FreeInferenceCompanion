@@ -8,13 +8,22 @@ import (
 
 	"github.com/b-a-m-n/freeinference-companion/internal/adapters"
 	"github.com/b-a-m-n/freeinference-companion/internal/background"
+	"github.com/b-a-m-n/freeinference-companion/internal/runtime"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
 
 // runHook is the fail-open hook entry point. Every failure mode — missing
 // arguments, unknown client or event, invalid JSON, missing session ID,
-// unavailable state, lock contention — returns without output and exit 0.
+// unavailable state, lock contention, INACTIVATION — returns without output
+// and exit 0.
+//
+// P0-2: the activation gate runs BEFORE any state/IO work. When the runtime
+// is not active (no validated FreeInference endpoint+key, or FI_DISABLED=1),
+// the hook is a true zero-output, zero-side-effect no-op: no cache directory
+// creation, no lock files, no session index entry, no event file, no detached
+// process, no network request. This is the contract that prevents the
+// companion from polluting ordinary Claude / Codex sessions.
 func runHook(args []string, stdin io.Reader, stdout io.Writer, _ io.Writer) {
 	if len(args) < 2 {
 		return
@@ -22,9 +31,29 @@ func runHook(args []string, stdin io.Reader, stdout io.Writer, _ io.Writer) {
 	clientType := args[0]
 	eventName := args[1]
 
+	// Activation gate: evaluated exactly once per process. Must be the FIRST
+	// real work this function does — every step below touches the filesystem
+	// or the network and must be skipped when inactive.
+	activation := runtime.Evaluate()
+	if !activation.Active {
+		return
+	}
+
 	paths, err := state.NewPaths()
 	if err != nil {
 		return
+	}
+	// Derive an activation identity so global state (health, models,
+	// circuit-breakers, session index) is namespaced under providers/<id>/
+	// and never mixes with another endpoint or key. Session state stays on
+	// the unnamespaced path because sessions are independent of which
+	// provider runtime is active.
+	loader := runtime.DefaultSaltLoader()
+	if id, err := activation.Identity(loader); err == nil {
+		dirName := id.DirName()
+		if dirName != "" {
+			paths = paths.NewNamespacedPaths(dirName)
+		}
 	}
 	if err := paths.EnsureDirs(); err != nil {
 		return
@@ -32,16 +61,16 @@ func runHook(args []string, stdin io.Reader, stdout io.Writer, _ io.Writer) {
 
 	switch clientType {
 	case schema.ClientClaudeCode:
-		handleClaudeHook(paths, eventName, stdin, stdout)
+		handleClaudeHook(paths, eventName, stdin, stdout, activation)
 	case schema.ClientCodex:
-		handleCodexHook(paths, eventName, stdin, stdout)
+		handleCodexHook(paths, eventName, stdin, stdout, activation)
 	default:
 		// Unknown client — fail open silently.
 		return
 	}
 }
 
-func handleClaudeHook(paths state.Paths, eventName string, stdin io.Reader, stdout io.Writer) {
+func handleClaudeHook(paths state.Paths, eventName string, stdin io.Reader, stdout io.Writer, activation runtime.Activation) {
 	adapter := adapters.NewClaudeAdapter(paths)
 	input, err := adapter.ParseHookInput(stdin)
 	if err != nil || input == nil {
@@ -54,13 +83,13 @@ func handleClaudeHook(paths state.Paths, eventName string, stdin io.Reader, stdo
 
 	switch eventName {
 	case "SessionStart":
-		_ = adapter.HandleSessionStart(input)
-		maybeRequestDetachedRefresh(paths)
+		_ = adapter.HandleSessionStartWith(input, activation)
+		maybeRequestDetachedRefresh(paths, activation)
 	case "SessionEnd":
 		_ = adapter.HandleSessionEnd(sessionID)
-		maybeRequestDetachedRefresh(paths)
+		maybeRequestDetachedRefresh(paths, activation)
 	case "UserPromptSubmit":
-		output, err := adapter.HandleUserPromptSubmit(input, sessionID)
+		output, err := adapter.HandleUserPromptSubmitWith(input, sessionID, activation)
 		if err == nil && output != nil {
 			if data, merr := json.Marshal(output); merr == nil {
 				fmt.Fprintln(stdout, string(data))
@@ -80,7 +109,7 @@ func handleClaudeHook(paths state.Paths, eventName string, stdin io.Reader, stdo
 	}
 }
 
-func handleCodexHook(paths state.Paths, eventName string, stdin io.Reader, stdout io.Writer) {
+func handleCodexHook(paths state.Paths, eventName string, stdin io.Reader, stdout io.Writer, activation runtime.Activation) {
 	adapter := adapters.NewCodexAdapter(paths)
 	input, err := adapter.ParseHookInput(stdin)
 	if err != nil || input == nil {
@@ -93,11 +122,11 @@ func handleCodexHook(paths state.Paths, eventName string, stdin io.Reader, stdou
 
 	switch eventName {
 	case "SessionStart":
-		_ = adapter.HandleSessionStart(input)
-		maybeRequestDetachedRefresh(paths)
+		_ = adapter.HandleSessionStartWith(input, activation)
+		maybeRequestDetachedRefresh(paths, activation)
 	case "SessionEnd":
 		_ = adapter.HandleSessionEnd(sessionID)
-		maybeRequestDetachedRefresh(paths)
+		maybeRequestDetachedRefresh(paths, activation)
 	case "UserPromptSubmit":
 		output, err := adapter.HandleUserPromptSubmit(input, sessionID)
 		if err == nil && output != nil {
@@ -119,13 +148,18 @@ func handleCodexHook(paths state.Paths, eventName string, stdin io.Reader, stdou
 }
 
 // maybeRequestDetachedRefresh spawns detached refresh workers when caches are
-// stale. It never runs for unconfirmed providers (don't phone home from
-// non-FreeInference sessions) and can be disabled with FI_NO_BACKGROUND=1.
-func maybeRequestDetachedRefresh(paths state.Paths) {
+// stale. Called only after the activation gate has already confirmed an active
+// FreeInference runtime (P0-2), so the permissive DetectProvider check is gone.
+// FI_NO_BACKGROUND=1 still suppresses spawning.
+//
+// Detached children re-validate activation independently — the parent gate
+// alone is insufficient because environment or configuration may change
+// between spawn and child exec.
+func maybeRequestDetachedRefresh(paths state.Paths, activation runtime.Activation) {
 	if os.Getenv("FI_NO_BACKGROUND") == "1" {
 		return
 	}
-	if !adapters.DetectProvider().Confirmed {
+	if !activation.Active {
 		return
 	}
 	stale := background.StaleWorkers(paths, os.Getenv("FI_HEALTH_URL"))

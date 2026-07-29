@@ -177,8 +177,8 @@ func TestReportJSONFormat(t *testing.T) {
 func TestStatusLineSubcommandValidation(t *testing.T) {
 	var out, errOut strings.Builder
 	code := cmdStatusLine([]string{"bogus"}, &out, &errOut)
-	if code != 1 {
-		t.Errorf("exit = %d", code)
+	if code != 2 {
+		t.Errorf("exit = %d, want 2 (usage error)", code)
 	}
 }
 
@@ -197,6 +197,34 @@ func TestRunHookNeverPanics(t *testing.T) {
 	code := Run([]string{"fi", "hook", "claude-code", "SessionStart"}, strings.NewReader("{bad json"), &out, &errOut)
 	if code != 0 {
 		t.Errorf("hook exit = %d", code)
+	}
+}
+
+// TestDoctorProbeWithInvalidEndpoint is the P0-1 regression test: an invalid
+// API URL combined with `fi doctor --probe` must NOT panic. It must skip the
+// inference probe, report the configuration failure, and exit 1 (not a runtime
+// panic exit 2).
+func TestDoctorProbeWithInvalidEndpoint(t *testing.T) {
+	// Invalid URL containing userinfo — fails ValidateBaseURL.
+	t.Setenv("FREEINFERENCE_BASE_URL", "https://user:pass@freeinference.org/v1")
+	t.Setenv("FREEINFERENCE_API_KEY", "hyi-test-key-12345")
+	t.Setenv("FI_HEALTH_URL", "")
+
+	var out, errOut strings.Builder
+	code := cmdDoctor(testPaths(t), []string{"--probe", "--model", "test-model"}, &out, &errOut)
+	if code != 1 {
+		t.Errorf("doctor --probe with invalid endpoint: exit = %d, want 1 (output:\n%s)", code, out.String())
+	}
+	// The inference probe must be skipped, not panicked against.
+	output := out.String()
+	if strings.Contains(output, "panic") {
+		t.Fatalf("doctor panicked on invalid endpoint:\n%s", output)
+	}
+	if !strings.Contains(output, "Inference probe") {
+		t.Errorf("expected 'Inference probe' check in output:\n%s", output)
+	}
+	if !strings.Contains(output, "skipped due to invalid endpoint") {
+		t.Errorf("expected probe to be skipped due to invalid endpoint:\n%s", output)
 	}
 }
 

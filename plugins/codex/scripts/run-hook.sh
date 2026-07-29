@@ -17,14 +17,24 @@ if command -v fi >/dev/null 2>&1; then
 fi
 
 # Codex supplies PLUGIN_ROOT to plugin hooks (the documented variable). Older
-# builds used CODEX_PLUGIN_ROOT; accept either so the wrapper keeps working
-# across versions. Resolve a plugin-bundled binary if present.
+# builds used CODEX_PLUGIN_ROOT; accept both so the wrapper keeps working
+# across versions. Resolve a platform-specific bundled binary if present.
 plugin_root="${PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-}}"
-plugin_binary="${plugin_root}/bin/fi"
 
-if [[ -n "$plugin_root" && -x "$plugin_binary" ]]; then
-    "$plugin_binary" hook codex "$event" || true
-    exit 0
+if [[ -n "$plugin_root" ]]; then
+    os_name="$(uname -s | tr '[:upper:]' '[:lower:]')"
+    arch_name="$(uname -m)"
+    # Normalize architecture names to match Makefile output (amd64/x86_64 -> amd64)
+    case "$arch_name" in
+        x86_64) arch_name="amd64" ;;
+    esac
+    plat="$os_name-$arch_name"
+    for candidate in "$plugin_root/bin/$plat/fi" "$plugin_root/bin/fi"; do
+        if [[ -n "$candidate" && -x "$candidate" ]]; then
+            "$candidate" hook codex "$event" || true
+            exit 0
+        fi
+    done
 fi
 
 user_binary="${HOME}/.local/bin/fi"

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
@@ -36,7 +37,8 @@ func DroppedMutations() int64 {
 
 // Paths resolves filesystem paths for state storage.
 type Paths struct {
-	CacheDir string
+	CacheDir     string
+	ActivationID string // provider identity; empty for session-only paths
 }
 
 // NewPaths creates a Paths rooted at the default cache directory under HOME.
@@ -58,6 +60,19 @@ func NewPaths() (Paths, error) {
 // NewPathsWithDir creates a Paths with an explicit cache directory.
 func NewPathsWithDir(cacheDir string) Paths {
 	return Paths{CacheDir: cacheDir}
+}
+
+// NewNamespacedPaths returns a copy of p with ActivationID set. Global
+// state paths (health, models, account-usage, circuit-breakers, session
+// index) are placed under providers/<activationID>/global/ so that
+// different endpoints/credentials never share state. Session state
+// remains on the unnamespaced path because sessions are independent of
+// which provider runtime is active.
+func (p Paths) NewNamespacedPaths(activationID string) Paths {
+	return Paths{
+		CacheDir:     p.CacheDir,
+		ActivationID: activationID,
+	}
 }
 
 // sessionKey returns a SHA-256 hash of the session ID to prevent
@@ -87,8 +102,13 @@ func (p Paths) SessionLock(clientType, sessionID string) string {
 	return filepath.Join(p.SessionDir(clientType, sessionID), "lock")
 }
 
-// GlobalDir returns the global cache directory.
+// GlobalDir returns the global cache directory, namespaced by activation ID
+// when present. When ActivationID is empty, the legacy (unnamespaced) path
+// is returned for backward compatibility.
 func (p Paths) GlobalDir() string {
+	if p.ActivationID != "" {
+		return filepath.Join(p.CacheDir, "providers", p.ActivationID, "global")
+	}
 	return filepath.Join(p.CacheDir, "global")
 }
 
@@ -117,14 +137,22 @@ func (p Paths) GlobalCircuitBreakers() string {
 	return filepath.Join(p.GlobalDir(), "circuit-breakers.json")
 }
 
+// SessionIndexDir returns the directory for the session index. This is stored
+// in a fixed (unnamespaced) location so that session discovery works
+// regardless of the current activation state. Provider-level state
+// (health, models, circuit-breakers) is namespaced; sessions are not.
+func (p Paths) SessionIndexDir() string {
+	return filepath.Join(p.CacheDir, "sessions-index")
+}
+
 // GlobalSessionIndex returns the path to the session index.
 func (p Paths) GlobalSessionIndex() string {
-	return filepath.Join(p.GlobalDir(), "sessions.json")
+	return filepath.Join(p.SessionIndexDir(), "sessions.json")
 }
 
 // GlobalSessionIndexLock returns the path to the session index lock.
 func (p Paths) GlobalSessionIndexLock() string {
-	return filepath.Join(p.GlobalDir(), "sessions.lock")
+	return filepath.Join(p.SessionIndexDir(), "sessions.lock")
 }
 
 // RefreshLock returns the cross-process lock path for a refresh worker
@@ -137,53 +165,191 @@ func (p Paths) RefreshLock(worker string) string {
 // Uses 0700 permissions for security (only the user can access session data).
 // Rejects symlinks to prevent symlink-following attacks where an attacker
 // could redirect state writes to an unintended location.
+//
+// When ActivationID is set, global state (health, models, etc.) is placed
+// under providers/<id>/global/. When unset, it falls back to the legacy
+// global/ directory for backward compatibility.
 func (p Paths) EnsureDirs() error {
 	dirs := []string{
 		p.CacheDir,
+		p.SessionIndexDir(),
 		p.GlobalDir(),
 	}
 	for _, d := range dirs {
-		if err := ensureSecureDir(d); err != nil {
+		if err := ensureSecureDirAll(d); err != nil {
 			return fmt.Errorf("mkdir %s: %w", d, err)
 		}
 	}
 	return nil
 }
 
+// EnsureGlobalDir creates the global cache directory if it does not already
+// exist. Uses 0700 permissions and validates the full path against symlinks
+// and other hostile entries. This is used by index/global writers that need
+// the global directory without creating the full cache tree.
+func (p Paths) EnsureGlobalDir() error {
+	if err := ensureSecureDirAll(p.GlobalDir()); err != nil {
+		return fmt.Errorf("mkdir %s: %w", p.GlobalDir(), err)
+	}
+	return nil
+}
+
 // EnsureSessionDir creates the per-session directory with restricted permissions.
-// Rejects existing symlinks at the session path.
+// Creates the full path tree (sessions/<clientType>/<sessionKey>) and validates
+// every component against symlinks and hostile entries.
 func (p Paths) EnsureSessionDir(clientType, sessionID string) error {
 	dir := p.SessionDir(clientType, sessionID)
-	if err := ensureSecureDir(dir); err != nil {
+	if err := ensureSecureDirAll(dir); err != nil {
 		return err
 	}
-	// Enforce 0700 on the session dir (in case umask or prior mode was laxer).
+	return nil
+}
+
+// ensureSecureDirAll creates the full directory tree at dir, validating every
+// component from the leaf up to the first existing ancestor. Each created
+// directory uses 0700 permissions. Symlinks, device nodes, sockets, and other
+// unexpected file types are rejected at every level.
+//
+// This is the trusted creator for top-level directories (cache root, global)
+// where the full path tree may need to be created. For leaf directories inside
+// already-validated trees, use ensureSecureDir.
+func ensureSecureDirAll(dir string) error {
+	dir = filepath.Clean(dir)
+
+	// Check for an existing entry at the target.
+	if info, err := os.Lstat(dir); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refusing to follow symlink at %s", dir)
+		}
+		if info.IsDir() {
+			return os.Chmod(dir, 0700)
+		}
+		return fmt.Errorf("path exists and is not a directory: %s", dir)
+	}
+
+	// Walk the expected path (it doesn't exist yet), validating that every
+	// existing ancestor is safe.
+	if err := walkAndValidatePath(dir); err != nil {
+		return err
+	}
+
+	// Now create the full tree — all parents are validated as safe.
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	// Enforce 0700 even if MkdirAll skipped an existing ancestor with laxer mode.
 	return os.Chmod(dir, 0700)
 }
 
 // ensureSecureDir creates a directory after verifying no symlink exists at
 // the target path. If a symlink is found, it is NOT followed — the error is
 // returned. If the directory already exists and is not a symlink, it is a no-op.
-func ensureSecureDir(dir string) error {
-	// Check for an existing symlink at the target path.
-	if info, err := os.Lstat(dir); err == nil {
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("refusing to follow symlink at %s", dir)
+//
+// Security contract:
+// walkAndValidatePath checks every component of abs from leaf to the first
+// existing ancestor. Each component is Lstat'd — symlinks, device nodes,
+// sockets, and pipes are all rejected. The trusted root itself is excluded
+// from the walk (it is assumed to be created by EnsureDirs from a known path).
+//
+// This prevents os.MkdirAll / os.Mkdir from silently following a symlink in a
+// parent directory, which would redirect state writes outside the cache root.
+func walkAndValidatePath(dir string) error {
+	original := dir
+	for {
+		info, err := os.Lstat(dir)
+		if err != nil {
+			// Not found — stop walking and the remaining path components will be
+			// created by Mkdir. This is the normal case: we walk up from the
+			// leaf until we hit an existing ancestor.
+			break
 		}
-		// Directory already exists and is not a symlink.
+		// Reject symlinks at every level.
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refusing to follow symlink in path: %s", dir)
+		}
+		// Reject device nodes, sockets, named pipes.
+		if info.Mode()&os.ModeDevice != 0 {
+			return fmt.Errorf("refusing path containing device node: %s", dir)
+		}
+		if info.Mode()&os.ModeType > 0 && !info.IsDir() {
+			return fmt.Errorf("refusing path containing non-directory entry: %s (%s)", dir, info.Mode())
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			// Reached filesystem root.
+			break
+		}
+		dir = parent
+	}
+	// Now walk back down from the trusted root to validate any intermediate
+	// components that the upward walk may have skipped because they didn't
+	// exist. We walk from the cache root down to the parent of the target,
+	// checking each component along the way.
+	//
+	// First find the trusted root (the first existing ancestor of original).
+	cacheRoot := original
+	for {
+		info, err := os.Lstat(cacheRoot)
+		if err != nil {
+			// Not found — walk to parent.
+			parent := filepath.Dir(cacheRoot)
+			if parent == cacheRoot {
+				// Reached filesystem root without finding an existing ancestor.
+				// The full tree will be created; the upward walk already
+				// validated any existing components.
+				return nil
+			}
+			cacheRoot = parent
+			continue
+		}
 		if info.IsDir() {
+			break
+		}
+		parent := filepath.Dir(cacheRoot)
+		if parent == cacheRoot {
 			return nil
 		}
-		// A regular file is in the way — remove it so MkdirAll can succeed.
-		if err := os.Remove(dir); err != nil {
-			return fmt.Errorf("remove non-directory at %s: %w", dir, err)
+		cacheRoot = parent
+	}
+	// Walk from cacheRoot down to the parent of the target directory.
+	// Every component on this path is checked for symlinks.
+	targetParent := filepath.Dir(filepath.Clean(original))
+	if strings.HasPrefix(targetParent, cacheRoot) || targetParent == cacheRoot {
+		// Walk each component from cacheRoot down to targetParent.
+		rest := targetParent[len(cacheRoot):]
+		rest = strings.TrimLeft(rest, "/")
+		components := strings.Split(rest, "/")
+		check := cacheRoot
+		for i, comp := range components {
+			if comp == "" {
+				continue
+			}
+			check = filepath.Join(check, comp)
+			info, err := os.Lstat(check)
+			if err != nil {
+				// Component doesn't exist yet — stop checking here.
+				// Remaining components will be created by MkdirAll.
+				break
+			}
+			if info.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("refusing to follow symlink in path: %s", check)
+			}
+			if info.Mode()&os.ModeDevice != 0 {
+				return fmt.Errorf("refusing path containing device node: %s", check)
+			}
+			if i == len(components)-1 {
+				// Last component — should be a directory.
+				if !info.IsDir() {
+					return fmt.Errorf("refusing path containing non-directory entry: %s (%s)", check, info.Mode())
+				}
+			}
+			// Not the last component — must be a directory to continue walking.
+			if i < len(components)-1 && !info.IsDir() {
+				return fmt.Errorf("refusing path containing non-directory entry: %s (%s)", check, info.Mode())
+			}
 		}
 	}
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return err
-	}
-	// Enforce 0700 even if MkdirAll skipped existing path with laxer mode.
-	return os.Chmod(dir, 0700)
+	return nil
 }
 
 // ============================================================
@@ -334,10 +500,12 @@ func SaveSnapshot(paths Paths, clientType, sessionID string, s *schema.Snapshot)
 // should treat that as fail-open. Dropped mutations are counted in
 // droppedMutations for observability.
 func UpdateSnapshot(paths Paths, clientType, sessionID string, initialize func() *schema.Snapshot, mutate func(*schema.Snapshot) error) error {
-	lockPath := paths.SessionLock(clientType, sessionID)
-	if err := os.MkdirAll(filepath.Dir(lockPath), 0700); err != nil {
+	// EnsureSessionDir creates the session directory (with full symlink
+	// validation) which also contains the lock file.
+	if err := paths.EnsureSessionDir(clientType, sessionID); err != nil {
 		return err
 	}
+	lockPath := paths.SessionLock(clientType, sessionID)
 	fl := NewFileLock(lockPath)
 	if err := fl.Acquire(); err != nil {
 		if IsLockBusy(err) {
@@ -468,10 +636,11 @@ func SaveCircuitBreakers(paths Paths, cbs []schema.CircuitBreaker) error {
 // blocks briefly — it is only called from background refreshers, where a short
 // wait is acceptable to guarantee no updates are dropped.
 func UpdateCircuitBreakers(paths Paths, mutate func(cbs []schema.CircuitBreaker) ([]schema.CircuitBreaker, error)) error {
-	lockPath := paths.GlobalCircuitBreakersLock()
-	if err := os.MkdirAll(filepath.Dir(lockPath), 0700); err != nil {
+	// EnsureDirs creates both cache root and global dir with full validation.
+	if err := paths.EnsureDirs(); err != nil {
 		return err
 	}
+	lockPath := paths.GlobalCircuitBreakersLock()
 	// Blocking acquire: background workers can wait; hooks never call this.
 	fl := NewFileLock(lockPath)
 	if err := fl.AcquireBlocking(); err != nil {

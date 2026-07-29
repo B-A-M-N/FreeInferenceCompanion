@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/b-a-m-n/freeinference-companion/internal/runtime"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
@@ -65,13 +66,21 @@ func newCodexSnapshot(sessionID, modelID string, now time.Time) *schema.Snapshot
 
 // HandleSessionStart initializes a new Codex session.
 // Codex does not provide context window size from hooks — it stays null.
+//
+// DEPRECATED: use HandleSessionStartWith, which accepts a runtime.Activation.
 func (a *CodexAdapter) HandleSessionStart(input *schema.CodexHookInput) error {
+	return a.HandleSessionStartWith(input, runtime.Evaluate())
+}
+
+// HandleSessionStartWith is the activation-aware variant. The caller must
+// have already gated on activation.Active.
+func (a *CodexAdapter) HandleSessionStartWith(input *schema.CodexHookInput, activation runtime.Activation) error {
 	sessionID := input.SessionID
 	if sessionID == "" {
 		return nil
 	}
 	now := time.Now().UTC()
-	provider := DetectProvider()
+	provider := activation.ProviderInfo()
 	err := state.UpdateSnapshot(a.Paths, schema.ClientCodex, sessionID,
 		func() *schema.Snapshot {
 			return newCodexSnapshot(sessionID, input.Model, now)
@@ -80,7 +89,8 @@ func (a *CodexAdapter) HandleSessionStart(input *schema.CodexHookInput) error {
 			snap.Session.Status = schema.SessionActive
 			snap.Session.LastEventAt = now
 			snap.Session.EndedAt = nil
-			snap.Provider = provider.ToProviderInfo()
+			snap.Provider = provider
+			snap.ActivationID = a.Paths.ActivationID
 			if input.Model != "" && (snap.Model.ID == "" || snap.Model.ID == "unknown") {
 				snap.Model.ID = input.Model
 				snap.Model.MetadataSource = "client_hook"

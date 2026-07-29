@@ -8,14 +8,17 @@ import (
 	"time"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/engine"
+	"github.com/b-a-m-n/freeinference-companion/internal/runtime"
 	"github.com/b-a-m-n/freeinference-companion/internal/secure"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
+	"github.com/b-a-m-n/freeinference-companion/pkg/version"
 )
 
-// PluginVersion is stamped onto new snapshots.
-// It must match cli.Version — kept in sync via TestVersionConsistency.
-const PluginVersion = "0.1.0"
+// PluginVersion is the companion version stamped onto new snapshots. It
+// is initialized from pkg/version at package load time, but main()
+// overrides it via ldflags so release builds report the correct version.
+var PluginVersion = version.Version
 
 // ClaudeAdapter handles Claude Code-specific integration logic.
 type ClaudeAdapter struct {
@@ -81,13 +84,29 @@ func newClaudeSnapshot(sessionID, modelID string, now time.Time) *schema.Snapsho
 // HandleSessionStart initializes session state. Existing snapshots (which may
 // already carry status-line telemetry) are preserved — only lifecycle fields
 // and provider detection are refreshed.
+//
+// DEPRECATED: use HandleSessionStartWith, which accepts a runtime.Activation
+// so the caller evaluates activation once and threads it through.
 func (a *ClaudeAdapter) HandleSessionStart(input *schema.ClaudeHookInput) error {
+	return a.HandleSessionStartWith(input, adaptersActivation())
+}
+
+// adaptersActivation is the lazy fallback used by deprecated methods that do
+// not receive an activation from their caller. New code should thread the
+// activation through explicitly.
+func adaptersActivation() runtime.Activation {
+	return runtime.Evaluate()
+}
+
+// HandleSessionStartWith is the activation-aware variant. The caller must have
+// already gated on activation.Active — this method does NOT re-check.
+func (a *ClaudeAdapter) HandleSessionStartWith(input *schema.ClaudeHookInput, activation runtime.Activation) error {
 	sessionID := input.SessionID
 	if sessionID == "" {
 		return nil
 	}
 	now := time.Now().UTC()
-	provider := DetectProvider()
+	provider := activation.ProviderInfo()
 
 	err := state.UpdateSnapshot(a.Paths, schema.ClientClaudeCode, sessionID,
 		func() *schema.Snapshot {
@@ -97,7 +116,8 @@ func (a *ClaudeAdapter) HandleSessionStart(input *schema.ClaudeHookInput) error 
 			snap.Session.Status = schema.SessionActive
 			snap.Session.LastEventAt = now
 			snap.Session.EndedAt = nil
-			snap.Provider = provider.ToProviderInfo()
+			snap.Provider = provider
+			snap.ActivationID = a.Paths.ActivationID
 			// Only fill in the model if we don't already know a better one.
 			if input.Model != "" && (snap.Model.ID == "" || snap.Model.ID == "unknown") {
 				snap.Model.ID = secure.SanitizeField(input.Model)
@@ -116,7 +136,17 @@ func (a *ClaudeAdapter) HandleSessionStart(input *schema.ClaudeHookInput) error 
 // Status line updates upsert the session if it doesn't exist yet (handles the
 // async SessionStart race). Values are never accumulated — each update is one
 // observation of the current context, deduplicated by fingerprint.
+//
+// P0-2/P0-3: the caller (cmdStatus) MUST gate on activation.Active before
+// invoking this method. Status-line updates are the most frequent automatic
+// integration and must be a true no-op for ordinary Claude sessions.
 func (a *ClaudeAdapter) HandleStatusLineUpdate(input *schema.ClaudeStatusLineInput, sessionID string) error {
+	return a.HandleStatusLineUpdateWith(input, sessionID, adaptersActivation())
+}
+
+// HandleStatusLineUpdateWith is the activation-aware variant. The caller must
+// have already gated on activation.Active — this method does NOT re-check.
+func (a *ClaudeAdapter) HandleStatusLineUpdateWith(input *schema.ClaudeStatusLineInput, sessionID string, activation runtime.Activation) error {
 	if sessionID == "" {
 		return nil
 	}
@@ -128,6 +158,10 @@ func (a *ClaudeAdapter) HandleStatusLineUpdate(input *schema.ClaudeStatusLineInp
 		},
 		func(snap *schema.Snapshot) error {
 			now := time.Now().UTC()
+
+			// Stamp the activation identity so the render layer can gate
+			// visibility on activation match.
+			snap.ActivationID = a.Paths.ActivationID
 
 			// Model info from status line (authoritative). The model ID is
 			// client-controlled and sanitized to prevent terminal injection
@@ -148,7 +182,7 @@ func (a *ClaudeAdapter) HandleStatusLineUpdate(input *schema.ClaudeStatusLineInp
 				snap.Model.ContextLength = &size
 			}
 
-			snap.Provider = DetectProvider().ToProviderInfo()
+			snap.Provider = activation.ProviderInfo()
 
 			// Latest request usage (may be nil before first response or
 			// immediately after compaction).
@@ -396,7 +430,15 @@ func TotalContextTokens(snap *schema.Snapshot) int64 {
 
 // HandleUserPromptSubmit activates the turn and produces warnings.
 // Returns (nil, nil) when there is nothing to show — no stdout output.
+//
+// DEPRECATED: use HandleUserPromptSubmitWith, which accepts a runtime.Activation.
 func (a *ClaudeAdapter) HandleUserPromptSubmit(input *schema.ClaudeHookInput, sessionID string) (*schema.ClaudeWarningOutput, error) {
+	return a.HandleUserPromptSubmitWith(input, sessionID, adaptersActivation())
+}
+
+// HandleUserPromptSubmitWith is the activation-aware variant. The caller must
+// have already gated on activation.Active.
+func (a *ClaudeAdapter) HandleUserPromptSubmitWith(input *schema.ClaudeHookInput, sessionID string, activation runtime.Activation) (*schema.ClaudeWarningOutput, error) {
 	if sessionID == "" {
 		return nil, nil
 	}
@@ -410,11 +452,15 @@ func (a *ClaudeAdapter) HandleUserPromptSubmit(input *schema.ClaudeHookInput, se
 		},
 		func(snap *schema.Snapshot) error {
 			active := true
+			// Capture the previous activity timestamp BEFORE overwriting it.
+			// The cache TTL warning needs the idle gap between the last event
+			// and this prompt — if we overwrite first, the gap is always zero.
+			prevLastEventAt := snap.Session.LastEventAt
 			snap.Activity.TurnActive = &active
 			snap.Activity.TurnStartedAt = &now
 			snap.Session.Status = schema.SessionActive
 			snap.Session.LastEventAt = now
-			snap.Provider = DetectProvider().ToProviderInfo()
+			snap.Provider = activation.ProviderInfo()
 
 			// Never warn during a non-FreeInference session.
 			if !IsConfirmedFreeInference(snap.Provider) {
@@ -460,16 +506,46 @@ func (a *ClaudeAdapter) HandleUserPromptSubmit(input *schema.ClaudeHookInput, se
 			// 3. Cache warning state
 			cacheDecision := engine.QualifyCacheWarning(snap, ActiveContextTokens(snap), true, now)
 
+			// 4. Cache TTL expiry warning state. The prompt cache evaporates
+			// after ~5min idle; warn the user that their next request will
+			// pay full price for the entire context. Only evaluated when
+			// context warning won't show (context is urgent safety; TTL is
+			// cost — but both matter, so TTL gets priority over projection
+			// and cache-low because it's the most actionable cost signal).
+			// Uses prevLastEventAt (captured before overwrite) — the idle
+			// gap is between the LAST activity and now, not zero.
+			var ttlDecision engine.CacheTTLDecision
+			var ttlWouldShow bool
+			if !contextWouldShow {
+				ttlDecision = engine.EvaluateCacheTTLExpiry(snap, ActiveContextTokens(snap), prevLastEventAt, now)
+				if ttlDecision.Warn && engine.ShouldShowCacheTTLWarning(snap, now) {
+					ttlWouldShow = true
+				}
+			}
+
 			// Persist ALL state transitions now (before short-circuiting).
 			if contextWouldShow {
 				snap.Warnings.ContextSeverity = contextSeverity
 				snap.Warnings.LastContextShownAt = &now
 				snap.Warnings.HistoryCount++
 				events = append(events, state.Event{Type: state.EventWarningShown, Detail: "context:" + contextSeverity})
+			} else if ttlWouldShow {
+				snap.Warnings.CacheTTLWarningActive = true
+				snap.Warnings.LastCacheTTLShownAt = &now
+				snap.Warnings.HistoryCount++
+				events = append(events, state.Event{Type: state.EventWarningShown, Detail: "cache_ttl_expiry"})
 			} else if projectionMsg != "" {
 				snap.Warnings.LastContextShownAt = &now
 				snap.Warnings.HistoryCount++
 				events = append(events, state.Event{Type: state.EventWarningShown, Detail: "projection_overflow"})
+			}
+
+			// TTL resolves when the user sends a prompt without an idle gap
+			// (the cache is being actively used again). Uses prevLastEventAt
+			// because snap.Session.LastEventAt has already been overwritten.
+			if snap.Warnings.CacheTTLWarningActive && !ttlWouldShow && now.Sub(prevLastEventAt) < engine.PromptCacheTTL {
+				snap.Warnings.CacheTTLWarningActive = false
+				events = append(events, state.Event{Type: state.EventWarningResolved, Detail: "cache_ttl_expiry"})
 			}
 
 			switch {
@@ -483,12 +559,19 @@ func (a *ClaudeAdapter) HandleUserPromptSubmit(input *schema.ClaudeHookInput, se
 				events = append(events, state.Event{Type: state.EventWarningResolved})
 			}
 
-			// Select ONE output message by priority: context > projection > cache.
+			// Select ONE output message by priority:
+			// context > cache-ttl > projection > cache-low.
 			switch {
 			case contextWouldShow:
 				output = &schema.ClaudeWarningOutput{
 					Continue:       true,
 					SystemMessage:  contextMsg,
+					SuppressOutput: true,
+				}
+			case ttlWouldShow:
+				output = &schema.ClaudeWarningOutput{
+					Continue:       true,
+					SystemMessage:  engine.CacheTTLWarningMessage(ttlDecision.IdleMinutes, ActiveContextTokens(snap)),
 					SuppressOutput: true,
 				}
 			case projectionMsg != "":
@@ -502,11 +585,18 @@ func (a *ClaudeAdapter) HandleUserPromptSubmit(input *schema.ClaudeHookInput, se
 				if cacheDecision.Share != nil {
 					share = *cacheDecision.Share
 				}
+				// Include root-cause attribution so the warning is actionable,
+				// not just diagnostic.
+				attr := engine.AttributeCacheMisses(snap)
+				msg := fmt.Sprintf(
+					"FreeInference: cache reuse is low (read share %.0f%% over recent requests). Repeated full-context re-reads increase latency and cost.",
+					share*100)
+				if attr.Pattern != engine.PatternNone && attr.Pattern != engine.PatternInsufficientData {
+					msg += " Likely cause: " + attr.Diagnosis
+				}
 				output = &schema.ClaudeWarningOutput{
-					Continue: true,
-					SystemMessage: fmt.Sprintf(
-						"FreeInference: cache reuse is low (read share %.0f%% over recent requests). Repeated full-context re-reads increase latency and cost.",
-						share*100),
+					Continue:       true,
+					SystemMessage:  msg,
 					SuppressOutput: true,
 				}
 			}

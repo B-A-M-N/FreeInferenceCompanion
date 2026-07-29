@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
+	"github.com/b-a-m-n/freeinference-companion/internal/engine"
 	"github.com/b-a-m-n/freeinference-companion/internal/secure"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
@@ -15,13 +17,15 @@ import (
 // raw environment values, transcript paths, prompt text, responses,
 // working-directory paths, or error bodies.
 type reportData struct {
-	Tool        string         `json:"tool"`
-	Version     string         `json:"version"`
-	GeneratedAt string         `json:"generated_at"`
-	Client      string         `json:"client,omitempty"`
-	Session     *reportSession `json:"session,omitempty"`
-	Health      *reportHealth  `json:"health,omitempty"`
-	Note        string         `json:"note"`
+	Tool             string              `json:"tool"`
+	Version          string              `json:"version"`
+	GeneratedAt      string              `json:"generated_at"`
+	Client           string              `json:"client,omitempty"`
+	Session          *reportSession      `json:"session,omitempty"`
+	Health           *reportHealth       `json:"health,omitempty"`
+	AccountUsage     *reportAccountUsage `json:"account_usage,omitempty"`
+	BudgetProjection string              `json:"budget_projection,omitempty"`
+	Note             string              `json:"note"`
 }
 
 type reportSession struct {
@@ -56,6 +60,14 @@ type reportHealth struct {
 	Unhealthy *int   `json:"unhealthy_count,omitempty"`
 }
 
+type reportAccountUsage struct {
+	FetchedAt     string `json:"fetched_at"`
+	RequestsUsed  *int64 `json:"requests_used,omitempty"`
+	RequestsLimit *int64 `json:"requests_limit,omitempty"`
+	TokensUsed    *int64 `json:"tokens_used,omitempty"`
+	TokensLimit   *int64 `json:"tokens_limit,omitempty"`
+}
+
 const reportNote = "This report is designed to exclude known sensitive fields. Review it before sharing."
 
 // cmdReport implements `fi report`.
@@ -88,6 +100,15 @@ func cmdReport(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 			Unhealthy: gs.Health.UnhealthyCount,
 		}
 	}
+	if gs.AccountUsage != nil {
+		report.AccountUsage = &reportAccountUsage{
+			FetchedAt:     gs.AccountUsage.FetchedAt.UTC().Format(time.RFC3339),
+			RequestsUsed:  gs.AccountUsage.RequestsUsed,
+			RequestsLimit: gs.AccountUsage.RequestsLimit,
+			TokensUsed:    gs.AccountUsage.TokensUsed,
+			TokensLimit:   gs.AccountUsage.TokensLimit,
+		}
+	}
 
 	resolved, err := resolveSession(paths, clientType, sessionID, stdout)
 	if err != nil {
@@ -97,6 +118,14 @@ func cmdReport(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 	if resolved != nil {
 		report.Client = resolved.Client
 		report.Session = buildReportSession(resolved.Snap, reveal)
+
+		// Compute budget projection for the markdown report.
+		if gs.AccountUsage != nil {
+			proj := engineProjectBudget(gs.AccountUsage, resolved.Snap)
+			if proj != "" {
+				report.BudgetProjection = proj
+			}
+		}
 	}
 
 	if format == "json" {
@@ -166,6 +195,22 @@ func printMarkdownReport(stdout io.Writer, report *reportData, reveal bool) {
 		fmt.Fprintf(stdout, "Checked: %s\n", report.Health.Checked)
 	}
 
+	if report.AccountUsage != nil {
+		fmt.Fprintln(stdout)
+		fmt.Fprintln(stdout, "--- Account Usage ---")
+		fmt.Fprintf(stdout, "Updated: %s\n", report.AccountUsage.FetchedAt)
+		if report.AccountUsage.RequestsUsed != nil || report.AccountUsage.RequestsLimit != nil {
+			fmt.Fprintf(stdout, "Requests: %s\n", formatQuotaPair(report.AccountUsage.RequestsUsed, report.AccountUsage.RequestsLimit))
+		}
+		if report.AccountUsage.TokensUsed != nil || report.AccountUsage.TokensLimit != nil {
+			fmt.Fprintf(stdout, "Tokens:   %s\n", formatQuotaPair(report.AccountUsage.TokensUsed, report.AccountUsage.TokensLimit))
+		}
+	}
+
+	if report.BudgetProjection != "" {
+		fmt.Fprintf(stdout, "Budget:   %s\n", report.BudgetProjection)
+	}
+
 	if report.Session == nil {
 		fmt.Fprintln(stdout)
 		fmt.Fprintln(stdout, "No session resolved. Use --session <id> or see `fi sessions`.")
@@ -219,4 +264,17 @@ func printMarkdownReport(stdout io.Writer, report *reportData, reveal bool) {
 	if !reveal {
 		fmt.Fprintln(stdout, "Session identifiers are masked. Pass --include-identifiers to reveal full IDs.")
 	}
+}
+
+// engineProjectBudget computes a budget projection string for the report.
+func engineProjectBudget(au *schema.AccountUsage, snap *schema.Snapshot) string {
+	proj := engine.ProjectBudget(au, snap, time.Now().UTC())
+	if proj.Status == engine.BudgetUnknown {
+		return ""
+	}
+	parts := []string{budgetIcon(proj.Status), strings.ToLower(string(proj.Status))}
+	if proj.Detail != "" {
+		parts = append(parts, "—", proj.Detail)
+	}
+	return strings.Join(parts, " ")
 }

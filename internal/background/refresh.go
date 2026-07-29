@@ -22,8 +22,9 @@ const (
 
 // Cache TTLs.
 const (
-	ModelsTTL = 6 * time.Hour
-	HealthTTL = 120 * time.Second
+	ModelsTTL       = 6 * time.Hour
+	HealthTTL       = 120 * time.Second
+	AccountUSageTTL = 60 * time.Minute
 )
 
 // Backoff intervals for consecutive failures: 2 → 5 → 15 → 30 minutes.
@@ -36,12 +37,13 @@ var backoffIntervals = []time.Duration{
 
 // RefreshResult summarizes what a refresh pass did.
 type RefreshResult struct {
-	Worker          string `json:"worker,omitempty"`
-	ModelsRefreshed bool   `json:"models_refreshed"`
-	HealthRefreshed bool   `json:"health_refreshed"`
-	Skipped         bool   `json:"skipped"`
-	SkipReason      string `json:"skip_reason,omitempty"`
-	Error           string `json:"error,omitempty"`
+	Worker                string `json:"worker,omitempty"`
+	ModelsRefreshed       bool   `json:"models_refreshed"`
+	HealthRefreshed       bool   `json:"health_refreshed"`
+	AccountUsageRefreshed bool   `json:"account_usage_refreshed"`
+	Skipped               bool   `json:"skipped"`
+	SkipReason            string `json:"skip_reason,omitempty"`
+	Error                 string `json:"error,omitempty"`
 }
 
 // Refresher performs provider metadata refreshes. Cross-process coalescing
@@ -70,7 +72,7 @@ func NewRefresher(client *api.Client, paths state.Paths, healthURL string) *Refr
 func (r *Refresher) WorkerRefresh(worker string) *RefreshResult {
 	result := &RefreshResult{Worker: worker}
 
-	if worker != WorkerModels && worker != WorkerHealth {
+	if worker != WorkerModels && worker != WorkerHealth && worker != WorkerAccountUsage {
 		result.Skipped = true
 		result.SkipReason = "unknown worker"
 		return result
@@ -123,6 +125,18 @@ func (r *Refresher) WorkerRefresh(worker string) *RefreshResult {
 			return result
 		}
 		r.refreshHealth(result, now)
+	case WorkerAccountUsage:
+		if r.Client == nil || r.Client.APIKey == "" {
+			result.Skipped = true
+			result.SkipReason = "no API key configured"
+			return result
+		}
+		if !accountUsageStale(gs, now) {
+			result.Skipped = true
+			result.SkipReason = "cache fresh"
+			return result
+		}
+		r.refreshAccountUsage(result, now)
 	}
 	return result
 }
@@ -152,6 +166,15 @@ func (r *Refresher) RefreshIfStale() *RefreshResult {
 			result.Error = res.Error
 		}
 	}
+	if r.Client != nil && r.Client.APIKey != "" &&
+		!breakerOpen(gs, WorkerAccountUsage, now) {
+		if accountUsageStale(gs, now) {
+			res := r.WorkerRefresh(WorkerAccountUsage)
+			if res.Error != "" && result.Error == "" {
+				result.Error = res.Error
+			}
+		}
+	}
 	return result
 }
 
@@ -165,6 +188,9 @@ func (r *Refresher) ForceRefresh() *RefreshResult {
 	if r.HealthURL != "" {
 		r.forceRefreshHealth(result, now)
 	}
+	if r.Client != nil && r.Client.APIKey != "" {
+		r.forceRefreshAccountUsage(result, now)
+	}
 	return result
 }
 
@@ -175,6 +201,12 @@ func (r *Refresher) ForceRefresh() *RefreshResult {
 // StaleWorkers returns the workers whose caches are stale and whose breakers
 // are closed. Cheap and read-only — safe for hooks to call.
 func StaleWorkers(paths state.Paths, healthURL string) []string {
+	return StaleWorkersWithClient(paths, healthURL, "")
+}
+
+// StaleWorkersWithClient returns the workers whose caches are stale and whose
+// breakers are closed. When apiKey is non-empty, account-usage is included.
+func StaleWorkersWithClient(paths state.Paths, healthURL string, apiKey string) []string {
 	now := time.Now()
 	gs, _ := state.LoadGlobal(paths)
 	var stale []string
@@ -183,6 +215,11 @@ func StaleWorkers(paths state.Paths, healthURL string) []string {
 	}
 	if healthURL != "" && healthStale(gs, now) && !breakerOpen(gs, WorkerHealth, now) {
 		stale = append(stale, WorkerHealth)
+	}
+	if apiKey != "" && !breakerOpen(gs, WorkerAccountUsage, now) {
+		if accountUsageStale(gs, now) {
+			stale = append(stale, WorkerAccountUsage)
+		}
 	}
 	return stale
 }
@@ -422,4 +459,44 @@ func (r *Refresher) forceRefreshHealth(result *RefreshResult, now time.Time) {
 	}
 	defer fl.Release()
 	r.refreshHealth(result, now)
+}
+
+// ============================================================
+// Account usage
+// ============================================================
+
+func accountUsageStale(gs *schema.GlobalState, now time.Time) bool {
+	return gs.AccountUsage == nil || now.Sub(gs.AccountUsage.FetchedAt) > AccountUSageTTL
+}
+
+func (r *Refresher) refreshAccountUsage(result *RefreshResult, now time.Time) {
+	usage, err := r.Client.GetAccountUsage()
+	if err != nil {
+		r.recordFailure(WorkerAccountUsage, err, now)
+		result.Error = "account usage fetch failed"
+		return
+	}
+	if err := state.SaveAccountUsage(r.Paths, usage); err != nil {
+		result.Error = "save account usage"
+		return
+	}
+	result.AccountUsageRefreshed = true
+	r.resetCircuitBreaker(WorkerAccountUsage)
+}
+
+// forceRefreshAccountUsage refreshes account usage under the worker lock but
+// without the staleness / circuit-breaker gates. Used by ForceRefresh.
+func (r *Refresher) forceRefreshAccountUsage(result *RefreshResult, now time.Time) {
+	fl := state.NewFileLock(r.Paths.RefreshLock(WorkerAccountUsage))
+	if err := fl.Acquire(); err != nil {
+		if state.IsLockBusy(err) {
+			result.Skipped = true
+			result.SkipReason = "another worker running"
+		} else {
+			result.Error = "acquire lock"
+		}
+		return
+	}
+	defer fl.Release()
+	r.refreshAccountUsage(result, now)
 }

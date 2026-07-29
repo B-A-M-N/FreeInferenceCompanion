@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/adapters"
+	"github.com/b-a-m-n/freeinference-companion/internal/engine"
+	"github.com/b-a-m-n/freeinference-companion/internal/runtime"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
@@ -29,32 +32,57 @@ func cmdStatus(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 		return 2
 	}
 
-	// Status-line mode: a Claude status payload arrives on stdin.
-	if sessionID == "" && stdinHasData(stdin) {
+	// P0-2/P0-3: activation gate — must be evaluated before any IO work.
+	// For status-line mode (stdin has data), inactive means zero output.
+	// For interactive mode, we allow human-readable messages.
+	activation := runtime.Evaluate()
+
+	// Status-line mode: a Claude status payload arrives on stdin. We MUST use
+	// the session ID from that payload — never fall through to
+	// resolveSession (which picks the most-recent active session and can show
+	// a stale session from a different context). When inactive, output nothing.
+	if stdinHasData(stdin) {
 		var statusInput schema.ClaudeStatusLineInput
 		if err := json.NewDecoder(stdin).Decode(&statusInput); err == nil && statusInput.SessionID != "" {
+			// P0-3: inactive runtime → zero bytes in status-line mode
+			if !activation.Active {
+				return 0
+			}
 			sessionID = statusInput.SessionID
 			if clientType == "" {
 				clientType = schema.ClientClaudeCode
 			}
-			adapter := adapters.NewClaudeAdapter(paths)
-			_ = adapter.HandleStatusLineUpdate(&statusInput, sessionID)
+			_ = adapters.NewClaudeAdapter(paths).HandleStatusLineUpdateWith(&statusInput, sessionID, activation)
 
 			snap, err := state.LoadSnapshot(paths, schema.ClientClaudeCode, sessionID)
 			if err != nil || snap == nil {
-				fmt.Fprintln(stdout, "FI: no data")
+				// P0-3: missing snapshot → zero bytes, not "FI: no data"
 				return 0
 			}
 			gs := loadGlobal(paths)
-			vm := buildView(snap, gs)
+			aid := activationID(activation)
+			vm := buildView(snap, gs, aid, activation.Active, clientType, sessionID)
 			rc := renderConfig()
 			if compact {
-				fmt.Fprintln(stdout, vm.Line(rc))
+				// Zero-output contract: write nothing when ineligible.
+				// Never write a newline for an empty line.
+				if line := vm.Line(rc); line != "" {
+					fmt.Fprintln(stdout, line)
+				}
 			} else {
-				fmt.Fprintln(stdout, vm.Expanded(rc))
+				if expanded := vm.Expanded(rc); expanded != "" {
+					fmt.Fprintln(stdout, expanded)
+				}
 			}
 			return 0
 		}
+	}
+
+	// No usable stdin payload — in compact/status-line mode, output zero
+	// bytes. An empty status line is correct when there is nothing to say.
+	// In interactive mode (no --compact), fall through to resolveSession.
+	if compact {
+		return 0
 	}
 
 	resolved, err := resolveSession(paths, clientType, sessionID, stdout)
@@ -68,11 +96,14 @@ func cmdStatus(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 	}
 
 	gs := loadGlobal(paths)
-	vm := buildView(resolved.Snap, gs)
+	aid := activationID(activation)
+	vm := buildView(resolved.Snap, gs, aid, activation.Active, clientType, resolved.Snap.Session.ID)
 	rc := renderConfig()
 
 	if compact {
-		fmt.Fprintln(stdout, vm.Line(rc))
+		if line := vm.Line(rc); line != "" {
+			fmt.Fprintln(stdout, line)
+		}
 		return 0
 	}
 
@@ -178,6 +209,32 @@ func printFullStatus(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalS
 		fmt.Fprintln(stdout)
 	}
 
+	if gs != nil && gs.AccountUsage != nil && adapters.IsConfirmedFreeInference(snap.Provider) {
+		au := gs.AccountUsage
+		fmt.Fprintf(stdout, "Account Usage:\n")
+		fmt.Fprintf(stdout, "  Updated: %s\n", au.FetchedAt.Format(time.RFC3339))
+		if au.RequestsUsed != nil || au.RequestsLimit != nil {
+			fmt.Fprintf(stdout, "  Requests: %s\n", formatQuotaPair(au.RequestsUsed, au.RequestsLimit))
+		}
+		if au.TokensUsed != nil || au.TokensLimit != nil {
+			fmt.Fprintf(stdout, "  Tokens:   %s\n", formatQuotaPair(au.TokensUsed, au.TokensLimit))
+		}
+
+		// Token budget projection — estimates quota exhaustion timeline.
+		proj := engine.ProjectBudget(au, snap, time.Now().UTC())
+		if proj.Status != engine.BudgetUnknown {
+			fmt.Fprintf(stdout, "  Budget:   %s %s\n",
+				budgetIcon(proj.Status), strings.ToLower(string(proj.Status)))
+			if proj.EstimatedExhaustion != nil {
+				fmt.Fprintf(stdout, "  ETA:      %s\n", proj.EstimatedExhaustion.Format("Jan 2 15:04 MST"))
+			}
+			if proj.Detail != "" {
+				fmt.Fprintf(stdout, "           %s\n", proj.Detail)
+			}
+		}
+		fmt.Fprintln(stdout)
+	}
+
 	if snap.LastFailure != nil {
 		fmt.Fprintf(stdout, "Last Failure: %s (at %s)\n", snap.LastFailure.Category, snap.LastFailure.ObservedAt.Format(time.RFC3339))
 	}
@@ -248,4 +305,18 @@ func stdinHasData(stdin io.Reader) bool {
 		return false
 	}
 	return (stat.Mode() & os.ModeCharDevice) == 0
+}
+
+// activationID returns the filesystem-safe identity for the given activation,
+// or an empty string when the runtime is not active. This is used to gate
+// health and circuit-breaker data in BuildViewModel.
+func activationID(activation runtime.Activation) string {
+	if !activation.Active {
+		return ""
+	}
+	id, err := activation.Identity(runtime.DefaultSaltLoader())
+	if err != nil {
+		return ""
+	}
+	return id.DirName()
 }

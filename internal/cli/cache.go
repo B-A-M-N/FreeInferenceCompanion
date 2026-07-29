@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/b-a-m-n/freeinference-companion/internal/engine"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
@@ -74,44 +75,29 @@ func cmdCache(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout)
 	}
 
-	// Recommendations
-	fmt.Fprintln(stdout, "Recommendations:")
-	hasRecs := false
+	// Pattern attribution — root-cause diagnosis instead of generic heuristics.
+	attribution := engine.AttributeCacheMisses(snap)
 
-	if readPct < 20 && ca.RequestSamples >= 3 {
-		fmt.Fprintln(stdout, "  🔴 CRITICAL: Cache read share < 20%")
-		fmt.Fprintln(stdout, "     → Use a consistent system prompt / prefix across requests (heuristic)")
-		fmt.Fprintln(stdout, "     → Keep early tokens identical between requests — avoid timestamps or random seeds")
-		hasRecs = true
-	} else if readPct < 50 {
-		fmt.Fprintln(stdout, "  🟡 LOW: Cache read share < 50%")
-		fmt.Fprintln(stdout, "     → Standardize common context (docs, schemas, examples) at the start (heuristic)")
-		hasRecs = true
+	fmt.Fprintln(stdout, "Diagnosis:")
+	switch attribution.Pattern {
+	case engine.PatternNone:
+		fmt.Fprintln(stdout, "  ✅ Cache efficiency looks good. Keep current patterns.")
+	case engine.PatternInsufficientData:
+		fmt.Fprintf(stdout, "  ℹ️  %s\n", attribution.Diagnosis)
+	default:
+		patternLabel := patternLabel(attribution.Pattern)
+		fmt.Fprintf(stdout, "  %s %s\n", patternLabel, attribution.Diagnosis)
+		if attribution.Recommendation != "" {
+			fmt.Fprintf(stdout, "     → %s\n", attribution.Recommendation)
+		}
+		fmt.Fprintf(stdout, "     (confidence: %s)\n", attribution.Confidence)
 	}
 
-	if createPct > 30 && readPct < 50 {
-		fmt.Fprintln(stdout, "  🟡 HIGH CACHE CREATION: New cache > 30% but reads low")
-		fmt.Fprintln(stdout, "     → You're creating cache entries but not reusing them")
-		fmt.Fprintln(stdout, "     → Check if session is being reset or context window sliding (heuristic)")
-		hasRecs = true
-	}
-
+	// Context pressure advisory (supplements the cache diagnosis).
 	if lc != nil && lc.UsedPercentage != nil && *lc.UsedPercentage > 70 {
+		fmt.Fprintln(stdout)
 		fmt.Fprintf(stdout, "  🟡 CONTEXT PRESSURE: %.0f%% used\n", *lc.UsedPercentage)
 		fmt.Fprintln(stdout, "     → Compact earlier — for Claude Code use /compact; for other clients use their compaction command")
-		fmt.Fprintln(stdout, "     → Drop older history; keep only relevant context")
-		hasRecs = true
-	}
-
-	if ca.Trend == schema.TrendDeclining {
-		fmt.Fprintln(stdout, "  🟡 DECLINING TREND: Cache efficiency dropping")
-		fmt.Fprintln(stdout, "     → Context window may be sliding past cached prefix")
-		fmt.Fprintln(stdout, "     → Consider shorter sessions or manual compaction")
-		hasRecs = true
-	}
-
-	if !hasRecs {
-		fmt.Fprintln(stdout, "  ✅ Cache efficiency looks good. Keep current patterns.")
 	}
 
 	fmt.Fprintln(stdout)
@@ -122,6 +108,22 @@ func cmdCache(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintln(stdout, "  4. Compact early: Use your client's compaction command at 60-70%, not 90%")
 
 	return 0
+}
+
+// patternLabel returns the icon+label for a cache pattern in the diagnosis.
+func patternLabel(p engine.CachePattern) string {
+	switch p {
+	case engine.PatternThrashing:
+		return "🔴 THRASHING:"
+	case engine.PatternNoCaching:
+		return "🔴 NO CACHING:"
+	case engine.PatternDecay:
+		return "🟡 DECAYING:"
+	case engine.PatternIntermittent:
+		return "🟡 INTERMITTENT:"
+	default:
+		return "🟡"
+	}
 }
 
 func printCacheBasics(stdout io.Writer, lc *schema.LiveContext) {

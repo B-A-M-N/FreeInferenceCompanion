@@ -72,18 +72,6 @@
           }
         ]
       }
-    ],
-    "StopFailure": [
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${PLUGIN_ROOT}/scripts/run-hook.sh\" StopFailure",
-            "timeout": 5
-          }
-        ]
-      }
     ]
   }
 }

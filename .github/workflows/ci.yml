@@ -54,21 +54,54 @@ jobs:
         with:
           go-version-file: go.mod
 
-  plugin-syntax-check:
-    name: Plugin manifests & wrappers (syntax only)
+  plugin-validity:
+    name: Plugin manifests (schema + compatibility)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/setup-python@a26af69be7b907ab1ce9b6c7f5e4a0c6e0c5e8b1 # v5.6.0
         with:
           python-version: '3.x'
-      - run: make plugin-syntax-check
-      - name: Note (no runtime plugin validation)
+      - name: Plugin manifest + wrapper syntax
+        run: make plugin-syntax-check
+      - name: Codex manifest schema validation
         run: |
-          echo "WARNING: this job only parses manifests and bash scripts."
-          echo "It does NOT validate either plugin against the vendor's runtime."
-          echo "Codex plugin-local hooks are not loaded by the current Codex"
-          echo "runtime; see README for the Codex architecture status."
+          python3 -c "
+          import json, sys
+          m = json.load(open('plugins/codex/.codex-plugin/plugin.json'))
+          # Top-level required fields.
+          for key in ('name', 'version', 'description', 'author'):
+              assert key in m, f'missing top-level {key}'
+          # Skills path must be present.
+          assert 'skills' in m, 'missing skills path'
+          # The current Codex plugin contract rejects unsupported fields such as
+          # 'hooks'. Only allow the documented top-level keys.
+          allowed_top = {'name', 'version', 'description', 'author', 'skills', 'interface'}
+          unsupported = set(m.keys()) - allowed_top
+          assert not unsupported, f'unsupported top-level field(s): {unsupported}'
+          # Interface metadata is required by the current Codex plugin contract.
+          iface = m.get('interface', {})
+          allowed_iface = {'displayName', 'shortDescription', 'longDescription', 'developerName', 'category', 'capabilities', 'defaultPrompt'}
+          unsupported_iface = set(iface.keys()) - allowed_iface
+          assert not unsupported_iface, f'unsupported interface field(s): {unsupported_iface}'
+          for key in allowed_iface:
+              assert key in iface, f'missing interface.{key}'
+          assert isinstance(iface['capabilities'], list) and len(iface['capabilities']) > 0, 'capabilities must be a non-empty list'
+          assert isinstance(iface['defaultPrompt'], list) and len(iface['defaultPrompt']) > 0, 'defaultPrompt must be a non-empty list'
+          print('Codex manifest satisfies the current plugin contract.')
+          "
+
+  bench:
+    name: Benchmarks (latency gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run latency benchmarks
+        run: make bench-ci
 
   build-static:
     name: Static build (linux/amd64)
@@ -121,37 +154,79 @@ jobs:
           path: build/fi-${{ matrix.target }}
           if-no-files-found: error
 
-  release-checksums:
-    name: Generate checksums (on tag)
-    # Tagged releases must pass EVERY gate that runs locally on `make release`,
-    # not just the build jobs. A green tag should mean the same thing as a
-    # green local release.
+  pr-packaging:
+    name: Packaging (PR validation)
     needs:
       - lint-and-test
-      - plugin-syntax-check
-      - build-static
-      - cross-build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
-          path: build
-          merge-multiple: false
-      - name: Collect release artifacts
+          go-version-file: go.mod
+          cache: true
+      - name: Build test artifacts
         run: |
-          mkdir -p release
-          find build -type f -name 'fi-*' -exec cp {} release/ \;
-          ls -la release/
-      - name: Generate checksums
+          VERSION=0.0.0 make package
+      - name: Validate archive contents
         run: |
-          cd release
-          sha256sum fi-* > checksums.txt
-          cat checksums.txt
-      - name: Upload checksums
+          set -euo pipefail
+          for f in release/*.tar.gz; do
+            echo "Checking $f"
+            tar tzf "$f" | head -5
+          done
+          # SBOM and provenance must be generated
+          test -f release/sbom.spdx.json
+          test -f release/provenance.intoto.jsonl
+      - name: Upload artifacts
         uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
         with:
-          name: checksums
-          path: release/checksums.txt
-          if-no-files-found: error
+          name: release-artifacts-pr
+          path: release/
+          if-no-files-found: warn
+
+  pr-plugin-clean-install:
+    name: Plugin clean-install smoke (PR)
+    needs:
+      - lint-and-test
+      - pr-packaging
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build package + plugin clean-install smoke
+        run: |
+          VERSION=0.0.0 make plugin-clean-install
+
+  release:
+    name: Release (on tag)
+    needs:
+      - lint-and-test
+      - plugin-validity
+      - build-static
+      - cross-build
+      - bench
+      - pr-packaging
+      - pr-plugin-clean-install
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run release gate and package
+        run: make release
+      - name: Upload GitHub Release
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v2.0.0
+        with:
+          files: release/*
+          draft: true

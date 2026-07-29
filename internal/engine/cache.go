@@ -14,10 +14,21 @@ import (
 // ============================================================
 
 const (
-	// MaxUsageObservations bounds the per-session observation window.
-	MaxUsageObservations = 20
-	// AnalysisWindow is how many recent unique observations feed rolling shares.
-	AnalysisWindow = 5
+	// CacheHistoryRetention bounds the per-session observation window.
+	// This is the maximum number of unique observations persisted to the
+	// session snapshot. Separate from the analysis window and viewport size.
+	CacheHistoryRetention = 20
+
+	// CacheAnalysisWindow is how many recent unique observations feed rolling
+	// shares in AnalyzeCache. Kept distinct from retention so analysis can
+	// use a smaller window than the full history.
+	CacheAnalysisWindow = 5
+
+	// CacheHistoryViewportRows is the recommended number of rows to display
+	// at one time in an interactive history viewer. Used by TUI/panel code;
+	// the engine itself does not enforce this.
+	CacheHistoryViewportRows = 8
+
 	// MinObservationsForWarning is the minimum sample count before a
 	// cache-low warning may qualify.
 	MinObservationsForWarning = 3
@@ -36,6 +47,13 @@ const (
 	// TrendThreshold is the read-share delta (in share points) that marks a trend.
 	TrendThreshold = 0.05
 )
+
+// MaxUsageObservations is retained as an alias for CacheHistoryRetention
+// for backwards compatibility with code that references it directly.
+const MaxUsageObservations = CacheHistoryRetention
+
+// AnalysisWindow is retained as an alias for CacheAnalysisWindow.
+const AnalysisWindow = CacheAnalysisWindow
 
 // ObservationFingerprint builds a stable fingerprint for a usage sample so
 // re-renders of the same status-line data are not double-counted.

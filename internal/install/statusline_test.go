@@ -10,6 +10,7 @@ import (
 	"testing"
 )
 
+// loadSettingsMap reads and parses the settings file. Exits the test on error.
 func loadSettingsMap(t *testing.T, home string) map[string]any {
 	t.Helper()
 	data, err := os.ReadFile(settingsPath(home))
@@ -23,9 +24,111 @@ func loadSettingsMap(t *testing.T, home string) map[string]any {
 	return settings
 }
 
+// ---- P0-4 regression tests: metadata errors, malformed settings, drift ----
+
+// TestLoadMetadata_DistinguishesNotFoundFromOtherErrors verifies that
+// loadMetadata treats file-not-found as "absent" (false, nil) but treats
+// other read errors (permission denied, I/O) as a hard error so the installer
+// does not silently destroy rollback history.
+func TestLoadMetadata_DistinguishesNotFoundFromOtherErrors(t *testing.T) {
+	home := t.TempDir()
+	metaFile := metadataPath(home)
+
+	// Missing file → (zero, false, nil).
+	_, ok, err := loadMetadata(metaFile)
+	if err != nil || ok {
+		t.Fatalf("missing metadata: ok=%v, err=%v", ok, err)
+	}
+
+	// Directory in place of file → must be an error, not "absent".
+	if err := os.MkdirAll(metaFile, 0700); err != nil {
+		t.Fatal(err)
+	}
+	_, ok, err = loadMetadata(metaFile)
+	if err == nil || ok {
+		t.Fatalf("directory-at-metadata-path must be an error: ok=%v, err=%v", ok, err)
+	}
+}
+
+// TestUninstallRefusesOnMalformedSettings verifies the P0-4 fix: a malformed
+// settings file causes uninstall to refuse every mutation — wrapper and
+// metadata must remain intact (no partial uninstall).
+func TestUninstallRefusesOnMalformedSettings(t *testing.T) {
+	home := t.TempDir()
+	if err := InstallClaudeStatusLine(home, "/opt/fi", ScopeUser, home, io.Discard); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	// Corrupt the settings file.
+	if err := os.WriteFile(settingsPath(home), []byte("{not json"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	err := UninstallClaudeStatusLine(home, ScopeUser, home, io.Discard)
+	if err == nil {
+		t.Fatal("uninstall must refuse on malformed settings")
+	}
+	// Wrapper must remain intact.
+	if _, statErr := os.Stat(wrapperPath(home)); statErr != nil {
+		t.Errorf("wrapper was removed despite malformed settings: %v", statErr)
+	}
+	// Metadata must remain intact.
+	if _, statErr := os.Stat(metadataPath(home)); statErr != nil {
+		t.Errorf("metadata was removed despite malformed settings: %v", statErr)
+	}
+}
+
+// TestUninstallRetainsMetadataOnDrift verifies the P0-4 fix: when uninstall
+// detects a drifted statusLine (user customized it), metadata must NOT be
+// deleted — it is the authoritative record needed for manual reconciliation.
+func TestUninstallRetainsMetadataOnDrift(t *testing.T) {
+	home := t.TempDir()
+	if err := InstallClaudeStatusLine(home, "/opt/fi", ScopeUser, home, io.Discard); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	// Simulate the user replacing our statusLine with their own.
+	userCustomized := map[string]any{
+		"statusLine": map[string]any{"type": "command", "command": "/my/custom/statusline"},
+	}
+	data, _ := json.Marshal(userCustomized)
+	if err := os.WriteFile(settingsPath(home), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	err := UninstallClaudeStatusLine(home, ScopeUser, home, io.Discard)
+	if !errors.Is(err, ErrDriftedStatusLine) {
+		t.Fatalf("expected ErrDriftedStatusLine, got: %v", err)
+	}
+	// Metadata must remain intact after a drifted uninstall.
+	if _, statErr := os.Stat(metadataPath(home)); statErr != nil {
+		t.Errorf("metadata was deleted on drifted uninstall: %v", statErr)
+	}
+}
+
+// TestReinstallRepairsWrapperMode verifies that a reinstall whose wrapper
+// lost its executable bits is repaired (chmod 0755).
+func TestReinstallRepairsWrapperMode(t *testing.T) {
+	home := t.TempDir()
+	if err := InstallClaudeStatusLine(home, "/opt/fi", ScopeUser, home, io.Discard); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	// Strip executable bits from the wrapper.
+	if err := os.Chmod(wrapperPath(home), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Reinstall — must repair the mode.
+	if err := InstallClaudeStatusLine(home, "/opt/fi", ScopeUser, home, io.Discard); err != nil {
+		t.Fatalf("reinstall: %v", err)
+	}
+	info, err := os.Stat(wrapperPath(home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&0111 == 0 {
+		t.Errorf("reinstall did not repair wrapper executable bits: mode=%o", info.Mode())
+	}
+}
+
 func TestInstallFresh(t *testing.T) {
 	home := t.TempDir()
-	if err := InstallClaudeStatusLine(home, "/opt/bin/fi", io.Discard); err != nil {
+	if err := InstallClaudeStatusLine(home, "/opt/bin/fi", ScopeUser, home, io.Discard); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 
@@ -74,7 +177,7 @@ func TestInstallComposesWithExisting(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := InstallClaudeStatusLine(home, "", io.Discard); err != nil {
+	if err := InstallClaudeStatusLine(home, "", ScopeUser, home, io.Discard); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 
@@ -106,7 +209,7 @@ func TestInstallRefusesComplexStatusLine(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := InstallClaudeStatusLine(home, "", io.Discard)
+	err := InstallClaudeStatusLine(home, "", ScopeUser, home, io.Discard)
 	if err == nil {
 		t.Fatal("complex status line must stop installation")
 	}
@@ -130,7 +233,7 @@ func TestInstallRefusesMalformedSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := InstallClaudeStatusLine(home, "", io.Discard); err == nil {
+	if err := InstallClaudeStatusLine(home, "", ScopeUser, home, io.Discard); err == nil {
 		t.Fatal("malformed settings must stop installation")
 	}
 	data, _ := os.ReadFile(settingsPath(home))
@@ -153,10 +256,10 @@ func TestUninstallRestoresPrevious(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := InstallClaudeStatusLine(home, "", io.Discard); err != nil {
+	if err := InstallClaudeStatusLine(home, "", ScopeUser, home, io.Discard); err != nil {
 		t.Fatalf("install: %v", err)
 	}
-	if err := UninstallClaudeStatusLine(home, io.Discard); err != nil {
+	if err := UninstallClaudeStatusLine(home, ScopeUser, home, io.Discard); err != nil {
 		t.Fatalf("uninstall: %v", err)
 	}
 
@@ -178,10 +281,10 @@ func TestUninstallRestoresPrevious(t *testing.T) {
 
 func TestUninstallRemovesKeyWhenNoPrevious(t *testing.T) {
 	home := t.TempDir()
-	if err := InstallClaudeStatusLine(home, "", io.Discard); err != nil {
+	if err := InstallClaudeStatusLine(home, "", ScopeUser, home, io.Discard); err != nil {
 		t.Fatalf("install: %v", err)
 	}
-	if err := UninstallClaudeStatusLine(home, io.Discard); err != nil {
+	if err := UninstallClaudeStatusLine(home, ScopeUser, home, io.Discard); err != nil {
 		t.Fatalf("uninstall: %v", err)
 	}
 	settings := loadSettingsMap(t, home)
@@ -192,10 +295,10 @@ func TestUninstallRemovesKeyWhenNoPrevious(t *testing.T) {
 
 func TestInstallIdempotent(t *testing.T) {
 	home := t.TempDir()
-	if err := InstallClaudeStatusLine(home, "", io.Discard); err != nil {
+	if err := InstallClaudeStatusLine(home, "", ScopeUser, home, io.Discard); err != nil {
 		t.Fatalf("install: %v", err)
 	}
-	if err := InstallClaudeStatusLine(home, "", io.Discard); err != nil {
+	if err := InstallClaudeStatusLine(home, "", ScopeUser, home, io.Discard); err != nil {
 		t.Fatalf("reinstall: %v", err)
 	}
 	settings := loadSettingsMap(t, home)
@@ -220,7 +323,7 @@ func TestInstallAtomicSettingsUpdate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := InstallClaudeStatusLine(home, "/opt/bin/fi", io.Discard); err != nil {
+	if err := InstallClaudeStatusLine(home, "/opt/bin/fi", ScopeUser, home, io.Discard); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 
@@ -249,7 +352,7 @@ func TestInstallAtomicSettingsUpdate(t *testing.T) {
 // the wrapper still resolves `fi` from PATH at runtime rather than failing.
 func TestInstallFallsBackToPATH(t *testing.T) {
 	home := t.TempDir()
-	if err := InstallClaudeStatusLine(home, "", io.Discard); err != nil {
+	if err := InstallClaudeStatusLine(home, "", ScopeUser, home, io.Discard); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 	content, _ := os.ReadFile(wrapperPath(home))
@@ -273,7 +376,7 @@ func TestInstallFallsBackToPATH(t *testing.T) {
 func TestInstallWithMissingBinaryOnDisk(t *testing.T) {
 	home := t.TempDir()
 	// Point at a path that doesn't exist.
-	if err := InstallClaudeStatusLine(home, "/definitely/not/installed/fi", io.Discard); err != nil {
+	if err := InstallClaudeStatusLine(home, "/definitely/not/installed/fi", ScopeUser, home, io.Discard); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 	content, _ := os.ReadFile(wrapperPath(home))
@@ -304,7 +407,7 @@ func TestReinstallPreservesOriginalPreInstallValue(t *testing.T) {
 	}
 
 	// First install records the precious original.
-	if err := InstallClaudeStatusLine(home, "/opt/fi", io.Discard); err != nil {
+	if err := InstallClaudeStatusLine(home, "/opt/fi", ScopeUser, home, io.Discard); err != nil {
 		t.Fatalf("first install: %v", err)
 	}
 	metaAfter1, _ := loadMetadataForTest(t, home)
@@ -313,7 +416,7 @@ func TestReinstallPreservesOriginalPreInstallValue(t *testing.T) {
 	}
 
 	// Second install — must NOT collapse the prior-history pointer.
-	if err := InstallClaudeStatusLine(home, "/opt/fi", io.Discard); err != nil {
+	if err := InstallClaudeStatusLine(home, "/opt/fi", ScopeUser, home, io.Discard); err != nil {
 		t.Fatalf("reinstall: %v", err)
 	}
 	metaAfter2, _ := loadMetadataForTest(t, home)
@@ -328,7 +431,7 @@ func TestReinstallPreservesOriginalPreInstallValue(t *testing.T) {
 	}
 
 	// Uninstall must restore the precious original, not delete the key.
-	if err := UninstallClaudeStatusLine(home, io.Discard); err != nil {
+	if err := UninstallClaudeStatusLine(home, ScopeUser, home, io.Discard); err != nil {
 		t.Fatalf("uninstall: %v", err)
 	}
 	settings := loadSettingsMap(t, home)
@@ -348,7 +451,7 @@ func TestReinstallPreservesOriginalPreInstallValue(t *testing.T) {
 // their customization.
 func TestUninstallRefusesToDeleteUserCustomization(t *testing.T) {
 	home := t.TempDir()
-	if err := InstallClaudeStatusLine(home, "/opt/fi", io.Discard); err != nil {
+	if err := InstallClaudeStatusLine(home, "/opt/fi", ScopeUser, home, io.Discard); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 	// Simulate the user replacing our statusLine with their own.
@@ -363,7 +466,7 @@ func TestUninstallRefusesToDeleteUserCustomization(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := UninstallClaudeStatusLine(home, io.Discard)
+	err := UninstallClaudeStatusLine(home, ScopeUser, home, io.Discard)
 	if !errors.Is(err, ErrDriftedStatusLine) {
 		t.Fatalf("uninstall with drifted statusLine must return ErrDriftedStatusLine, got: %v", err)
 	}
@@ -391,7 +494,7 @@ func TestInstallPreservesCustomFileMode(t *testing.T) {
 	if err := os.WriteFile(settingsPath(home), []byte(`{"theme":"dark"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := InstallClaudeStatusLine(home, "/opt/fi", io.Discard); err != nil {
+	if err := InstallClaudeStatusLine(home, "/opt/fi", ScopeUser, home, io.Discard); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 	info, err := os.Stat(settingsPath(home))
@@ -419,11 +522,11 @@ func TestReinstallAfterUserKeepsCustomOriginal(t *testing.T) {
 	if err := os.WriteFile(settingsPath(home), data, 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := InstallClaudeStatusLine(home, "/opt/fi", io.Discard); err != nil {
+	if err := InstallClaudeStatusLine(home, "/opt/fi", ScopeUser, home, io.Discard); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 	// User does NOT touch statusLine — a reinstall should refresh cleanly.
-	if err := InstallClaudeStatusLine(home, "/opt/fi/v2", io.Discard); err != nil {
+	if err := InstallClaudeStatusLine(home, "/opt/fi/v2", ScopeUser, home, io.Discard); err != nil {
 		t.Fatalf("reinstall: %v", err)
 	}
 	// Wrapper should now embed the v2 path.

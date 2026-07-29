@@ -1,6 +1,6 @@
 # FreeInference Companion
 
-Lightweight observability layer for FreeInference-powered coding-agent sessions. Shows live context metrics, rolling cache performance, model health, and context-pressure warnings — without adding latency, making network calls from hooks, or sending inference probes without explicit consent.
+Lightweight observability layer for FreeInference-powered coding-agent sessions. Shows live context metrics, rolling cache performance with root-cause attribution, model health, account budget projection, and context-pressure warnings — without adding latency, making network calls from hooks, or sending inference probes without explicit consent.
 
 **Companion, not proxy.** No prompt interception, no transcript scraping, no automatic failover, no daemon.
 
@@ -67,11 +67,12 @@ surfaces the user already has:
 - **Status line reads live Claude JSON from stdin + cached health data** — zero network, p95 <10ms target
 - **Hooks do local computation only** — no network, p95 <25ms target, always fail open (exit 0)
 - **Every session mutation holds a cross-process file lock** — concurrent hooks and status lines coordinate writes; lock contention returns immediately (fail-open) and is counted in `state.DroppedMutations()`
-- **Warnings use JSON `systemMessage`** — never plain stdout, never `additionalContext`, never in model context; no warning → no output at all
+- **Warnings use JSON `systemMessage`** — never plain stdout, never `additionalContext`, never in model context; no warning → no output at all (zero bytes)
+- **Surface eligibility is gated by seven checks** — runtime active, client matches, session matches, session active, activation identity matches, observation fresh, provider confirmed FreeInference; any gate failing produces zero bytes
 - **Provider detection gates all warnings** — no FreeInference warning or health symbol ever appears in a non-FreeInference session
 - **Background refreshes are detached and coalesced across processes** — file-lock single-flight, per-endpoint circuit breakers (2→30min backoff), `Retry-After` honored
 - **No inference probes for monitoring** — `fi doctor --probe --model <name>` is manual only, marked `X-Probe: synthetic`
-- **Advisory projection warning** — before each prompt, the hook estimates the next request's output reserve from local data and warns if it would be inadequate (confidence labeled, never blocks)
+- **Advisory warnings, never blocking** — context pressure, projection overflow, cache-low with root-cause attribution, cache TTL expiry; all labeled with confidence, all advisory
 - **Schema validation + quarantine** — corrupt or unsupported state files are renamed aside so subsequent writes start fresh; hooks never block on bad state
 - **Sanitized structured event log** — per-session `events.jsonl` records only event types and short categories; never prompt text, responses, transcripts, paths, keys, or raw error bodies
 
@@ -85,11 +86,11 @@ surfaces the user already has:
 | `fi render --mode line\|expanded [--session <id>]` | Stable line/expanded render for panels |
 | `fi models [--model <name>] [--refresh]` | List FreeInference models |
 | `fi doctor [--probe --model <name>]` | Diagnose connectivity and configuration |
-| `fi report [--client <type>] [--session <id>] [--format markdown\|json]` | Generate a sanitized support report |
-| `fi dashboard` | Open FreeInference status page in browser |
+| `fi report [--client <type>] [--session <id>] [--format markdown\|json]` | Generate a sanitized support report (includes budget projection) |
+| `fi dashboard [--status] [--print-url]` | Open FreeInference account dashboard (`--status` for service health page) |
 | `fi context [--session <id>]` | Show context pressure information |
-| `fi cache [--session <id>]` | Show cache efficiency analysis and recommendations |
-| `fi refresh [--force] [--if-stale --detach] [--worker models\|health]` | Refresh cached provider metadata |
+| `fi cache [--session <id>]` | Show cache efficiency analysis with root-cause attribution |
+| `fi refresh [--force] [--if-stale --detach] [--worker models\|health\|account-usage]` | Refresh cached provider metadata |
 | `fi hook <client> <event>` | Process a lifecycle hook event (internal) |
 | `fi status-line install\|uninstall` | Manage the Claude Code status line |
 
@@ -124,7 +125,8 @@ Missing fields are `null` — never converted to zero. A zero-token field remain
 Cache-low warnings qualify only when all hold: 3+ unique observations, ≥50K
 active context, read share <20% for 3 sequential observations, confirmed
 FreeInference provider, and a 30-minute cooldown. They resolve after 3
-sequential observations above 40%.
+sequential observations above 40%. The warning includes root-cause
+attribution (see below).
 
 Projection warnings qualify when active context is at least 60% of the
 model's window and the projected next request (active + estimated prompt +
@@ -132,6 +134,60 @@ tool overhead + safety margin) would leave less than the configured output
 reserve (default 16,000 tokens). Confidence is labeled `low` or `medium` —
 never `high` in v0.1.0 because the companion does not see the full request
 body the client sends.
+
+Cache TTL expiry warnings fire when a session has been idle past the
+Anthropic prompt cache lifetime (~5 minutes). The next request will
+re-read the entire context at full price because the cached prefix has
+evicted. The warning suggests sending a short warm-up message first to
+refill the cache cheaply before the real query. Gated on ≥10K active
+context and a 30-minute cooldown.
+
+### Cache miss pattern attribution
+
+`fi cache` classifies cache miss patterns into root causes instead of
+generic diagnostics:
+
+| Pattern | Meaning | Example cause |
+|---------|---------|---------------|
+| **Thrashing** | High cache creation, low cache read | Dynamic content at the start of the system prompt; prefix keeps being rewritten |
+| **No caching** | Almost all fresh input, negligible cache activity | Client not using `cache_control` breakpoints |
+| **Decay** | Read share was good but is declining | Conversation growing past the cached prefix |
+| **Intermittent** | Alternating good/bad observations | Tool results inserted before the cached prefix on some turns |
+
+The inline cache-low warning also includes the diagnosis so the user gets
+the likely cause at the moment it fires.
+
+### Token budget projection
+
+`fi status` and `fi report` show account quota status with a projected
+exhaustion timeline based on the session's observed token burn rate:
+
+```
+Account Usage:
+  Updated: 2026-07-29T15:30:00Z
+  Requests: 4.2K / 10K (42.0%)
+  Tokens:   1.2M / 5.0M (24.0%)
+  Budget:   🟢 healthy — At current rate (~127K tok/hr over 1.2h), quota lasts until Jul 30 09:14.
+```
+
+Status tiers: healthy (>30% remaining), watch (15-30%), low (5-15%),
+critical (<5%). Falls back to request-based quota when token limits aren't
+reported.
+
+### Status line rendering
+
+The collapsed status line is width-aware and adapts to terminal column
+count via the `COLUMNS` environment variable (set by Claude Code):
+
+| Width | Segments shown |
+|-------|---------------|
+| **Wide (100+)** | Model, shield, cache read %, fresh tokens, context %, pressure |
+| **Medium (60-99)** | Model, shield, cache read %, fresh tokens, context %, pressure |
+| **Narrow (<60)** | Shield, cache read %, context % |
+
+The shield icon `🛡` color tracks context usage: white when empty, orange
+when getting high (60%+), red when critical (85%+). Unknown telemetry
+renders as `—` (em dash), never fabricated as `0%`.
 
 ### Sanitized event log
 
@@ -145,16 +201,17 @@ Sessions older than 30 days are cleaned up opportunistically by
 
 ## Codex integration
 
-The Codex plugin bundles skills using Codex's native plugin layout:
-`.codex-plugin/plugin.json` (manifest) and `skills/` (skills). Codex
-automatically discovers the skills from an enabled plugin.
+The Codex plugin bundles skills and lifecycle hooks using Codex's native
+plugin layout: `.codex-plugin/plugin.json` (manifest), `skills/`, and
+`hooks/hooks.json`. Codex 0.145+ supports plugin-local hooks subject to
+user trust — after installing the plugin, Codex prompts the user to review
+and approve the hooks before they execute.
 
-**Codex session lifecycle hooks are NOT currently functional.** Current Codex
-releases do not load plugin-local hooks, so the hooks defined under
-`plugins/codex/hooks/` are dormant. The CI workflow at
-`.github/workflows/ci.yml` explicitly notes this. Until a verified Codex
-runtime actually loads plugin-local hooks, the Codex integration provides
-skills only.
+The hook events supported are: `SessionStart`, `SessionEnd`,
+`UserPromptSubmit`, `PreCompact`, `PostCompact`, and `Stop`. These update
+the companion's session state (turn tracking, compaction detection, event
+log) but produce no cache/context telemetry because Codex does not expose
+token counts in hook payloads.
 
 After installing the plugin in Codex, the following skills are available:
 `$fi-status`, `$fi-models`, `$fi-doctor`, `$fi-report`, `$fi-dashboard`,
@@ -185,12 +242,14 @@ FreeInference/
 ├── internal/
 │   ├── cli/                   # Command implementations (exit codes, no os.Exit)
 │   ├── state/                 # Snapshots, global cache, locks, session index
-│   ├── engine/                # Pressure state machine, rolling cache analysis
+│   ├── engine/                # Pressure state machine, cache analysis, attribution,
+│   │                          # cache TTL warnings, budget projection
 │   ├── api/                   # FreeInference HTTP client (bounded, sanitized)
 │   ├── background/            # Detached refresh workers, circuit breakers
 │   ├── adapters/              # Client-specific: claude.go, codex.go, provider.go
 │   ├── install/               # Status-line installer (composing, reversible)
-│   └── render/                # Normalized view model → line/expanded/JSON
+│   └── render/                # Normalized view model → line/expanded/JSON,
+│                              # width-aware footer, surface eligibility
 ├── pkg/schema/                # State structs, telemetry contract types
 ├── plugins/
 │   ├── claude-code/           # .claude-plugin/, hooks/, scripts/, skills/
@@ -270,6 +329,24 @@ token, which v0.1.0 does not.
 persisted file and every output path (status, snapshot, render, report,
 events, doctor) and fails if any secret-shaped string appears. It is the
 regression guard for the security model.
+
+## Acknowledgment
+
+This project was developed independently using FreeInference for inference
+access during development. FreeInference did not commission, direct, fund, or
+pay for this work. No representative of FreeInference reviewed or approved
+this contribution, and this acknowledgment does not indicate sponsorship,
+partnership, or endorsement by FreeInference or any affiliated organization.
+
+I am acknowledging the service because access to capable inference
+infrastructure can make meaningful open-source development more accessible
+to developers and researchers who do not have the hardware or budget to run
+these models themselves.
+
+Organizations able to provide GPU capacity, hardware, cloud credits,
+research funding, or other infrastructure resources should consider
+supporting FreeInference so that it can continue making this capability
+available for open-source development, research, and education.
 
 ## License
 

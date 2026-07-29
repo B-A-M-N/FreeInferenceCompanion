@@ -27,13 +27,14 @@ type SessionIndex struct {
 // secure.MaskSessionID. The other string fields (Client, ModelID) are
 // sanitized in-place to prevent terminal-control injection.
 type SessionIndexEntry struct {
-	Client      string    `json:"client"`
-	SessionID   string    `json:"session_id"`
-	SessionKey  string    `json:"session_key"`
-	ModelID     string    `json:"model_id"`
-	Status      string    `json:"status"`
-	StartedAt   time.Time `json:"started_at"`
-	LastEventAt time.Time `json:"last_event_at"`
+	Client       string    `json:"client"`
+	SessionID    string    `json:"session_id"`
+	SessionKey   string    `json:"session_key"`
+	ModelID      string    `json:"model_id"`
+	Status       string    `json:"status"`
+	StartedAt    time.Time `json:"started_at"`
+	LastEventAt  time.Time `json:"last_event_at"`
+	ActivationID string    `json:"activation_id,omitempty"`
 }
 
 // maxIndexEntries bounds the index so it cannot grow without limit.
@@ -65,7 +66,9 @@ func UpdateSessionIndex(paths Paths, snap *schema.Snapshot) error {
 	if snap == nil || snap.Session.ID == "" {
 		return nil
 	}
-	if err := os.MkdirAll(paths.GlobalDir(), 0700); err != nil {
+	// Ensure the sessions-index directory exists before acquiring the lock.
+	// This is an unnamespaced directory shared across all activations.
+	if err := ensureSecureDirAll(paths.SessionIndexDir()); err != nil {
 		return err
 	}
 	fl := NewFileLock(paths.GlobalSessionIndexLock())
@@ -83,13 +86,14 @@ func UpdateSessionIndex(paths Paths, snap *schema.Snapshot) error {
 	}
 
 	entry := SessionIndexEntry{
-		Client:      secure.SanitizeField(snap.Client.Type),
-		SessionID:   snap.Session.ID,
-		SessionKey:  sessionKey(snap.Session.ID),
-		ModelID:     secure.SanitizeField(snap.Model.ID),
-		Status:      snap.Session.Status,
-		StartedAt:   snap.Session.StartedAt,
-		LastEventAt: snap.Session.LastEventAt,
+		Client:       secure.SanitizeField(snap.Client.Type),
+		SessionID:    snap.Session.ID,
+		SessionKey:   sessionKey(snap.Session.ID),
+		ModelID:      secure.SanitizeField(snap.Model.ID),
+		Status:       snap.Session.Status,
+		StartedAt:    snap.Session.StartedAt,
+		LastEventAt:  snap.Session.LastEventAt,
+		ActivationID: snap.ActivationID,
 	}
 
 	found := false

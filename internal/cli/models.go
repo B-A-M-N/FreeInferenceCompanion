@@ -16,7 +16,6 @@ import (
 func cmdModels(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 	var modelName string
 	var forceRefresh bool
-	var flagArgs []string
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch a {
@@ -34,17 +33,17 @@ func cmdModels(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 				fmt.Fprintf(stderr, "usage error: unknown flag %q\n", a)
 				return 2
 			}
-			flagArgs = append(flagArgs, a)
+			fmt.Fprintf(stderr, "usage error: unexpected argument %q\n", a)
+			return 2
 		}
 	}
-	_ = flagArgs
 
 	gs := loadGlobal(paths)
 
 	if forceRefresh {
-		client := newAPIClient()
-		if client == nil {
-			fmt.Fprintln(stderr, "error: FREEINFERENCE_BASE_URL is invalid (must be HTTPS, no userinfo)")
+		client, err := newAPIClient()
+		if err != nil {
+			fmt.Fprintln(stderr, "error: "+endpointFailDetail(err))
 			return 1
 		}
 		refresher := background.NewRefresher(client, paths, os.Getenv("FI_HEALTH_URL"))

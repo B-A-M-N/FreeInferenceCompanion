@@ -5,8 +5,12 @@ package cli
 import (
 	"fmt"
 	"io"
+	"strings"
 
+	"github.com/b-a-m-n/freeinference-companion/internal/runtime"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
+	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
+	"github.com/b-a-m-n/freeinference-companion/pkg/version"
 )
 
 // Version and Commit are stamped by main from ldflags.
@@ -14,7 +18,7 @@ import (
 var (
 	// Version is the semver string injected at build time via -ldflags.
 	// The fallback matches the plugin manifest versions.
-	Version = "0.1.0"
+	Version = version.Version
 	Commit  = "dev"
 )
 
@@ -45,6 +49,15 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
+	// Derive an activation identity so global state is namespaced under
+	// providers/<id>/ and different endpoints/keys don't share data.
+	activation := runtime.Evaluate()
+	if id, err := activation.Identity(runtime.DefaultSaltLoader()); err == nil {
+		dirName := id.DirName()
+		if dirName != "" {
+			paths = paths.NewNamespacedPaths(dirName)
+		}
+	}
 	if err := paths.EnsureDirs(); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
@@ -66,7 +79,7 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int
 	case "report":
 		return cmdReport(paths, rest, stdout, stderr)
 	case "dashboard":
-		return cmdDashboard(stdout, stderr)
+		return cmdDashboard(rest, stdout, stderr)
 	case "context":
 		return cmdContext(paths, rest, stdin, stdout, stderr)
 	case "refresh":
@@ -75,6 +88,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int
 		return cmdCache(paths, rest, stdout, stderr)
 	case "status-line":
 		return cmdStatusLine(rest, stdout, stderr)
+	case "version", "--version", "-v":
+		return cmdVersion(rest, stdout, stderr)
 	case "help", "--help", "-h":
 		printUsage(stdout)
 		return 0
@@ -83,6 +98,33 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int
 		printUsage(stderr)
 		return 1
 	}
+}
+
+// cmdVersion implements `fi version`, `fi --version`, and `fi -v`. Supports
+// `--json` for machine-readable output.
+func cmdVersion(args []string, stdout, stderr io.Writer) int {
+	jsonOut := false
+	for _, a := range args {
+		if a == "--json" {
+			jsonOut = true
+			continue
+		}
+		if strings.HasPrefix(a, "--") {
+			fmt.Fprintf(stderr, "usage error: unknown flag %q\n", a)
+			return 2
+		}
+		fmt.Fprintf(stderr, "usage error: unexpected argument %q\n", a)
+		return 2
+	}
+	if jsonOut {
+		fmt.Fprintf(stdout, `{"version":%q,"commit":%q,"schema_version":%d,"clients":[%q,%q]}`+"\n",
+			Version, Commit, schema.StateVersion, schema.ClientClaudeCode, schema.ClientCodex)
+		return 0
+	}
+	fmt.Fprintf(stdout, "fi %s (%s)\n", Version, Commit)
+	fmt.Fprintf(stdout, "state schema v%d\n", schema.StateVersion)
+	fmt.Fprintf(stdout, "clients: %s, %s\n", schema.ClientClaudeCode, schema.ClientCodex)
+	return 0
 }
 
 func printUsage(w io.Writer) {
@@ -99,8 +141,10 @@ Usage:
   fi dashboard
   fi context [--client <type>] [--session <id>]
   fi cache [--client <type>] [--session <id>]
-  fi hook <client> <event>
+  fi refresh [--force|--if-stale] [--detach] [--worker models|health]
   fi status-line install|uninstall
+  fi version [--json]
+  fi hook <client> <event>
 
 Environment:
   FREEINFERENCE_API_KEY    FreeInference API key
@@ -109,5 +153,9 @@ Environment:
   FI_CACHE_DIR             Cache directory (default: ~/.cache/freeinference-companion)
   FI_SESSION_ID            Explicit session override for status/context/report
   FI_PROVIDER              Set to "freeinference" to force provider detection
+  FI_NO_BACKGROUND         Disable background refresh
+  FI_DISABLED              Disable all companion features
+  FI_ALLOW_INSECURE_LOCALHOST  Allow http:// loopback (development only)
+  FI_ALLOW_CUSTOM_API_ENDPOINT Allow sending FI key to a custom host (opt-in)
 `)
 }

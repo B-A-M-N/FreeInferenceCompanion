@@ -1,14 +1,21 @@
 package adapters
 
 import (
-	"net/url"
 	"os"
 	"strings"
 
+	"github.com/b-a-m-n/freeinference-companion/internal/api"
+	"github.com/b-a-m-n/freeinference-companion/internal/runtime"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
 
 // ProviderDetection is the structured result of provider detection.
+//
+// DEPRECATED in favor of runtime.Activation. Retained as a thin adapter so
+// existing call sites compile during the migration; new code should take a
+// runtime.Activation parameter directly. The Confirmed field here is derived
+// from runtime.Activation.Active — it does not implement the old permissive
+// endpoint-only or key-only rules. Those were incorrect: see P0-1.
 type ProviderDetection struct {
 	Name      string `json:"name"` // "freeinference" or "unknown"
 	Confirmed bool   `json:"confirmed"`
@@ -17,6 +24,8 @@ type ProviderDetection struct {
 }
 
 // ToProviderInfo converts a detection result into the persisted schema form.
+// BaseURL is the sanitized origin (scheme://host) only — never the raw
+// environment value, which may carry userinfo, query strings, or fragments.
 func (d ProviderDetection) ToProviderInfo() schema.ProviderInfo {
 	return schema.ProviderInfo{
 		Name:      d.Name,
@@ -26,97 +35,62 @@ func (d ProviderDetection) ToProviderInfo() schema.ProviderInfo {
 	}
 }
 
-// freeInferenceDomain is the canonical FreeInference hostname.
-const freeInferenceDomain = "freeinference.org"
-
 // IsFreeInferenceURL reports whether rawURL points at a FreeInference host.
-// Uses proper URL parsing rather than substring matching.
+// Uses the shared endpoint normalizer so the same rules (reject userinfo,
+// fragments, invalid schemes) apply everywhere.
 func IsFreeInferenceURL(rawURL string) bool {
 	if rawURL == "" {
 		return false
 	}
-	u, err := url.Parse(rawURL)
+	id, err := api.NormalizeEndpoint(rawURL)
 	if err != nil {
 		return false
 	}
-	host := u.Hostname()
-	if host == "" {
-		return false
-	}
-	host = strings.ToLower(host)
-	return host == freeInferenceDomain || strings.HasSuffix(host, "."+freeInferenceDomain)
+	return id.IsFI
 }
 
-// isFreeInferenceURL is the internal lowercase variant for backward compat.
-func isFreeInferenceURL(rawURL string) bool {
-	return IsFreeInferenceURL(rawURL)
-}
-
-// DetectProvider determines whether the current environment is configured
-// to talk to FreeInference. Detection order:
+// DetectProvider is the legacy entry point. It delegates to
+// runtime.Evaluate() so all callers share the strict activation contract:
+// endpoint AND key AND approved host required, no model-prefix blacklist.
 //
-//  1. Explicit FI_PROVIDER=freeinference
-//  2. FREEINFERENCE_BASE_URL pointing at a FreeInference host
-//  3. ANTHROPIC_BASE_URL pointing at a FreeInference host
-//  4. OPENAI_BASE_URL pointing at a FreeInference host
-//  5. FREEINFERENCE_API_KEY with no conflicting provider configuration
-//  6. Otherwise unknown
+// DEPRECATED: pass runtime.Activation into your function instead of calling
+// this. The function is retained for the few call sites that have not yet
+// been migrated.
 func DetectProvider() ProviderDetection {
-	// 1. Explicit override
-	if strings.EqualFold(os.Getenv("FI_PROVIDER"), schema.ProviderFreeInference) {
-		return ProviderDetection{
-			Name:      schema.ProviderFreeInference,
-			Confirmed: true,
-			Source:    "FI_PROVIDER",
-		}
-	}
+	return detectionFromActivation(runtime.Evaluate())
+}
 
-	// 2-4. URL-based detection
-	candidates := []struct {
-		source string
-		value  string
-	}{
-		{"FREEINFERENCE_BASE_URL", os.Getenv("FREEINFERENCE_BASE_URL")},
-		{"ANTHROPIC_BASE_URL", os.Getenv("ANTHROPIC_BASE_URL")},
-		{"OPENAI_BASE_URL", os.Getenv("OPENAI_BASE_URL")},
-	}
-	for _, candidate := range candidates {
-		if isFreeInferenceURL(candidate.value) {
-			return ProviderDetection{
-				Name:      schema.ProviderFreeInference,
-				Confirmed: true,
-				Source:    candidate.source,
-				BaseURL:   candidate.value,
-			}
-		}
-	}
+// DetectProviderForModel is the legacy model-aware entry point. The model ID
+// is recorded but never affects activation — a validated endpoint+key pair is
+// authoritative. FreeInference deployments may legitimately serve models with
+// vendor prefixes (deepseek-, llama-, mistral-, etc.) and the previous
+// blacklist would have mis-classified them.
+//
+// DEPRECATED: pass runtime.Activation into your function instead.
+func DetectProviderForModel(modelID string) ProviderDetection {
+	return detectionFromActivation(runtime.EvaluateWithModel(modelID))
+}
 
-	// 5. API key with no conflicting provider configuration.
-	// A conflicting configuration is an explicit base URL pointing elsewhere.
-	// Include FREEINFERENCE_BASE_URL in the conflict check — otherwise
-	// FREEINFERENCE_BASE_URL=https://attacker.example with FREEINFERENCE_API_KEY
-	// would still be classified as confirmed FreeInference.
-	conflict := false
-	for _, env := range []string{"FREEINFERENCE_BASE_URL", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL"} {
-		v := os.Getenv(env)
-		if v != "" && !isFreeInferenceURL(v) {
-			conflict = true
-			break
-		}
-	}
-	if !conflict && os.Getenv("FREEINFERENCE_API_KEY") != "" {
-		return ProviderDetection{
-			Name:      schema.ProviderFreeInference,
-			Confirmed: true,
-			Source:    "FREEINFERENCE_API_KEY",
-		}
-	}
-
-	return ProviderDetection{
+func detectionFromActivation(a runtime.Activation) ProviderDetection {
+	d := ProviderDetection{
 		Name:      schema.ProviderUnknown,
-		Confirmed: false,
-		Source:    "unresolved",
+		Confirmed: a.Active,
+		Source:    string(a.InactiveReason),
+		BaseURL:   a.Origin,
 	}
+	if a.Active {
+		d.Name = schema.ProviderFreeInference
+	}
+	if a.EndpointSource != "" {
+		d.Source = a.EndpointSource
+	}
+	if d.Source == "" {
+		d.Source = string(a.CredentialSource)
+	}
+	if d.Source == "" {
+		d.Source = "unresolved"
+	}
+	return d
 }
 
 // IsConfirmedFreeInference reports whether the persisted provider info
@@ -124,3 +98,20 @@ func DetectProvider() ProviderDetection {
 func IsConfirmedFreeInference(p schema.ProviderInfo) bool {
 	return p.Confirmed && p.Name == schema.ProviderFreeInference
 }
+
+// ActivationFromEnv is the canonical helper for layers that have not yet been
+// refactored to receive a runtime.Activation from the CLI dispatcher. New
+// code should accept a runtime.Activation parameter instead.
+func ActivationFromEnv() runtime.Activation {
+	return runtime.Evaluate()
+}
+
+// IsFreeInferenceHost is a re-export for packages that historically imported
+// the test from adapters.
+func IsFreeInferenceHost(host string) bool {
+	return runtime.IsFreeInferenceHost(host)
+}
+
+// suppress unused-import warnings while preserving api.NormalizeEndpoint use.
+var _ = strings.EqualFold
+var _ = os.Getenv

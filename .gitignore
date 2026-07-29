@@ -1,4 +1,5 @@
 /build/
+/release/
 /fi
 /.claude/
 /.crush/
@@ -10,3 +11,5 @@ coverage.txt
 .DS_Store
 .idea/
 .vscode/
+plugins/claude-code/bin/
+plugins/codex/bin/

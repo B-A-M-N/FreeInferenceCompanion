@@ -530,3 +530,116 @@ func TestEnsureSessionDirRejectsSymlink(t *testing.T) {
 		t.Errorf("error should mention symlink, got: %v", err)
 	}
 }
+
+// TestEnsureSecureDirRefusesFileNotSymlink verifies that a regular file at the
+// target path produces an error rather than being deleted.
+func TestEnsureSecureDirRefusesFileNotSymlink(t *testing.T) {
+	paths := testPaths(t)
+	if err := paths.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	// Create a regular file at the session directory path.
+	sessionDir := paths.SessionDir(schema.ClientClaudeCode, "file-test")
+	if err := os.MkdirAll(filepath.Dir(sessionDir), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sessionDir, []byte("test"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// Verify the file is still intact.
+	data, err := os.ReadFile(sessionDir)
+	if err != nil || string(data) != "test" {
+		t.Fatal("file should remain intact")
+	}
+	err = paths.EnsureSessionDir(schema.ClientClaudeCode, "file-test")
+	if err == nil {
+		t.Fatal("expected error when path is a regular file, got nil")
+	}
+	if !strings.Contains(err.Error(), "not a directory") {
+		t.Errorf("error should mention 'not a directory', got: %v", err)
+	}
+	// Verify the file is still intact.
+	data, err = os.ReadFile(sessionDir)
+	if err != nil || string(data) != "test" {
+		t.Fatal("file must remain byte-for-byte unchanged after error")
+	}
+}
+
+// TestEnsureDirsRejectsSymlinkInCacheRoot verifies that EnsureDirs refuses to
+// create directories when the cache root is a symlink.
+func TestEnsureDirsRejectsSymlinkInCacheRoot(t *testing.T) {
+	paths := testPaths(t)
+	// Point cache dir at a symlink to /tmp.
+	symlinkPath := filepath.Join(paths.CacheDir, "symlink-root")
+	if err := os.MkdirAll(filepath.Dir(symlinkPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/tmp", symlinkPath); err != nil {
+		t.Fatal(err)
+	}
+	symlinkPaths := NewPathsWithDir(symlinkPath)
+	err := symlinkPaths.EnsureDirs()
+	if err == nil {
+		t.Fatal("expected error when cache root is a symlink, got nil")
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Errorf("error should mention symlink, got: %v", err)
+	}
+}
+
+// TestUpdateSnapshotCreatesSessionDirViaEnsureSessionDir verifies that
+// UpdateSnapshot uses EnsureSessionDir (not raw MkdirAll) for the lock path,
+// so the session directory is validated through the same secure path.
+func TestUpdateSnapshotCreatesSessionDirSecurely(t *testing.T) {
+	paths := testPaths(t)
+	// Create a symlink at the session directory path to redirect writes.
+	clientDir := filepath.Join(paths.CacheDir, "sessions", schema.ClientClaudeCode)
+	if err := os.MkdirAll(clientDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	sessionDir := paths.SessionDir(schema.ClientClaudeCode, "symlink-s1")
+	if err := os.Symlink("/tmp", sessionDir); err != nil {
+		t.Fatal(err)
+	}
+	// UpdateSnapshot must fail because EnsureSessionDir rejects the symlink.
+	err := UpdateSnapshot(paths, schema.ClientClaudeCode, "symlink-s1",
+		func() *schema.Snapshot {
+			return &schema.Snapshot{
+				SchemaVersion: schema.StateVersion,
+				Client:        schema.ClientInfo{Type: schema.ClientClaudeCode},
+				Session:       schema.SessionInfo{ID: "symlink-s1", Status: schema.SessionActive},
+			}
+		},
+		func(s *schema.Snapshot) error { return nil })
+	if err == nil {
+		t.Fatal("expected error when session dir is a symlink, got nil")
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Errorf("error should mention symlink, got: %v", err)
+	}
+}
+
+// TestSymlinkInParentChain rejects a session path when a parent component
+// is a symlink (e.g. sessions/ -> /tmp/sessions).
+func TestSymlinkInParentChain(t *testing.T) {
+	paths := testPaths(t)
+	if err := paths.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	// Replace the entire cache dir with a symlink to /tmp.
+	// The real cache dir is a tmp subdirectory. Replace it with a symlink.
+	realCacheDir := paths.CacheDir
+	symlinkPath := filepath.Join(filepath.Dir(realCacheDir), "symlink-cache")
+	if err := os.Symlink("/tmp", symlinkPath); err != nil {
+		t.Fatal(err)
+	}
+	// Now use a Paths rooted at the symlink.
+	symlinkPaths := NewPathsWithDir(symlinkPath)
+	err := symlinkPaths.EnsureDirs()
+	if err == nil {
+		t.Fatal("expected error when cache root is a symlink, got nil")
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Errorf("error should mention symlink, got: %v", err)
+	}
+}

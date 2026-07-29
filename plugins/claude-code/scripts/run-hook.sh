@@ -16,11 +16,23 @@ if command -v fi >/dev/null 2>&1; then
     exit 0
 fi
 
-plugin_binary="${CLAUDE_PLUGIN_ROOT:-}/bin/fi"
+plugin_root="${CLAUDE_PLUGIN_ROOT:-}"
 
-if [[ -n "${CLAUDE_PLUGIN_ROOT:-}" && -x "$plugin_binary" ]]; then
-    "$plugin_binary" hook claude-code "$event" || true
-    exit 0
+if [[ -n "$plugin_root" ]]; then
+    # Try platform-specific binary first, then fall back to a generic one.
+    os_name="$(uname -s | tr '[:upper:]' '[:lower:]')"
+    arch_name="$(uname -m)"
+    # Normalize architecture names to match Makefile output (amd64/x86_64 -> amd64)
+    case "$arch_name" in
+        x86_64) arch_name="amd64" ;;
+    esac
+    plat="$os_name-$arch_name"
+    for candidate in "$plugin_root/bin/$plat/fi" "$plugin_root/bin/fi"; do
+        if [[ -n "$candidate" && -x "$candidate" ]]; then
+            "$candidate" hook claude-code "$event" || true
+            exit 0
+        fi
+    done
 fi
 
 exit 0

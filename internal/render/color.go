@@ -37,6 +37,7 @@ const (
 	ColorReset   = "\033[0m"
 	ColorCrimson = "\033[38;5;124m" // Harvard Crimson #A51C30
 	ColorRed     = "\033[91m"       // Bright red for warnings/critical
+	ColorOrange  = "\033[38;5;208m" // Orange for mid-high context
 	ColorWhite   = "\033[97m"       // Bright white
 	ColorBlack   = "\033[30m"       // Black
 	ColorGray    = "\033[90m"       // Bright black (gray)
@@ -69,6 +70,7 @@ var asciiSymbols = symbols{
 	Arrow:              "->",
 	Separator:          "|",
 	Bullet:             "*",
+	Shield:             "[+]",
 }
 
 var unicodeSymbols = symbols{
@@ -89,6 +91,7 @@ var unicodeSymbols = symbols{
 	Arrow:              "→",
 	Separator:          "|",
 	Bullet:             "•",
+	Shield:             "🛡",
 }
 
 type symbols struct {
@@ -109,6 +112,7 @@ type symbols struct {
 	Arrow              string
 	Separator          string
 	Bullet             string
+	Shield             string
 }
 
 // RenderConfig holds rendering options.
@@ -116,6 +120,7 @@ type RenderConfig struct {
 	ColorMode ColorMode
 	UseASCII  bool
 	Compact   bool
+	Width     int // terminal width in columns; 0 = unknown (use wide default)
 }
 
 // DefaultRenderConfig returns a config with auto-detection.
@@ -124,6 +129,7 @@ func DefaultRenderConfig() RenderConfig {
 		ColorMode: ColorAuto,
 		UseASCII:  false,
 		Compact:   false,
+		Width:     DetectWidth(),
 	}
 }
 
@@ -150,6 +156,53 @@ func isTerminal(f *os.File) bool {
 		return false
 	}
 	return term.IsTerminal(int(f.Fd()))
+}
+
+// DetectWidth returns the terminal column count from the COLUMNS environment
+// variable. Returns 0 if unset (callers treat 0 as "unknown, use wide default").
+// Claude Code sets COLUMNS when invoking the status line command.
+func DetectWidth() int {
+	cols := os.Getenv("COLUMNS")
+	if cols == "" {
+		return 0
+	}
+	n := 0
+	for _, c := range cols {
+		if c < '0' || c > '9' {
+			return 0
+		}
+		n = n*10 + int(c-'0')
+		if n > 10000 {
+			return 0
+		}
+	}
+	if n < 10 {
+		return 0
+	}
+	return n
+}
+
+// displayWidth returns the visible cell width of a string, ignoring ANSI
+// escape sequences. This is the correct metric for terminal width budgeting:
+// byte length overcounts because escape codes occupy zero cells.
+func displayWidth(s string) int {
+	width := 0
+	inEscape := false
+	for _, r := range s {
+		if inEscape {
+			// ANSI escape sequences end at 'm' (SGR) or other letter terminators.
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+				inEscape = false
+			}
+			continue
+		}
+		if r == '\033' {
+			inEscape = true
+			continue
+		}
+		width++
+	}
+	return width
 }
 
 // colorize wraps text with ANSI color codes if colors are enabled.
@@ -199,6 +252,37 @@ func (c RenderConfig) HealthSymbol(confirmed bool, lastFailure, healthStatus str
 			sym = s.HealthUnknown
 			color = ColorGray
 		}
+	}
+	return c.colorize(sym, color)
+}
+
+// ContextShieldSymbol returns a shield icon whose color reflects context
+// window usage. The shield is the primary at-a-glance indicator: it starts
+// white when context is empty/minimal, shifts to orange as it fills up,
+// and turns red when context is critically high.
+//
+// Color scale:
+//   - unknown/nil → gray
+//   - < 60%       → white (safe, plenty of headroom)
+//   - 60–85%      → orange (getting high)
+//   - ≥ 85%       → red (critical)
+func (c RenderConfig) ContextShieldSymbol(contextUsedPct *float64) string {
+	s := c.syms()
+	sym := s.Shield
+
+	if contextUsedPct == nil {
+		return c.colorize(sym, ColorGray)
+	}
+
+	pct := *contextUsedPct
+	var color string
+	switch {
+	case pct >= 85:
+		color = ColorRed
+	case pct >= 60:
+		color = ColorOrange
+	default:
+		color = ColorWhite
 	}
 	return c.colorize(sym, color)
 }
@@ -255,6 +339,38 @@ func formatTokenPtr(p *int64) string {
 	return FormatTokenCount(*p)
 }
 
+// formatQuotaLine renders a used/limit quota pair. Either may be nil (unknown).
+// When both are present, a percentage is appended and colored by headroom.
+func (c RenderConfig) formatQuotaLine(used, limit *int64) string {
+	usedStr := "unknown"
+	if used != nil {
+		usedStr = FormatTokenCount(*used)
+	}
+	limitStr := "unknown"
+	if limit != nil {
+		limitStr = FormatTokenCount(*limit)
+	}
+	line := fmt.Sprintf("%s / %s", usedStr, limitStr)
+	if used != nil && limit != nil && *limit > 0 {
+		pct := float64(*used) / float64(*limit) * 100
+		pctStr := fmt.Sprintf(" · %.1f%%", pct)
+		var color string
+		switch {
+		case pct >= 95:
+			color = ColorCrimson
+		case pct >= 85:
+			color = ColorRed
+		case pct >= 70:
+			color = ColorYellow
+		default:
+			color = ColorGreen
+		}
+		pctStr = c.colorize(pctStr, color)
+		line += pctStr
+	}
+	return line
+}
+
 func formatPct(p *float64) string {
 	if p == nil {
 		return "unknown"
@@ -303,6 +419,13 @@ type ViewModel struct {
 	SessionStatus string `json:"session_status,omitempty"`
 	ModelID       string `json:"model_id,omitempty"`
 
+	// Eligible indicates this snapshot is from an active, confirmed FreeInference
+	// session that passes all surface visibility gates. When false, Line() and
+	// Expanded() must return "" so the renderer produces zero observable output.
+	// See SurfaceEligibility for the full gate set.
+	Eligible    bool               `json:"eligible"`
+	Eligibility SurfaceEligibility `json:"-"`
+
 	ProviderName      string `json:"provider_name"`
 	ProviderConfirmed bool   `json:"provider_confirmed"`
 
@@ -346,6 +469,13 @@ type ViewModel struct {
 
 	// Circuit breaker fields
 	CircuitBreakers []CircuitBreakerInfo `json:"circuit_breakers,omitempty"`
+
+	// Account usage fields (FreeInference account-level quotas)
+	AccountUsageFetchedAt     *time.Time `json:"account_usage_fetched_at,omitempty"`
+	AccountUsageRequestsUsed  *int64     `json:"account_usage_requests_used,omitempty"`
+	AccountUsageRequestsLimit *int64     `json:"account_usage_requests_limit,omitempty"`
+	AccountUsageTokensUsed    *int64     `json:"account_usage_tokens_used,omitempty"`
+	AccountUsageTokensLimit   *int64     `json:"account_usage_tokens_limit,omitempty"`
 }
 
 // CircuitBreakerInfo is a simplified circuit breaker for rendering.
@@ -360,6 +490,9 @@ type CircuitBreakerInfo struct {
 // BuildViewModel constructs the normalized view from a session snapshot and
 // the global cache. Either may be nil (no data yet).
 //
+// runtimeActive and clientType feed the SurfaceEligibility gate set. When
+// any gate fails, vm.Eligible is false and Line()/Expanded() return "".
+//
 // All upstream-sourced string fields (model ID, provider name, client type,
 // session status, failure category, trigger, etc.) are sanitized to strip
 // terminal-control sequences and bound their length. The session ID is
@@ -367,12 +500,26 @@ type CircuitBreakerInfo struct {
 // it, but the view model is the surface shown to humans and to downstream
 // tools, so it shows the masked form only. Callers that need the raw ID
 // should read snapshot.Session.ID directly rather than going through the VM.
-func BuildViewModel(version string, snap *schema.Snapshot, gs *schema.GlobalState, now time.Time) *ViewModel {
+func BuildViewModel(version string, snap *schema.Snapshot, gs *schema.GlobalState, currentActivationID string, now time.Time, runtimeActive bool, clientType string, sessionID string) *ViewModel {
 	vm := &ViewModel{
 		Version:       version,
 		PressureState: schema.PressureUnknown,
 	}
 	if snap == nil {
+		return vm
+	}
+
+	// Full surface eligibility: all gates must pass for visible output.
+	eligibility := EvaluateEligibility(runtimeActive, clientType, sessionID, snap, currentActivationID, now)
+	vm.Eligibility = eligibility
+	vm.Eligible = eligibility.Visible()
+
+	// P0-5: only use global state data when the current activation identity
+	// matches the snapshot's activation. Switching endpoints or keys must
+	// not expose health or circuit-breaker data from another runtime.
+	activationMatches := currentActivationID == "" || currentActivationID == snap.ActivationID
+
+	if !vm.Eligible {
 		return vm
 	}
 
@@ -434,7 +581,8 @@ func BuildViewModel(version string, snap *schema.Snapshot, gs *schema.GlobalStat
 
 	// Health is only surfaced for confirmed FreeInference sessions — never
 	// show a green FreeInference health symbol for an unknown provider.
-	if vm.ProviderConfirmed && gs != nil && gs.Health != nil {
+	// P0-5: also require activation identity match.
+	if vm.ProviderConfirmed && activationMatches && gs != nil && gs.Health != nil {
 		vm.HealthStatus = secure.SanitizeField(gs.Health.Status)
 		age := max(int64(0), int64(now.Sub(gs.Health.FetchedAt).Seconds()))
 		vm.HealthAgeSecs = &age
@@ -455,7 +603,8 @@ func BuildViewModel(version string, snap *schema.Snapshot, gs *schema.GlobalStat
 	// Populate circuit breaker info from global state. The endpoint/state
 	// strings are internal (not upstream), but sanitize anyway for defense in
 	// depth — the view model is consumed by external integrators too.
-	if gs != nil && len(gs.CircuitBreakers) > 0 {
+	// P0-5: require activation identity match.
+	if activationMatches && gs != nil && len(gs.CircuitBreakers) > 0 {
 		vm.CircuitBreakers = make([]CircuitBreakerInfo, 0, len(gs.CircuitBreakers))
 		for _, cb := range gs.CircuitBreakers {
 			vm.CircuitBreakers = append(vm.CircuitBreakers, CircuitBreakerInfo{
@@ -468,25 +617,56 @@ func BuildViewModel(version string, snap *schema.Snapshot, gs *schema.GlobalStat
 		}
 	}
 
+	// Account usage is authoritative account-level quota data. Like health
+	// and circuit breakers, gate it by activation identity match so switching
+	// endpoints or keys does not surface quotas from another runtime.
+	if activationMatches && gs != nil && gs.AccountUsage != nil {
+		au := gs.AccountUsage
+		vm.AccountUsageFetchedAt = &au.FetchedAt
+		vm.AccountUsageRequestsUsed = au.RequestsUsed
+		vm.AccountUsageRequestsLimit = au.RequestsLimit
+		vm.AccountUsageTokensUsed = au.TokensUsed
+		vm.AccountUsageTokensLimit = au.TokensLimit
+	}
+
 	return vm
 }
 
-// Line renders the collapsed one-line form with colors.
-// Example: FI glm-5.1 ● | ctx 80% | read 93% | WARN
+// Line renders the collapsed one-line form, width-aware.
+//
+// Rendering tiers (based on COLUMNS):
+//
+//	wide   (≥100): model, shield, cache_read, cache_new, fresh, ctx, health, pressure
+//	medium (60–99): model, shield, cache_read, fresh, ctx, pressure
+//	narrow (<60):   shield, cache_read, ctx
+//
+// Unknown telemetry renders as "—" (em dash), never "0%".
+// When Width is 0 (unknown), treats as wide.
 func (vm *ViewModel) Line(config RenderConfig) string {
-	model := vm.ModelID
-	if model == "" {
-		model = "?"
+	if !vm.Eligible {
+		return ""
+	}
+	width := config.Width
+	if width == 0 {
+		width = 200 // unknown → wide default
 	}
 
 	s := config.syms()
 	sep := config.colorize(" "+s.Separator+" ", ColorGray)
 
-	ctxStr := "ctx ?"
+	// Build each segment once; select by tier below.
+	model := vm.ModelID
+	if model == "" {
+		model = "?"
+	}
+	modelColored := config.colorize("FI "+model, ColorWhite)
+
+	shieldSym := config.ContextShieldSymbol(vm.ContextUsedPct)
+
+	ctxStr := config.colorize("ctx —", ColorGray)
 	if vm.ContextUsedPct != nil {
 		pct := *vm.ContextUsedPct
 		ctxStr = fmt.Sprintf("ctx %.0f%%", pct)
-		// Color the percentage based on pressure
 		switch {
 		case pct >= 90:
 			ctxStr = config.colorize(ctxStr, ColorCrimson)
@@ -499,11 +679,10 @@ func (vm *ViewModel) Line(config RenderConfig) string {
 		}
 	}
 
-	readStr := ""
+	readStr := config.colorize("cache —", ColorGray)
 	if vm.CacheReadShare != nil {
 		pct := int(*vm.CacheReadShare * 100)
-		readStr = fmt.Sprintf("read %d%%", pct)
-		// Color cache read share: green=good, yellow=ok, red=bad
+		readStr = fmt.Sprintf("cache %d%%", pct)
 		switch {
 		case pct >= 50:
 			readStr = config.colorize(readStr, ColorGreen)
@@ -514,26 +693,35 @@ func (vm *ViewModel) Line(config RenderConfig) string {
 		}
 	}
 
-	healthSym := config.HealthSymbol(vm.ProviderConfirmed, vm.LastFailureCategory, vm.HealthStatus)
+	freshStr := config.colorize("fresh —", ColorGray)
+	if vm.FreshInputTokens != nil {
+		freshStr = config.colorize("fresh "+FormatTokenCount(*vm.FreshInputTokens), ColorCyan)
+	}
 
 	pressureSym := config.PressureSymbol(vm.PressureState, vm.WarningActive)
 
-	modelColored := config.colorize("FI "+model, ColorWhite)
-
+	// Select segments by tier.
 	var parts []string
-	parts = append(parts, modelColored)
-	parts = append(parts, healthSym)
-	parts = append(parts, ctxStr)
-	if readStr != "" {
-		parts = append(parts, readStr)
+	switch {
+	case width < 60:
+		// Narrow: shield, cache, ctx
+		parts = append(parts, shieldSym, readStr, ctxStr)
+	case width < 100:
+		// Medium: model, shield, cache, fresh, ctx, pressure
+		parts = append(parts, modelColored, shieldSym, readStr, freshStr, ctxStr, pressureSym)
+	default:
+		// Wide: everything
+		parts = append(parts, modelColored, shieldSym, readStr, freshStr, ctxStr, pressureSym)
 	}
-	parts = append(parts, pressureSym)
 
 	return strings.Join(parts, sep)
 }
 
 // Expanded renders the multi-line panel form with colors.
 func (vm *ViewModel) Expanded(config RenderConfig) string {
+	if !vm.Eligible {
+		return ""
+	}
 	var b strings.Builder
 	s := config.syms()
 	sep := config.colorize(" ", ColorGray)
@@ -710,6 +898,26 @@ func (vm *ViewModel) Expanded(config RenderConfig) string {
 				fmt.Fprintf(&b, ", retry: %s", cb.NextRetryAt.Format("15:04:05"))
 			}
 			fmt.Fprintln(&b, ")")
+		}
+	}
+
+	// Account Usage (account-level quotas from FreeInference)
+	hasRequests := vm.AccountUsageRequestsUsed != nil || vm.AccountUsageRequestsLimit != nil
+	hasTokens := vm.AccountUsageTokensUsed != nil || vm.AccountUsageTokensLimit != nil
+	if hasRequests || hasTokens {
+		fmt.Fprintln(&b)
+		header := "Account Usage"
+		if vm.AccountUsageFetchedAt != nil {
+			header += fmt.Sprintf(" (updated %s)", vm.AccountUsageFetchedAt.Format("2006-01-02 15:04"))
+		}
+		fmt.Fprintf(&b, "%s%s:\n", bullet, config.colorize(header, ColorWhite))
+		if hasRequests {
+			reqStr := config.formatQuotaLine(vm.AccountUsageRequestsUsed, vm.AccountUsageRequestsLimit)
+			fmt.Fprintf(&b, "%s  Requests:%s %s\n", bullet, sep, reqStr)
+		}
+		if hasTokens {
+			tokStr := config.formatQuotaLine(vm.AccountUsageTokensUsed, vm.AccountUsageTokensLimit)
+			fmt.Fprintf(&b, "%s  Tokens:%s   %s\n", bullet, sep, tokStr)
 		}
 	}
 

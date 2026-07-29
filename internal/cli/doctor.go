@@ -93,11 +93,13 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 	}
 
 	// 8. Model catalog reachable.
-	client := newAPIClient()
-	if client == nil {
-		// newAPIClient returned nil because the base URL failed validation.
-		// Don't make a request — report the configuration error.
-		add("API endpoint", api.CheckResult{State: api.CheckFail, Detail: "FREEINFERENCE_BASE_URL is invalid (must be HTTPS, no userinfo)"})
+	client, clientErr := newAPIClient()
+	if clientErr != nil {
+		// newAPIClient returned an error because the base URL failed
+		// validation or the endpoint is not an approved FreeInference host
+		// while an API key is set. Don't make a request — report the
+		// configuration error. All probe-dependent checks are skipped.
+		add("API endpoint", api.CheckResult{State: api.CheckFail, Detail: endpointFailDetail(clientErr)})
 		add("Model catalog", api.CheckResult{State: api.CheckUnknown, Detail: "skipped due to invalid endpoint"})
 		add("API key format", api.CheckResult{State: api.CheckUnknown, Detail: "skipped due to invalid endpoint"})
 		add("Authentication", api.CheckResult{State: api.CheckUnknown, Detail: "skipped due to invalid endpoint"})
@@ -133,6 +135,10 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 		}
 		if model == "" {
 			add("Inference probe", api.CheckResult{State: api.CheckUnknown, Detail: "no model available — pass --model or run fi models --refresh"})
+		} else if client == nil {
+			// Endpoint validation failed earlier; cannot probe inference against
+			// a misconfigured or unapproved host. Skip rather than panic.
+			add("Inference probe", api.CheckResult{State: api.CheckUnknown, Detail: "skipped due to invalid endpoint"})
 		} else {
 			pr := client.ProbeInference(model)
 			add("Probe endpoint", pr.Endpoint)
@@ -320,7 +326,15 @@ func checkStatusLineWrapper() api.CheckResult {
 	return api.CheckResult{State: api.CheckPass}
 }
 
-// chooseProbeModel picks a model from the cached catalog for a synthetic probe.
+// endpointFailDetail returns a sanitized, user-facing description of an
+// endpoint-validation error. It never echoes the raw URL (which may carry
+// userinfo or credential-shaped substrings); it reports the failure category.
+func endpointFailDetail(err error) string {
+	if err == nil {
+		return "FREEINFERENCE_BASE_URL is invalid"
+	}
+	return "FREEINFERENCE_BASE_URL is invalid: " + api.SanitizeEndpointError(err)
+}
 func chooseProbeModel(paths state.Paths) string {
 	gs, _ := state.LoadGlobal(paths)
 	if gs.Models == nil || len(gs.Models.Models) == 0 {
