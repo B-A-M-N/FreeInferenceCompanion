@@ -82,12 +82,12 @@ package: build-all plugin-bin
 	mkdir -p "$(RELEASE_DIR)/staging/claude-code" && \
 	sed "s/\"version\": \".*\"/\"version\": \"$$REL_VERSION\"/" plugins/claude-code/.claude-plugin/plugin.json > "$(RELEASE_DIR)/staging/claude-code/plugin.json" && \
 	cp -r plugins/claude-code/hooks plugins/claude-code/scripts plugins/claude-code/skills plugins/claude-code/bin "$(RELEASE_DIR)/staging/claude-code/" && \
-	cd "$(RELEASE_DIR)/staging/claude-code" && zip -q -r "../../$(RELEASE_DIR)/freeinference-companion-claude_$(VERSION).zip" . && \
+	cd "$(RELEASE_DIR)/staging/claude-code" && zip -q -r "../../../$(RELEASE_DIR)/freeinference-companion-claude_$(VERSION).zip" . && \
 	echo "packaged Claude plugin bundle"; \
 	mkdir -p "$(RELEASE_DIR)/staging/codex" && \
 	sed "s/\"version\": \".*\"/\"version\": \"$$REL_VERSION\"/" plugins/codex/.codex-plugin/plugin.json > "$(RELEASE_DIR)/staging/codex/plugin.json" && \
 	cp -r plugins/codex/hooks plugins/codex/scripts plugins/codex/skills plugins/codex/bin "$(RELEASE_DIR)/staging/codex/" && \
-	cd "$(RELEASE_DIR)/staging/codex" && zip -q -r "../../$(RELEASE_DIR)/freeinference-companion-codex_$(VERSION).zip" . && \
+	cd "$(RELEASE_DIR)/staging/codex" && zip -q -r "../../../$(RELEASE_DIR)/freeinference-companion-codex_$(VERSION).zip" . && \
 	echo "packaged Codex plugin bundle"; \
 	rm -rf "$(RELEASE_DIR)/staging"; \
 	cp LICENSE README.md $(RELEASE_DIR)/ && \
