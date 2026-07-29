@@ -146,7 +146,7 @@ package-smoke: package
 
 # plugin-clean-install smoke extracts each plugin zip into a temp directory
 # with an empty HOME and no fi on PATH, then exercises the hook wrapper
-# resolution chain (bundled bin/ → fallback paths). Confirms the plugin
+# resolution chain (bundled bin/ -> fallback paths). Confirms the plugin
 # archives contain all platform binaries.
 plugin-clean-install: package
 	@tmpdir="$$(mktemp -d 2>/dev/null || echo /tmp)"; \
@@ -154,12 +154,7 @@ plugin-clean-install: package
 	for z in $(RELEASE_DIR)/freeinference-companion-*.zip; do \
 		edir="$$(mktemp -d -p "$$tmpdir" 2>/dev/null || mktemp -d)"; \
 		unzip -q "$$z" -d "$$edir" && echo "extracted $$(basename $$z)"; \
-		# Handle both flat and nested zip structures
-		if [ -d "$$edir/bin" ]; then \
-			base="."; \
-		else \
-			base="$$(ls "$$edir")"; \
-		fi; \
+		base="."; \
 		test -d "$$edir/$$base/bin" || { echo "FAIL: bin/ missing in $$(basename $$z)"; exit 1; }; \
 		for bin in "$$edir/$$base/bin"/*; do \
 			while [ -d "$$bin" ]; do \
