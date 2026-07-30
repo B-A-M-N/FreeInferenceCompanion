@@ -35,9 +35,10 @@ freeinference doctor
 freeinference status
 ```
 
-The combined platform ZIP also contains the Claude Code and Codex plugin
-trees. The CLI installer can consume a release `marketplace.json` and will
-verify the platform ZIP checksum before installing:
+The combined platform ZIP contains the Claude Code plugin tree. Codex is
+installed separately through its native marketplace manager. The CLI installer
+can consume a release `marketplace.json` and will verify the platform ZIP
+checksum before installing:
 
 ```bash
 freeinference install --platform linux-amd64
@@ -45,24 +46,24 @@ freeinference install --platform linux-amd64
 
 ## Codex plugin
 
-Codex uses its native marketplace/plugin manager. For a checked-out repository
-or an extracted plugin marketplace, install the local marketplace and plugin:
+Codex uses its native marketplace/plugin manager. Install the public repository
+marketplace and plugin explicitly:
 
 ```bash
-codex plugin marketplace add /path/to/FreeInferenceCompanion/codex-marketplace
-codex plugin add freeinference-companion@freeinference-companion-local
+codex plugin marketplace add B-A-M-N/FreeInferenceCompanion --ref master
+codex plugin add freeinference-companion@freeinference-companion
 codex plugin list --json
 ```
 
-The plugin contributes local lifecycle recording and diagnostic skills. It
-does not proxy inference traffic or make background API requests by default.
+The plugin contributes diagnostic skills only. It does not install lifecycle
+hooks, proxy inference traffic, or make background API requests by default.
 Use `FI_AUTO_REFRESH=1` only when you explicitly want stale metadata refresh;
 those refreshes are throttled, coalesced, and circuit-breaker protected.
 
 ## HarvardClaude and other local proxies
 
-If a launcher routes Claude through a local compatibility proxy, install or
-load the Claude plugin in that launcher's profile and have the launcher export
+If a launcher routes Claude through a local compatibility proxy, load the
+Claude plugin in that launcher's profile and have the launcher export
 the verified upstream route:
 
 ```bash

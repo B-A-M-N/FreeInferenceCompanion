@@ -91,7 +91,7 @@ func createTestZIP(t *testing.T, version string) ([]byte, string) {
 	f, _ := w.Create("bin/freeinference")
 	f.Write([]byte("mock-binary-" + version))
 
-	// Mock plugin directories.
+	// Mock Claude Code plugin directory.
 	f, _ = w.Create("plugins/claude-code/.claude-plugin/plugin.json")
 	f.Write([]byte(`{"name":"freeinference-companion"}`))
 	f, _ = w.Create("plugins/claude-code/hooks/hooks.json")
@@ -102,15 +102,6 @@ func createTestZIP(t *testing.T, version string) ([]byte, string) {
 	f.Write([]byte("#!/usr/bin/env bash\nexit 0\n"))
 	f, _ = w.Create("plugins/claude-code/package.json")
 	f.Write([]byte(`{"name":"freeinference-companion"}`))
-
-	f, _ = w.Create("plugins/codex/.codex-plugin/plugin.json")
-	f.Write([]byte(`{"name":"freeinference-companion"}`))
-	f, _ = w.Create("plugins/codex/hooks/hooks.json")
-	f.Write([]byte(`{"hooks":{}}`))
-	codexHook := &zip.FileHeader{Name: "plugins/codex/scripts/run-hook.sh", Method: zip.Deflate}
-	codexHook.SetMode(0755)
-	f, _ = w.CreateHeader(codexHook)
-	f.Write([]byte("#!/usr/bin/env bash\nexit 0\n"))
 
 	w.Close()
 
@@ -161,26 +152,18 @@ func TestInstallFresh(t *testing.T) {
 	}
 
 	// Verify plugins were extracted.
-	for _, dir := range []string{paths.ClaudePluginDir, paths.CodexPluginDir} {
+	for _, dir := range []string{paths.ClaudePluginDir} {
 		pluginPath := filepath.Join(dir, "freeinference-companion")
 		t.Logf("Checking plugin path: %s", pluginPath)
 		if _, err := os.Stat(pluginPath); err != nil {
 			t.Errorf("plugin not extracted to %s: %v", pluginPath, err)
 		}
 	}
-	codexPlugin := filepath.Join(paths.CodexPluginDir, "freeinference-companion")
-	for _, rel := range []string{".codex-plugin/plugin.json", "hooks/hooks.json", "scripts/run-hook.sh"} {
-		if _, err := os.Stat(filepath.Join(codexPlugin, rel)); err != nil {
-			t.Errorf("Codex plugin artifact %s not extracted: %v", rel, err)
-		}
+	if _, err := os.Stat(filepath.Join(paths.CodexPluginDir, "freeinference-companion")); !os.IsNotExist(err) {
+		t.Errorf("install unexpectedly wrote a Codex plugin: %v", err)
 	}
-	marketplace := filepath.Join(paths.CodexMarketplaceDir, ".agents", "plugins", "marketplace.json")
-	if _, err := os.Stat(marketplace); err != nil {
-		t.Errorf("Codex marketplace manifest not created: %v", err)
-	}
-	marketplacePlugin := filepath.Join(paths.CodexMarketplaceDir, "plugins", "freeinference-companion", ".codex-plugin", "plugin.json")
-	if _, err := os.Stat(marketplacePlugin); err != nil {
-		t.Errorf("Codex marketplace plugin not created: %v", err)
+	if _, err := os.Stat(paths.CodexMarketplaceDir); !os.IsNotExist(err) {
+		t.Errorf("install unexpectedly wrote a Codex marketplace: %v", err)
 	}
 
 	// Verify version output.
@@ -265,7 +248,7 @@ func TestSameVersionPartialInstallCompletesMissingPlugins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("same-version completion: %v", err)
 	}
-	if result.AlreadyLatest || !result.ClaudePluginReady || !result.CodexFilesReady {
+	if result.AlreadyLatest || !result.ClaudePluginReady {
 		t.Fatalf("same-version completion result = %+v", result)
 	}
 	metadata, found, err := LoadInstallationMetadata(paths.MetadataPath())
@@ -274,7 +257,6 @@ func TestSameVersionPartialInstallCompletesMissingPlugins(t *testing.T) {
 	}
 	for name, got := range map[string]string{
 		"binary": metadata.BinaryVersion, "Claude": metadata.ClaudePluginVersion,
-		"Codex": metadata.CodexPluginVersion, "marketplace": metadata.CodexMarketplaceVersion,
 	} {
 		if got != "v0.2.0" {
 			t.Errorf("%s version = %q, want v0.2.0", name, got)
@@ -400,7 +382,7 @@ func TestInstallTransactionRollsBackAfterReplacementFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	transactionFailureHook = func(target string) error {
-		if target == paths.codexPluginPath() {
+		if target == paths.claudePluginPath() {
 			return errors.New("injected commit failure")
 		}
 		return nil
@@ -461,7 +443,6 @@ func TestValidateReleaseLayoutRequiresExecutableHook(t *testing.T) {
 		meta string
 	}{
 		{name: "Claude", base: filepath.Join(root, "plugins", "claude-code"), meta: ".claude-plugin/plugin.json"},
-		{name: "Codex", base: filepath.Join(root, "plugins", "codex"), meta: ".codex-plugin/plugin.json"},
 	} {
 		for _, rel := range []string{plugin.meta, "hooks/hooks.json", "scripts/run-hook.sh"} {
 			path := filepath.Join(plugin.base, rel)
@@ -476,7 +457,7 @@ func TestValidateReleaseLayoutRequiresExecutableHook(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Chmod(filepath.Join(root, "plugins", "codex", "scripts", "run-hook.sh"), 0644); err != nil {
+	if err := os.Chmod(filepath.Join(root, "plugins", "claude-code", "scripts", "run-hook.sh"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	if err := validateReleaseLayout(root, false, true); err == nil {
@@ -675,7 +656,7 @@ func TestUninstallRemovesBinaryAndPlugins(t *testing.T) {
 	}
 
 	// Verify plugins removed.
-	for _, dir := range []string{paths.ClaudePluginDir, paths.CodexPluginDir} {
+	for _, dir := range []string{paths.ClaudePluginDir} {
 		pluginPath := filepath.Join(dir, "freeinference-companion")
 		if _, err := os.Stat(pluginPath); !os.IsNotExist(err) {
 			t.Errorf("plugin not removed: %s", pluginPath)

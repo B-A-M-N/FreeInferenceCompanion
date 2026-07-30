@@ -72,14 +72,11 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 
 	// 4. Claude hook configuration present.
 	add("Claude hook config", checkClaudeHookConfig())
-	// 5. Codex installation is intentionally decomposed. A plugin directory,
-	// a registered Codex plugin, a hook definition, the hooks feature flag, and
-	// hook trust are separate states and must not be reported as one pass.
-	add("Codex plugin installed", checkCodexPluginInstalled())
+	// 5. Codex skill installation is intentionally separate from lifecycle
+	// hooks: the Companion Codex package is skill-only and uses Codex's native
+	// marketplace manager.
+	add("Codex skill installed", checkCodexPluginInstalled())
 	add("Codex plugin registration", checkCodexPluginRegistration())
-	add("Codex hook definition", checkCodexHookDefinition())
-	add("Codex hooks feature", checkCodexHooksFeature())
-	add("Codex hook trust", checkCodexHookTrust())
 	add("Codex native footer", checkCodexNativeFooter())
 
 	// 6. Status-line wrapper valid.
@@ -210,7 +207,7 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 		// make `doctor` exit 1 — diagnostics stay usable when disabled.
 		for i := range checks {
 			switch checks[i].name {
-			case "freeinference binary", "Claude hook config", "Codex plugin installed", "Codex plugin registration", "Codex hook definition", "Codex hooks feature", "Codex hook trust", "Codex native footer", "Status-line wrapper":
+			case "freeinference binary", "Claude hook config", "Codex skill installed", "Codex plugin registration", "Codex native footer", "Status-line wrapper":
 				if checks[i].result.State == api.CheckFail {
 					checks[i].result.State = api.CheckWarn
 				}
@@ -592,17 +589,17 @@ func checkCodexPluginRegistration() api.CheckResult {
 	if codexHome == "" {
 		codexHome = filepath.Join(home, ".codex")
 	}
-	cacheRoot := filepath.Join(codexHome, "plugins", "cache", "freeinference-companion-local", "freeinference-companion")
-	versions, _ := filepath.Glob(filepath.Join(cacheRoot, "*"))
+	cacheRoot := filepath.Join(codexHome, "plugins", "cache")
+	versions, _ := filepath.Glob(filepath.Join(cacheRoot, "*", "freeinference-companion", "*"))
 	for _, version := range versions {
 		if codexPluginManifest(version) {
-			return api.CheckResult{State: api.CheckPass, Detail: "Codex-managed cache found at " + version}
+			return api.CheckResult{State: api.CheckPass, Detail: "Codex marketplace cache found at " + version}
 		}
 	}
 	if codexPluginManifest(filepath.Join(codexHome, "plugins", "freeinference-companion")) {
-		return api.CheckResult{State: api.CheckWarn, Detail: "files are present, but Codex marketplace registration is not established"}
+		return api.CheckResult{State: api.CheckWarn, Detail: "skill files are present, but Codex marketplace installation is not established"}
 	}
-	return api.CheckResult{State: api.CheckUnknown, Detail: "Codex marketplace registration not established"}
+	return api.CheckResult{State: api.CheckUnknown, Detail: "Codex marketplace installation not detected"}
 }
 
 func checkCodexHookDefinition() api.CheckResult {

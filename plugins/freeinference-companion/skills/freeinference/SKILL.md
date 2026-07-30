@@ -1,46 +1,27 @@
 ---
 name: freeinference
-description: FreeInference Companion — local Codex lifecycle recording, provider diagnostics, model discovery, and configuration guidance. Codex context and cache metrics are reported as unavailable.
+description: FreeInference Companion — local Codex provider diagnostics, model discovery, and configuration guidance. Codex context and cache metrics are reported as unavailable.
 ---
 
 # FreeInference Companion (Codex)
 
-Community-built and unofficial plugin for FreeInference-powered Codex sessions. Its bundled lifecycle hooks record bounded session state locally, while its skills provide user-requested provider diagnostics and model discovery. It does not proxy prompts or add inference calls. Codex owns its native footer; the separate `codex-footer` command configures that footer and is not a FreeInference telemetry status line. Not affiliated with or endorsed by FreeInference.
+Community-built and unofficial skill-only plugin for FreeInference-powered
+Codex sessions. Its skills provide user-requested provider diagnostics and
+model discovery. It does not install lifecycle hooks, proxy prompts, or add
+inference calls. Codex owns its native footer; the separate `codex-footer`
+command configures that footer and is not a FreeInference telemetry status
+line. Not affiliated with or endorsed by FreeInference.
 
-After installing or updating the plugin, open `/hooks` in Codex and review /
-trust the current plugin hook definition. Codex skips changed non-managed
-plugin hooks until they are trusted. Session start/end hooks perform no
-upstream work by default. Set `FI_AUTO_REFRESH=1` only when stale metadata
-refreshes are desired; automatic authenticated refreshes then share one-minute
-spacing and a provider-wide cooldown after a rate limit.
-
-Lifecycle mapping: `SessionStart` is source-aware (`startup`, `resume`,
-`compact`, `clear`); `UserPromptSubmit` and `Stop` use bounded `turn_id` values
-to suppress duplicate/stale transitions; compaction is recorded without token
-math; and `SessionEnd` completes the existing logical session. Codex model
-observations are recorded from every lifecycle event that supplies a model.
-Codex `PostModelSwitch` and `StopFailure` are not dispatched.
-
-The normal Companion installer places this plugin at
-`~/.codex/plugins/freeinference-companion` and includes the hook runner plus
-the platform-matched CLI binary:
+Install through Codex's supported marketplace flow:
 
 ```bash
-freeinference install
-# For an existing installation:
-freeinference update
+codex plugin marketplace add B-A-M-N/FreeInferenceCompanion --ref master
+codex plugin add freeinference-companion@freeinference-companion
+codex plugin list --json
 ```
 
-The installer registers the plugin through a local Codex marketplace when the
-Codex CLI is available. If it was not available, run:
-
-```bash
-codex plugin marketplace add ~/.codex/plugins/freeinference-companion-marketplace
-codex plugin add freeinference-companion@freeinference-companion-local
-```
-
-After a source checkout, use `/path/to/FreeInferenceCompanion/codex-marketplace`
-as the marketplace path instead.
+Metadata refresh is disabled by default. `FI_AUTO_REFRESH=1` is an explicit
+opt-in for throttled, detached refresh work.
 
 ## Overview
 

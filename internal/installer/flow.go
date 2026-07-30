@@ -193,12 +193,12 @@ func installedComponentsVersion(metadata *InstallationMetadata, found bool, path
 	if !found || metadata == nil {
 		return ""
 	}
-	versions := make([]string, 0, 4)
+	versions := make([]string, 0, 2)
 	if !opts.NoBin {
 		versions = append(versions, metadata.BinaryVersion)
 	}
 	if !opts.NoPlugin {
-		versions = append(versions, metadata.ClaudePluginVersion, metadata.CodexPluginVersion, metadata.CodexMarketplaceVersion)
+		versions = append(versions, metadata.ClaudePluginVersion)
 	}
 	return highestVersion(versions)
 }
@@ -289,12 +289,10 @@ func requestedComponentsReady(metadata *InstallationMetadata, paths Paths, versi
 		return false
 	}
 	if !opts.NoPlugin {
-		if metadata.ClaudePluginVersion != version || metadata.CodexPluginVersion != version || metadata.CodexMarketplaceVersion != version {
+		if metadata.ClaudePluginVersion != version {
 			return false
 		}
-		if !directoryComponentReady(metadata, "claude", paths.claudePluginPath()) ||
-			!directoryComponentReady(metadata, "codex", paths.codexPluginPath()) ||
-			!directoryComponentReady(metadata, "marketplace", paths.CodexMarketplaceDir) {
+		if !directoryComponentReady(metadata, "claude", paths.claudePluginPath()) {
 			return false
 		}
 	}
@@ -359,14 +357,7 @@ func commitRelease(extractDir string, paths Paths, opts Options, manifest *Marke
 	}
 	if !opts.NoPlugin {
 		claudeSrc := filepath.Join(extractDir, "plugins", "claude-code")
-		codexSrc := filepath.Join(extractDir, "plugins", "codex")
 		if err := validateOwnedDirectory(paths.claudePluginPath(), prior, priorFound, priorDigest(prior, true)); err != nil {
-			return failed(err)
-		}
-		if err := validateOwnedDirectory(paths.codexPluginPath(), prior, priorFound, priorDigest(prior, false)); err != nil {
-			return failed(err)
-		}
-		if err := validateOwnedDirectory(paths.CodexMarketplaceDir, prior, priorFound, priorMarketplaceDigest(prior)); err != nil {
 			return failed(err)
 		}
 		claudeStage, err := stageDirectory(claudeSrc, paths.claudePluginPath())
@@ -376,34 +367,15 @@ func commitRelease(extractDir string, paths Paths, opts Options, manifest *Marke
 		if err := tx.replace(paths.claudePluginPath(), claudeStage); err != nil {
 			return failed(fmt.Errorf("install Claude plugin: %w", err))
 		}
-		codexStage, err := stageDirectory(codexSrc, paths.codexPluginPath())
-		if err != nil {
-			return failed(fmt.Errorf("stage Codex plugin: %w", err))
-		}
-		if err := tx.replace(paths.codexPluginPath(), codexStage); err != nil {
-			return failed(fmt.Errorf("install Codex plugin: %w", err))
-		}
-		marketplaceStage, err := stageCodexMarketplace(paths, codexSrc)
-		if err != nil {
-			return failed(fmt.Errorf("stage Codex marketplace: %w", err))
-		}
-		if err := tx.replace(paths.CodexMarketplaceDir, marketplaceStage); err != nil {
-			return failed(fmt.Errorf("install Codex marketplace: %w", err))
-		}
 		result.ClaudePluginReady = true
-		result.CodexFilesReady = true
 		result.Plugins = extractPluginPaths(paths)
 	}
 	metadata := metadataForPaths(paths, manifest.Version, manifestURLOrigin(opts.ManifestURL), artifactHash, version.Version)
 	metadata.ManagedBinaryOwned = !opts.NoBin
 	metadata.ShimOwned = !opts.NoBin
 	metadata.ClaudePluginOwned = !opts.NoPlugin
-	metadata.CodexPluginOwned = !opts.NoPlugin
-	metadata.CodexMarketplaceOwned = !opts.NoPlugin
 	metadata.ManagedBinarySHA256, _ = pathDigest(paths.BinaryPath)
 	metadata.ClaudePluginSHA256, _ = pathDigest(paths.claudePluginPath())
-	metadata.CodexPluginSHA256, _ = pathDigest(paths.codexPluginPath())
-	metadata.CodexMarketplaceSHA256, _ = pathDigest(paths.CodexMarketplaceDir)
 	if priorFound && prior != nil {
 		if opts.NoBin {
 			metadata.ManagedBinaryOwned = prior.ManagedBinaryOwned
@@ -421,13 +393,21 @@ func commitRelease(extractDir string, paths Paths, opts Options, manifest *Marke
 			metadata.CodexMarketplaceOwned = prior.CodexMarketplaceOwned
 			metadata.CodexMarketplaceSHA256 = prior.CodexMarketplaceSHA256
 			metadata.CodexMarketplaceVersion = prior.CodexMarketplaceVersion
+		} else if priorFound && prior != nil {
+			// Preserve ownership records for legacy Codex installs. New installs
+			// never replace or register Codex files; retaining these records lets
+			// uninstall remove only files this installer previously owned.
+			metadata.CodexPluginOwned = prior.CodexPluginOwned
+			metadata.CodexPluginSHA256 = prior.CodexPluginSHA256
+			metadata.CodexPluginVersion = prior.CodexPluginVersion
+			metadata.CodexMarketplaceOwned = prior.CodexMarketplaceOwned
+			metadata.CodexMarketplaceSHA256 = prior.CodexMarketplaceSHA256
+			metadata.CodexMarketplaceVersion = prior.CodexMarketplaceVersion
 		}
 	}
 	metadata.InstalledVersion = highestVersion([]string{
 		metadata.BinaryVersion,
 		metadata.ClaudePluginVersion,
-		metadata.CodexPluginVersion,
-		metadata.CodexMarketplaceVersion,
 	})
 	metadataStage, err := stageInstallationMetadata(paths.MetadataPath(), metadata)
 	if err != nil {
@@ -446,19 +426,6 @@ func commitRelease(extractDir string, paths Paths, opts Options, manifest *Marke
 		result.Warnings = append(result.Warnings, warning)
 		if stdout != nil {
 			fmt.Fprintf(stdout, "  Warning: %s\n", warning)
-		}
-	}
-	if result.CodexFilesReady {
-		registered, warnings := registerCodexMarketplaceStatus(paths, stdout)
-		result.CodexRegistered = registered
-		result.Warnings = append(result.Warnings, warnings...)
-		if len(warnings) > 0 {
-			result.PartiallyInstalled = true
-			if stdout != nil {
-				for _, warning := range warnings {
-					fmt.Fprintf(stdout, "  Warning: %s\n", warning)
-				}
-			}
 		}
 	}
 	return nil

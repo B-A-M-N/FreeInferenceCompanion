@@ -18,7 +18,7 @@ reproducibility, archive smoke tests, and clean plugin-install checks.
 The publication checklist is in [RELEASING.md](RELEASING.md).
 
 Codex plugin iteration uses the repository marketplace at
-`codex-marketplace/.agents/plugins/marketplace.json`. Validate it and the
+`.agents/plugins/marketplace.json`. Validate it and the
 plugin manifest before testing with Codex:
 
 ```bash

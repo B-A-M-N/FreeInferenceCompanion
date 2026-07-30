@@ -31,7 +31,7 @@ func TestVersionConsistency(t *testing.T) {
 	// (marketplace metadata); the per-plugin manifests are authoritative.
 	manifestPaths := []string{
 		"../../plugins/claude-code/.claude-plugin/plugin.json",
-		"../../plugins/codex/.codex-plugin/plugin.json",
+		"../../plugins/freeinference-companion/.codex-plugin/plugin.json",
 	}
 	if _, err := os.Stat("../../plugin.json"); err == nil {
 		manifestPaths = append([]string{"../../plugin.json"}, manifestPaths...)

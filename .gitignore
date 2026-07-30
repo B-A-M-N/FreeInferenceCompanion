@@ -11,7 +11,7 @@ coverage.txt
 .idea/
 .vscode/
 plugins/claude-code/bin/
-plugins/codex/bin/
+plugins/freeinference-companion/bin/
 /bin/
 /hooks/
 /plugin.json

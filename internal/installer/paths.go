@@ -17,7 +17,8 @@ type Paths struct {
 	LocalBin string
 	// ClaudePluginDir is the directory where the Claude Code plugin ZIP is extracted.
 	ClaudePluginDir string
-	// CodexPluginDir is the directory where the Codex plugin ZIP is extracted.
+	// CodexPluginDir is retained only to identify legacy installer-owned files
+	// during cleanup; new installs never write to this directory.
 	CodexPluginDir string
 	// CodexMarketplaceDir is the local marketplace root used to register the
 	// bundled Codex plugin with Codex's native plugin manager.

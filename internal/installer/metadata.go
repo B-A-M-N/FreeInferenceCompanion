@@ -326,15 +326,10 @@ func metadataForPaths(paths Paths, version, manifestURL, artifactSHA string, ins
 		ManagedBinaryOwned:   true,
 		ShimOwned:            true,
 		ClaudePluginOwned:    true,
-		CodexPluginOwned:     true,
 	}
 	metadata.ManagedBinarySHA256, _ = pathDigest(paths.BinaryPath)
 	metadata.ClaudePluginSHA256, _ = pathDigest(paths.claudePluginPath())
-	metadata.CodexPluginSHA256, _ = pathDigest(paths.codexPluginPath())
-	metadata.CodexMarketplaceSHA256, _ = pathDigest(paths.CodexMarketplaceDir)
-	metadata.CodexMarketplaceOwned = metadata.CodexMarketplaceSHA256 != ""
 	metadata.ClaudePluginOwned = metadata.ClaudePluginSHA256 != ""
-	metadata.CodexPluginOwned = metadata.CodexPluginSHA256 != ""
 	metadata.ManagedBinaryOwned = metadata.ManagedBinarySHA256 != ""
 	metadata.ShimOwned = metadata.ManagedBinaryOwned
 	if metadata.ManagedBinaryOwned {
@@ -342,12 +337,6 @@ func metadataForPaths(paths Paths, version, manifestURL, artifactSHA string, ins
 	}
 	if metadata.ClaudePluginOwned {
 		metadata.ClaudePluginVersion = version
-	}
-	if metadata.CodexPluginOwned {
-		metadata.CodexPluginVersion = version
-	}
-	if metadata.CodexMarketplaceOwned {
-		metadata.CodexMarketplaceVersion = version
 	}
 	return metadata
 }

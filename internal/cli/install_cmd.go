@@ -138,7 +138,7 @@ func cmdUninstall(rest []string, stdout, stderr io.Writer) int {
 
 const helpInstall = `Usage: freeinference install [--manifest <url>] [--platform <key>] [--dry-run] [--no-plugin] [--force] [--help]
 
-Download and install the FreeInference Companion CLI binary and plugins.
+Download and install the FreeInference Companion CLI binary and Claude Code plugin.
 
 The installer:
   1. Fetches the latest marketplace manifest
@@ -146,9 +146,9 @@ The installer:
   3. Verifies the SHA-256 checksum
   4. Extracts the binary to ~/.local/freeinference/bin/
   5. Symlinks to ~/.local/bin/freeinference (or adds to PATH)
-  6. Extracts Claude and Codex plugins (including lifecycle hooks)
-  7. Registers the Codex plugin through a local Codex marketplace when the
-     Codex CLI is available; otherwise prints the manual registration command
+  6. Extracts the Claude Code plugin to ~/.claude/plugins/
+
+Codex uses its marketplace flow; see docs/codex.md.
 
 Flags:
   --manifest <url>     URL of the marketplace.json file (default: GitHub latest release)
@@ -168,7 +168,7 @@ The updater:
   1. Checks the manifest for a newer version
   2. Backs up the current binary before replacing
   3. Downloads and verifies the new release
-  4. Replaces the binary and updates plugins
+  4. Replaces the binary and updates the Claude Code plugin
 
 Flags:
   --manifest <url>     URL of the marketplace.json file
