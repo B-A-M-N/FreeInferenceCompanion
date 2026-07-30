@@ -15,15 +15,15 @@ var fiBinary string
 
 // TestMain builds the real binary once and runs every check against it.
 func TestMain(m *testing.M) {
-	dir, err := os.MkdirTemp("", "fi-test-bin")
+	dir, err := os.MkdirTemp("", "freeinference-test-bin")
 	if err != nil {
 		panic(err)
 	}
-	fiBinary = filepath.Join(dir, "fi")
+	fiBinary = filepath.Join(dir, "freeinference")
 	build := exec.Command("go", "build", "-o", fiBinary, ".")
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
-		panic("build fi: " + err.Error())
+		panic("build freeinference: " + err.Error())
 	}
 	code := m.Run()
 	os.RemoveAll(dir)
@@ -52,7 +52,7 @@ func runFI(t *testing.T, cacheDir string, stdin string, env []string, args ...st
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			exitCode = exitErr.ExitCode()
 		} else {
-			t.Fatalf("run fi: %v", err)
+			t.Fatalf("run freeinference: %v", err)
 		}
 	}
 	return outBuf.String(), errBuf.String(), exitCode
@@ -121,7 +121,7 @@ func TestHookMissingArgsExitsZero(t *testing.T) {
 
 func TestHookMissingCacheDirExitsZero(t *testing.T) {
 	// A path that cannot be created.
-	_, _, code := runFI(t, "/proc/1/fi-impossible", hookInput("s1"), nil, "hook", "claude-code", "SessionStart")
+	_, _, code := runFI(t, "/proc/1/freeinference-impossible", hookInput("s1"), nil, "hook", "claude-code", "SessionStart")
 	if code != 0 {
 		t.Errorf("unwritable state must exit 0, got %d", code)
 	}
@@ -248,12 +248,16 @@ func TestStatusResolvesLatestSession(t *testing.T) {
 
 	runFI(t, dir, hookInput("sess-resolve"), env, "hook", "claude-code", "SessionStart")
 
+	// The expanded themed renderer shows FREEINFERENCE header + Provider line when a session resolves.
 	stdout, _, code := runFI(t, dir, "", env, "status", "--include-identifiers")
 	if code != 0 {
 		t.Errorf("exit = %d", code)
 	}
-	if !strings.Contains(stdout, "sess-resolve") {
-		t.Errorf("fi status should resolve the latest session from the index, got %q", stdout)
+	if !strings.Contains(stdout, "FREEINFERENCE") {
+		t.Errorf("freeinference status should show companion info when session resolves, got %q", stdout)
+	}
+	if !strings.Contains(stdout, "Provider") {
+		t.Errorf("freeinference status should show provider info when session resolves, got %q", stdout)
 	}
 }
 

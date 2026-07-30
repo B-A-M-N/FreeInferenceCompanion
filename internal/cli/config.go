@@ -9,11 +9,11 @@ import (
 	"github.com/b-a-m-n/freeinference-companion/internal/config"
 )
 
-// cmdConfig implements `fi config` — manage persistent configuration.
+// cmdConfig implements `freeinference config` — manage persistent configuration.
 // Subcommands: show, set, reset, path
 func cmdConfig(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: fi config show|set|reset|path [args]")
+		fmt.Fprintln(stderr, "usage: freeinference config show|set|reset|path [args]")
 		fmt.Fprintln(stderr, "")
 		fmt.Fprintln(stderr, "Subcommands:")
 		fmt.Fprintln(stderr, "  show [--json]         Show effective configuration with provenance")
@@ -93,6 +93,7 @@ func cmdConfigShow(args []string, stdout, stderr io.Writer) int {
 
 	fmt.Fprintln(stdout, "\nCache:")
 	printField("  warn_threshold", fmt.Sprintf("%.2f", eff.Cache.WarnThreshold.Value), string(eff.Cache.WarnThreshold.Source), boolStr(eff.Cache.WarnThreshold.Valid), eff.Cache.WarnThreshold.Error)
+	printField("  recovered_threshold", fmt.Sprintf("%.2f", eff.Cache.RecoveredThreshold.Value), string(eff.Cache.RecoveredThreshold.Source), boolStr(eff.Cache.RecoveredThreshold.Valid), eff.Cache.RecoveredThreshold.Error)
 	printField("  cooldown_mins", fmt.Sprintf("%d", eff.Cache.CooldownMins.Value), string(eff.Cache.CooldownMins.Source), boolStr(eff.Cache.CooldownMins.Valid), eff.Cache.CooldownMins.Error)
 
 	fmt.Fprintln(stdout, "\nRefresh:")
@@ -112,17 +113,27 @@ func boolStr(b bool) string {
 }
 
 func cmdConfigSet(args []string, stdout, stderr io.Writer) int {
-	if len(args) != 2 {
-		fmt.Fprintln(stderr, "usage: fi config set <key> <value>")
+	jsonOut := false
+	var realArgs []string
+	for _, a := range args {
+		if a == "--json" {
+			jsonOut = true
+		} else {
+			realArgs = append(realArgs, a)
+		}
+	}
+
+	if len(realArgs) != 2 {
+		fmt.Fprintln(stderr, "usage: freeinference config set <key> <value>")
 		fmt.Fprintln(stderr, "")
 		fmt.Fprintln(stderr, "Keys: context.watch_enter, context.warn_enter, context.critical_enter,")
 		fmt.Fprintln(stderr, "      context.watch_leave, context.warn_leave, context.critical_leave,")
-		fmt.Fprintln(stderr, "      context.output_reserve, cache.warn_threshold, cache.cooldown_mins,")
+		fmt.Fprintln(stderr, "      context.output_reserve, cache.warn_threshold, cache.recovered_threshold, cache.cooldown_mins,")
 		fmt.Fprintln(stderr, "      refresh.interval_mins, privacy.diagnostic_probes")
 		return 2
 	}
 
-	key, value := args[0], args[1]
+	key, value := realArgs[0], realArgs[1]
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -140,21 +151,38 @@ func cmdConfigSet(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	if jsonOut {
+		fmt.Fprintf(stdout, `{"key":%q,"value":%q}`+"\n", key, value)
+		return 0
+	}
 	fmt.Fprintf(stdout, "Set %s to %s\n", key, value)
 	return 0
 }
 
 func cmdConfigReset(args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 {
-		// Reset all
+	jsonOut := false
+	var realArgs []string
+	for _, a := range args {
+		if a == "--json" {
+			jsonOut = true
+		} else {
+			realArgs = append(realArgs, a)
+		}
+	}
+
+	if len(realArgs) == 0 {
 		if err := config.ResetToDefault(); err != nil {
 			fmt.Fprintf(stderr, "error: %v\n", err)
 			return 1
 		}
+		if jsonOut {
+			fmt.Fprintln(stdout, `{"reset":true,"key":null}`)
+			return 0
+		}
 		fmt.Fprintln(stdout, "All settings reset to defaults")
 		return 0
 	}
-	fmt.Fprintf(stderr, "usage: fi config reset [<key>]\n")
+	fmt.Fprintf(stderr, "usage: freeinference config reset [<key>]\n")
 	fmt.Fprintln(stderr, "Without arguments, resets all settings to defaults.")
 	return 2
 }

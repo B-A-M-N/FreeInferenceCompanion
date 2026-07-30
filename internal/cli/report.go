@@ -70,9 +70,9 @@ type reportAccountUsage struct {
 
 const reportNote = "This report is designed to exclude known sensitive fields. Review it before sharing."
 
-// cmdReport implements `fi report`.
+// cmdReport implements `freeinference report`.
 func cmdReport(paths state.Paths, args []string, stdout, stderr io.Writer) int {
-	clientType, sessionID, format, reveal, err := parseClientSessionFlags(args)
+	clientType, sessionID, format, reveal, _, err := parseClientSessionFlags(args)
 	if err != nil {
 		fmt.Fprintf(stderr, "usage error: %v\n", err)
 		return 2
@@ -213,7 +213,7 @@ func printMarkdownReport(stdout io.Writer, report *reportData, reveal bool) {
 
 	if report.Session == nil {
 		fmt.Fprintln(stdout)
-		fmt.Fprintln(stdout, "No session resolved. Use --session <id> or see `fi sessions`.")
+		fmt.Fprintln(stdout, "No session resolved. Use --session <id> or see `freeinference sessions`.")
 	} else {
 		s := report.Session
 		fmt.Fprintln(stdout)

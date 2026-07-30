@@ -110,10 +110,10 @@ func CacheTTLWarningMessage(idleMinutes int, activeTokens int64) string {
 // EvaluateCacheTTLExpiry. It uses snap.CacheTiming.LastInferenceObservedAt
 // for idle-gap calculation instead of the caller-provided lastEventAt.
 //
-// When CacheTTLSeconds is set by the provider, that value is used instead
-// of the hardcoded PromptCacheTTL. Only generates a warning when the cache
-// TTL is actually known (either provider-confirmed or the client has enough
-// inference observations to establish a baseline).
+// WARNING: Only generates a warning when the provider has confirmed a
+// cache TTL via CacheTTLSeconds. Without provider-confirmed TTL data, the
+// companion cannot know the actual server-side cache policy and returns
+// an empty (no-warning) decision.
 //
 // For backward compatibility: if CacheTiming is nil or
 // LastInferenceObservedAt is zero, falls back to lastEventAt.
@@ -136,11 +136,15 @@ func EvaluateCacheTTLExpiryV2(snap *schema.Snapshot, activeTokens int64, lastEve
 
 	idle := now.Sub(idleBase)
 
-	// Determine the TTL to check against.
-	cacheTTL := PromptCacheTTL
-	if snap.CacheTiming != nil && snap.CacheTiming.CacheTTLSeconds != nil && *snap.CacheTiming.CacheTTLSeconds > 0 {
-		cacheTTL = time.Duration(*snap.CacheTiming.CacheTTLSeconds) * time.Second
+	// Only warn when the provider has confirmed a cache TTL. Without
+	// provider-supplied CacheTTLSeconds, the companion cannot know the
+	// actual server-side cache policy — any hardcoded default would be
+	// speculative.
+	if snap.CacheTiming == nil || snap.CacheTiming.CacheTTLSeconds == nil || *snap.CacheTiming.CacheTTLSeconds <= 0 {
+		return CacheTTLDecision{}
 	}
+
+	cacheTTL := time.Duration(*snap.CacheTiming.CacheTTLSeconds) * time.Second
 
 	if idle < cacheTTL {
 		return CacheTTLDecision{}

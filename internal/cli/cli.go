@@ -1,4 +1,4 @@
-// Package cli implements the fi command-line interface. Command functions
+// Package cli implements the freeinference command-line interface. Command functions
 // return exit codes; only main() calls os.Exit. Hook commands always exit 0.
 package cli
 
@@ -57,6 +57,12 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int
 	if cmd == "dashboard" {
 		return cmdDashboard(rest, stdout, stderr)
 	}
+	if cmd == "install" {
+		return cmdInstall(state.Paths{}, rest, stdout, stderr)
+	}
+	if cmd == "update" {
+		return cmdUpdate(state.Paths{}, rest, stdout, stderr)
+	}
 
 	paths, err := state.NewPaths()
 	if err != nil {
@@ -72,23 +78,21 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int
 	// breakers, account usage) require an active FreeInference runtime.
 	// Session-only commands (sessions, snapshot, context, render) may use
 	// unnamespaced paths because session state is independent of the provider.
-	providerStateCommands := map[string]bool{
-		"status":      true,
-		"models":      true,
-		"doctor":      true,
-		"report":      true,
-		"dashboard":   true,
-		"refresh":     true,
-		"cache":       true,
-		"status-line": true, // renders provider state
+	requiresActiveProvider := map[string]bool{
+		"status":    true,
+		"models":    true,
+		"report":    true,
+		"dashboard": true,
+		"refresh":   true,
+		"cache":     true,
 	}
-	needsProviderState := providerStateCommands[cmd]
+	needsProviderState := requiresActiveProvider[cmd]
 
 	if !activation.Active {
 		if activation.Disabled {
 			fmt.Fprintf(stderr, "WARNING: FreeInference companion is DISABLED (FI_DISABLED=1)\n")
 			fmt.Fprintf(stderr, "         All hooks and automatic features are suppressed.\n")
-			fmt.Fprintf(stderr, "         Remove FI_DISABLED or set it to \"0\" to re-enable.\n")
+			fmt.Fprintf(stderr, "         Run \"freeinference companion enable\" to re-enable.\n")
 		}
 		if needsProviderState {
 			if !activation.Disabled {
@@ -96,6 +100,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int
 			}
 			return 1
 		}
+		// Control-plane and session-only commands continue regardless.
+		// Doctor will report exactly what is missing.
 		// Session-only commands may use unnamespaced paths.
 	} else {
 		id, err := activation.Identity(runtime.DefaultSaltLoader())
@@ -178,6 +184,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int
 		return cmdStatusLine(rest, stdout, stderr)
 	case "config":
 		return cmdConfig(rest, stdout, stderr)
+	case "companion":
+		return cmdCompanion(paths, rest, stdout, stderr)
 	case "version", "--version", "-v":
 		return cmdVersion(rest, stdout, stderr)
 	case "help", "--help", "-h":
@@ -190,7 +198,7 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int
 	}
 }
 
-// cmdVersion implements `fi version`, `fi --version`, and `fi -v`. Supports
+// cmdVersion implements `freeinference version`, `freeinference --version`, and `freeinference -v`. Supports
 // `--json` for machine-readable output.
 func cmdVersion(args []string, stdout, stderr io.Writer) int {
 	jsonOut := false
@@ -211,7 +219,7 @@ func cmdVersion(args []string, stdout, stderr io.Writer) int {
 			Version, Commit, schema.StateVersion, schema.ClientClaudeCode, schema.ClientCodex)
 		return 0
 	}
-	fmt.Fprintf(stdout, "fi %s (%s)\n", Version, Commit)
+	fmt.Fprintf(stdout, "freeinference %s (%s)\n", Version, Commit)
 	fmt.Fprintf(stdout, "state schema v%d\n", schema.StateVersion)
 	fmt.Fprintf(stdout, "clients: %s, %s\n", schema.ClientClaudeCode, schema.ClientCodex)
 	return 0
@@ -221,21 +229,29 @@ func printUsage(w io.Writer) {
 	fmt.Fprint(w, `FreeInference Companion v`+Version+`
 
 Usage:
-  fi status [--client <type>] [--compact] [--session <id>]
-  fi sessions
-  fi snapshot --json [--client <type>] [--session <id>]
-  fi render --mode line|expanded [--client <type>] [--session <id>]
-  fi models [--model <name>] [--refresh]
-  fi doctor [--probe --model <name>]
-  fi report [--client <type>] [--session <id>] [--format markdown|json]
-  fi dashboard
-  fi context [--client <type>] [--session <id>]
-  fi cache [--client <type>] [--session <id>]
-  fi refresh [--force|--if-stale] [--detach] [--worker models|health|account-usage]
-  fi status-line install|uninstall
-  fi config show|set|reset|path
-  fi version [--json]
-  fi hook <client> <event>
+  freeinference status [--client <type>] [--compact] [--session <id>]
+    [--json] [--color auto|always|never] [--help]
+  freeinference sessions [--include-identifiers] [--json] [--help]
+  freeinference snapshot --json [--client <type>] [--session <id>]
+    [--include-identifiers] [--color auto|always|never] [--help]
+  freeinference render --mode line|expanded [--client <type>] [--session <id>]
+    [--include-identifiers] [--color auto|always|never] [--help]
+  freeinference models [--model <name>] [--refresh] [--help]
+  freeinference doctor [--probe --model <name>] [--help]
+  freeinference report [--client <type>] [--session <id>] [--format markdown|json]
+    [--include-identifiers] [--help]
+  freeinference dashboard
+  freeinference install [--manifest <url>] [--platform <key>] [--dry-run] [--no-plugin] [--force]
+  freeinference update [--manifest <url>] [--platform <key>] [--dry-run] [--force]
+  freeinference context [--client <type>] [--session <id>] [--help]
+  freeinference cache [--client <type>] [--session <id>] [--help]
+  freeinference refresh [--force|--if-stale] [--detach]
+    [--worker models|health|account-usage] [--help]
+  freeinference status-line install|uninstall
+  freeinference config show|set|reset|path [--json]
+  freeinference companion status
+  freeinference version [--json]
+  freeinference hook <client> <event>
 
 Environment:
   FREEINFERENCE_API_KEY    FreeInference API key
@@ -247,12 +263,15 @@ Environment:
   FI_NO_BACKGROUND         Disable background refresh
   FI_DISABLED              Disable all companion features
   FI_ALLOW_INSECURE_LOCALHOST  Allow http:// loopback (development only)
+  NO_COLOR                 Disable colors (see https://no-color.org)
+  FORCE_COLOR              Force color output even without a terminal
+  COLUMNS                  Terminal width in columns (0 = auto-detect)
 `)
 }
 
 // Command help text constants
 const (
-	helpStatus = `Usage: fi status [--client <type>] [--compact] [--session <id>] [--help]
+	helpStatus = `Usage: freeinference status [--client <type>] [--compact] [--session <id>] [--json] [--color auto|always|never] [--help]
 
 Show the current session status with context usage, pressure, and cache analysis.
 
@@ -260,19 +279,31 @@ Flags:
   --client <type>    Client type: claude-code (default) or codex
   --compact          Output a single line suitable for status-line wrappers
   --session <id>     Explicit session ID (also via FI_SESSION_ID env var)
+  --json             Output machine-readable JSON
+  --color auto|always|never  Color output mode (default: auto)
   --help             Show this help message
 `
 
-	helpSessions = `Usage: fi sessions [--include-identifiers] [--help]
+	helpSessions = `Usage: freeinference sessions [--include-identifiers] [--json] [--help]
 
 List all recorded sessions across clients.
 
 Flags:
   --include-identifiers  Show full session IDs (default: masked)
+  --json                 Output machine-readable JSON
   --help                 Show this help message
 `
 
-	helpSnapshot = `Usage: fi snapshot --json [--client <type>] [--session <id>] [--include-identifiers] [--help]
+	helpCompanion = `Usage: freeinference companion status [--json] [--help]
+
+Show the companion enable/disable status.
+
+Flags:
+  --json    Output machine-readable JSON
+  --help    Show this help message
+`
+
+	helpSnapshot = `Usage: freeinference snapshot --json [--client <type>] [--session <id>] [--include-identifiers] [--help]
 
 Output the full session snapshot in JSON format for machine consumption.
 
@@ -283,7 +314,7 @@ Flags:
   --help                 Show this help message
 `
 
-	helpRender = `Usage: fi render --mode line|expanded [--client <type>] [--session <id>] [--include-identifiers] [--help]
+	helpRender = `Usage: freeinference render --mode line|expanded [--client <type>] [--session <id>] [--include-identifiers] [--help]
 
 Render session status as human-readable output.
 
@@ -295,7 +326,7 @@ Flags:
   --help                 Show this help message
 `
 
-	helpModels = `Usage: fi models [--model <name>] [--refresh] [--help]
+	helpModels = `Usage: freeinference models [--model <name>] [--refresh] [--help]
 
 List available models from the catalog, optionally showing a specific model.
 
@@ -305,14 +336,14 @@ Flags:
   --help             Show this help message
 `
 
-	helpDoctor = `Usage: fi doctor [--probe --model <name>] [--help]
+	helpDoctor = `Usage: freeinference doctor [--probe --model <name>] [--json] [--help]
 
 Run diagnostic checks on the companion installation.
 
 Checks performed:
   - Cache directory exists and is writable
   - State files are readable
-  - fi binary is resolvable
+  - freeinference binary is resolvable
   - Claude hook configuration present
   - Status-line wrapper valid
   - Provider detection
@@ -324,10 +355,11 @@ Checks performed:
 
 Flags:
   --probe --model <name>  Run a synthetic inference probe against the given model
+  --json                  Output machine-readable JSON
   --help                  Show this help message
 `
 
-	helpReport = `Usage: fi report [--client <type>] [--session <id>] [--format markdown|json] [--include-identifiers] [--help]
+	helpReport = `Usage: freeinference report [--client <type>] [--session <id>] [--format markdown|json] [--include-identifiers] [--help]
 
 Generate a sanitized report suitable for sharing with support.
 
@@ -339,7 +371,7 @@ Flags:
   --help                  Show this help message
 `
 
-	helpDashboard = `Usage: fi dashboard [--status] [--account] [--print-url] [--help]
+	helpDashboard = `Usage: freeinference dashboard [--status] [--account] [--print-url] [--help]
 
 Open the FreeInference dashboard in your browser.
 
@@ -350,7 +382,7 @@ Flags:
   --help      Show this help message
 `
 
-	helpContext = `Usage: fi context [--client <type>] [--session <id>] [--help]
+	helpContext = `Usage: freeinference context [--client <type>] [--session <id>] [--help]
 
 Show current context usage for the active session.
 
@@ -360,7 +392,7 @@ Flags:
   --help           Show this help message
 `
 
-	helpRefresh = `Usage: fi refresh [--force|--if-stale] [--detach] [--worker models|health] [--help]
+	helpRefresh = `Usage: freeinference refresh [--force|--if-stale] [--detach] [--worker models|health] [--help]
 
 Refresh cached data (models, health, account usage).
 
@@ -374,7 +406,7 @@ Flags:
   --help  Show this help message
 `
 
-	helpCache = `Usage: fi cache [--client <type>] [--session <id>] [--include-identifiers] [--help]
+	helpCache = `Usage: freeinference cache [--client <type>] [--session <id>] [--include-identifiers] [--json] [--help]
 
 Analyze cache efficiency and provide recommendations to improve hit rates.
 
@@ -382,33 +414,36 @@ Flags:
   --client <type>         Client type: claude-code (default) or codex
   --session <id>          Explicit session ID (also via FI_SESSION_ID env var)
   --include-identifiers   Show full session IDs (default: masked)
+  --json                  Output machine-readable JSON
   --help                  Show this help message
 `
 
-	helpStatusLine = `Usage: fi status-line install|uninstall [--scope user|project|local] [--project <dir>] [--help]
+	helpStatusLine = `Usage: freeinference status-line install|uninstall|status [--scope user|project|local] [--project <dir>] [--help] [--json]
 
 Install or uninstall the status-line wrapper for Claude Code.
 
 Subcommands:
   install   Install the status-line wrapper (default scope: project)
   uninstall Remove the status-line wrapper
+  status    Show wrapper installation status
 
 Flags:
   --scope <type>   Scope: user, project (default), or local
   --project <dir>  Project directory for project/local scope
+  --json           Output machine-readable JSON
   --help           Show this help message
 `
 
-	helpVersion = `Usage: fi version [--json] [--help]
+	helpVersion = `Usage: freeinference version [--json] [--help]
 
-Show the fi companion version and schema information.
+Show the freeinference companion version and schema information.
 
 Flags:
   --json    Output machine-readable JSON
   --help    Show this help message
 `
 
-	helpHook = `Usage: fi hook <client> <event>
+	helpHook = `Usage: freeinference hook <client> <event>
 
 Internal hook entry point for Claude Code and Codex. Never called directly.
 
@@ -451,6 +486,10 @@ func printCmdHelp(stdout, stderr io.Writer, cmd string, args []string) bool {
 				fmt.Fprint(stdout, helpStatusLine)
 			case "version":
 				fmt.Fprint(stdout, helpVersion)
+			case "install":
+				fmt.Fprint(stdout, helpInstall)
+			case "update":
+				fmt.Fprint(stdout, helpUpdate)
 			case "hook":
 				fmt.Fprint(stdout, helpHook)
 			default:

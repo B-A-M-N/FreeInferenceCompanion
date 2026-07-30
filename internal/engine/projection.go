@@ -47,6 +47,13 @@ const ToolOverheadPerTurn = 512
 // It absorbs tokenizer approximation error and minor framing differences.
 const SafetyMarginDefault = 2048
 
+// DefaultOutputReserve returns the configured default output reserve from the
+// config system (env → file → default precedence). Kept as a function so
+// callers that previously referenced the package-level variable still compile.
+func DefaultOutputReserve() int {
+	return lazyThresholds().OutputReserve()
+}
+
 // ApproximatePromptTokens estimates prompt token count without contacting a
 // remote tokenizer. The estimate is deliberately conservative (rounds up).
 // Bytes-per-token ratios vary by language; 3.5 bytes/token covers Latin text
@@ -69,7 +76,7 @@ func ApproximatePromptTokens(promptBytes int) int64 {
 // outputReserve is the tokens to withhold for the reply (defaults applied when 0).
 func ProjectNextRequest(currentActiveTokens int64, promptBytes int, contextWindowSize *int64, outputReserve int) Projection {
 	if outputReserve <= 0 {
-		outputReserve = DefaultOutputReserve
+		outputReserve = DefaultOutputReserve()
 	}
 	p := Projection{
 		CurrentActiveTokens:   currentActiveTokens,
@@ -109,7 +116,7 @@ func (p Projection) AdvisoryMessage() string {
 	}
 	reserve := p.ReservedOutputTokens
 	if reserve <= 0 {
-		reserve = int64(DefaultOutputReserve)
+		reserve = int64(DefaultOutputReserve())
 	}
 	return formatProjectionOverflow(*p.RemainingForOutput, reserve, p.Confidence)
 }

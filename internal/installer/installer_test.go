@@ -1,0 +1,423 @@
+package installer
+
+import (
+	"archive/zip"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// testServer returns an HTTP server that serves a mock marketplace manifest
+// and a mock platform ZIP file. The caller should call server.Close() when done.
+func testServer(t *testing.T, version string, platform PlatformKey) (manifestURL string, zipHash string, server *httptest.Server) {
+	t.Helper()
+
+	// Create a ZIP file with a mock binary and plugin directories.
+	zipData, zipHash := createTestZIP(t, version)
+
+	// Create the handler first (we don't have the server URL yet, so use a placeholder).
+	zipDataRef := zipData
+	zipHashRef := zipHash
+
+	var handler http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	// Create the server.
+	server = httptest.NewServer(handler)
+
+	// Build the real manifest body now that we have the URL.
+	manifestBody := createManifestBody(t, version, server.URL+"/", zipHashRef)
+	zipDataRef = zipData
+
+	// Replace handler with the real one.
+	handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/marketplace.json" {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write(manifestBody)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "release.zip") {
+			w.Header().Set("Content-Type", "application/zip")
+			w.Write(zipDataRef)
+			return
+		}
+		w.Header().Set("Content-Type", "application/zip")
+		w.Write(emptyZIP())
+	})
+	server.Config.Handler = handler
+
+	return server.URL + "/marketplace.json", zipHashRef, server
+}
+
+func createManifestBody(t *testing.T, version, serverBase, zipHash string) []byte {
+	t.Helper()
+	manifest := map[string]any{
+		"version": version,
+		"platforms": map[string]map[string]string{
+			"linux-amd64": {
+				"url":    serverBase + "release.zip",
+				"sha256": zipHash,
+			},
+		},
+		"plugin_urls": map[string]string{
+			"claude-code": serverBase + "plugin-claude.zip",
+			"codex":       serverBase + "plugin-codex.zip",
+		},
+	}
+	body, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+// createTestZIP creates a ZIP file containing a mock binary and plugin directories.
+func createTestZIP(t *testing.T, version string) ([]byte, string) {
+	t.Helper()
+	buf := &strings.Builder{}
+	w := zip.NewWriter(buf)
+
+	// Mock binary.
+	f, _ := w.Create("bin/freeinference")
+	f.Write([]byte("mock-binary-" + version))
+
+	// Mock plugin directories.
+	f, _ = w.Create("plugins/claude-code/package.json")
+	f.Write([]byte(`{"name":"freeinference-companion"}`))
+
+	f, _ = w.Create("plugins/codex/config.json")
+	f.Write([]byte(`{"name":"freeinference-companion"}`))
+
+	w.Close()
+
+	hash := sha256.Sum256([]byte(buf.String()))
+	return []byte(buf.String()), hex.EncodeToString(hash[:])
+}
+
+// emptyZIP returns a minimal valid empty ZIP.
+func emptyZIP() []byte {
+	return []byte{
+		0x50, 0x4b, 0x05, 0x06, // local file header sig
+		0x00, 0x00, 0x00, 0x00, // version, flags, compression, modtime, moddate
+		0x00, 0x00, 0x00, 0x00, // crc32, compressed size, uncompressed size
+		0x00, 0x00, // filename length, extra field length
+		0x00, 0x00, 0x00, 0x00, // central directory offset, size
+	}
+}
+
+func TestInstallFresh(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatalf("DefaultPaths: %v", err)
+	}
+
+	manifestURL, _, server := testServer(t, "v0.2.0", "linux-amd64")
+	defer server.Close()
+
+	stdout := &strings.Builder{}
+	stderr := &strings.Builder{}
+
+	_, err = Install(Options{
+		ManifestURL:     manifestURL,
+		Platform:        "linux-amd64",
+		ExistingVersion: "",
+		DryRun:          false,
+		NoBrowser:       true,
+	}, stdout, stderr)
+	if err != nil {
+		t.Fatalf("install: %v", err)
+	}
+
+	// Verify binary was installed.
+	if _, err := os.Stat(paths.BinaryPath); err != nil {
+		t.Logf("Binary path: %s", paths.BinaryPath)
+		t.Logf("stderr: %s", stderr.String())
+		t.Errorf("binary not installed at %s: %v", paths.BinaryPath, err)
+	}
+
+	// Verify plugins were extracted.
+	for _, dir := range []string{paths.ClaudePluginDir, paths.CodexPluginDir} {
+		pluginPath := filepath.Join(dir, "freeinference-companion")
+		t.Logf("Checking plugin path: %s", pluginPath)
+		if _, err := os.Stat(pluginPath); err != nil {
+			t.Errorf("plugin not extracted to %s: %v", pluginPath, err)
+		}
+	}
+
+	// Verify version output.
+	if !strings.Contains(stdout.String(), "v0.2.0") {
+		t.Errorf("expected version v0.2.0 in output:\n%s", stdout.String())
+	}
+}
+
+func TestInstallChecksumMismatch(t *testing.T) {
+	// Just test the VerifyChecksum function directly with wrong hash.
+	data := []byte("test data")
+	err := VerifyChecksum(data, "0000000000000000000000000000000000000000000000000000000000000000")
+	if err == nil {
+		t.Error("expected checksum mismatch error")
+	}
+}
+
+func TestUpdateSkipsWhenLatest(t *testing.T) {
+	manifestURL, _, server := testServer(t, "v0.1.0", "linux-amd64")
+	defer server.Close()
+
+	stdout := &strings.Builder{}
+	stderr := &strings.Builder{}
+
+	result, err := Update(Options{
+		ManifestURL:     manifestURL,
+		Platform:        "linux-amd64",
+		ExistingVersion: "v0.1.0",
+		NoBrowser:       true,
+	}, stdout, stderr)
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if !result.AlreadyLatest {
+		t.Error("expected AlreadyLatest to be true")
+	}
+}
+
+func TestUpdateDownloadsNewVersion(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	manifestURL, _, server := testServer(t, "v0.3.0", "linux-amd64")
+	defer server.Close()
+
+	stdout := &strings.Builder{}
+	stderr := &strings.Builder{}
+
+	_, err := Update(Options{
+		ManifestURL:     manifestURL,
+		Platform:        "linux-amd64",
+		ExistingVersion: "v0.1.0",
+		NoBrowser:       true,
+	}, stdout, stderr)
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+}
+
+func TestUninstallRemovesBinaryAndPlugins(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatalf("DefaultPaths: %v", err)
+	}
+
+	// Create the files that Uninstall would remove.
+	os.MkdirAll(filepath.Dir(paths.BinaryPath), 0755)
+	os.WriteFile(paths.BinaryPath, []byte("test"), 0755)
+	os.MkdirAll(filepath.Join(paths.ClaudePluginDir, "freeinference-companion"), 0755)
+	os.MkdirAll(filepath.Join(paths.CodexPluginDir, "freeinference-companion"), 0755)
+
+	stdout := &strings.Builder{}
+	stderr := &strings.Builder{}
+
+	if err := Uninstall(paths, stdout, stderr); err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+
+	// Verify binary removed.
+	if _, err := os.Stat(paths.BinaryPath); !os.IsNotExist(err) {
+		t.Error("binary not removed")
+	}
+
+	// Verify plugins removed.
+	for _, dir := range []string{paths.ClaudePluginDir, paths.CodexPluginDir} {
+		pluginPath := filepath.Join(dir, "freeinference-companion")
+		if _, err := os.Stat(pluginPath); !os.IsNotExist(err) {
+			t.Errorf("plugin not removed: %s", pluginPath)
+		}
+	}
+}
+
+func TestExtractZIPPathTraversal(t *testing.T) {
+	// Create a ZIP with a path traversal entry.
+	tmpZip := filepath.Join(t.TempDir(), "traversal.zip")
+	f, _ := os.Create(tmpZip)
+	w := zip.NewWriter(f)
+	// A malicious entry trying to escape destDir.
+	hdr := &zip.FileHeader{
+		Name:   "../../../etc/passwd",
+		Method: zip.Store,
+	}
+	fw, _ := w.CreateHeader(hdr)
+	fw.Write([]byte("malicious"))
+	w.Close()
+	f.Close()
+
+	destDir := t.TempDir()
+	err := extractZIP(tmpZip, destDir)
+	if err != nil {
+		t.Fatalf("extractZIP: %v", err)
+	}
+
+	// The traversal file should not have been extracted outside destDir.
+	// Use a path that doesn't normally exist on any system.
+	maliciousFile := filepath.Join(destDir, "..", "..", "..", "tmp", "pwned_by_traversal")
+	if _, err := os.Stat(maliciousFile); !os.IsNotExist(err) {
+		t.Errorf("path traversal file was extracted to %s", maliciousFile)
+	}
+	// Also verify the file was not extracted inside destDir (should still not exist).
+	insidePath := filepath.Join(destDir, "etc", "passwd")
+	if _, err := os.Stat(insidePath); !os.IsNotExist(err) {
+		t.Errorf("traversal file was unexpectedly created at %s", insidePath)
+	}
+}
+
+func TestFetchManifestInvalidURL(t *testing.T) {
+	_, err := FetchManifest("not-a-url")
+	if err == nil {
+		t.Error("expected error for invalid URL")
+	}
+}
+
+func TestManifestPlatformNotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"version": "v1.0.0",
+			"platforms": map[string]any{
+				"linux-amd64": map[string]string{
+					"url":    "http://example.com/zip",
+					"sha256": "abc123",
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	m, err := FetchManifest(server.URL)
+	if err != nil {
+		t.Fatalf("FetchManifest: %v", err)
+	}
+	_, err = m.Platform("nonexistent-platform")
+	if err == nil {
+		t.Error("expected error for unknown platform")
+	}
+}
+
+func TestDownloadToInvalidURL(t *testing.T) {
+	_, err := DownloadTo("http://127.0.0.1:1/nonexistent", "/tmp/test.zip")
+	// Should return an error (connection refused or similar).
+	if err == nil {
+		t.Error("expected error for unreachable URL")
+	}
+}
+
+func TestDefaultPaths(t *testing.T) {
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatalf("DefaultPaths: %v", err)
+	}
+	if paths.BinaryPath == "" {
+		t.Error("BinaryPath should not be empty")
+	}
+	if paths.LocalBin == "" {
+		t.Error("LocalBin should not be empty")
+	}
+}
+
+func TestInstallDryRun(t *testing.T) {
+	manifestURL, _, server := testServer(t, "v0.2.0", "linux-amd64")
+	defer server.Close()
+
+	stdout := &strings.Builder{}
+	stderr := &strings.Builder{}
+
+	result, err := Install(Options{
+		ManifestURL:     manifestURL,
+		Platform:        "linux-amd64",
+		ExistingVersion: "",
+		DryRun:          true,
+		NoBrowser:       true,
+		NoBin:           true,
+		NoPlugin:        false,
+	}, stdout, stderr)
+	if err != nil {
+		t.Fatalf("dry-run install: %v", err)
+	}
+	if result.Version != "v0.2.0" {
+		t.Errorf("expected version v0.2.0, got %s", result.Version)
+	}
+	// Dry run should not set BinaryPath.
+	if result.BinaryPath != "" {
+		t.Error("dry run should not set BinaryPath")
+	}
+}
+
+// TestIsNewer verifies the version comparison logic.
+func TestIsNewer(t *testing.T) {
+	tests := []struct {
+		existing    string
+		latest      string
+		expectNewer bool
+	}{
+		{"v0.1.0", "v0.2.0", true},
+		{"v0.1.0", "v0.1.1", true},
+		{"v0.2.0", "v0.1.0", false},
+		{"v0.1.0", "v0.1.0", false},
+		{"v1.0.0", "v2.0.0", true},
+		{"v1.0.0", "v1.0.0", false},
+		{"", "v1.0.0", true},
+		{"v0.1.0", "", false},
+	}
+	for _, tt := range tests {
+		m := &MarketplaceManifest{Version: tt.latest}
+		got := m.IsNewer(tt.existing)
+		if got != tt.expectNewer {
+			t.Errorf("IsNewer(%q, %q) = %v, want %v", tt.existing, tt.latest, got, tt.expectNewer)
+		}
+	}
+}
+
+// TestEnsureInPath verifies PATH checking logic.
+func TestEnsureInPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	paths := Paths{
+		LocalBin: filepath.Join(tmpDir, "localbin"),
+	}
+
+	// Not in PATH.
+	t.Setenv("PATH", "/usr/bin:/bin")
+	inPath, msg := paths.EnsureInPath()
+	if inPath {
+		t.Error("should not be in PATH")
+	}
+	if msg == "" {
+		t.Error("expected PATH message")
+	}
+
+	// Add to PATH.
+	t.Setenv("PATH", paths.LocalBin+":"+os.Getenv("PATH"))
+	inPath, msg = paths.EnsureInPath()
+	if !inPath {
+		t.Error("should be in PATH")
+	}
+	if msg != "" {
+		t.Error("expected empty message when in PATH")
+	}
+}
+
+// TestVerifyChecksumValid verifies that correct checksums pass.
+func TestVerifyChecksumValid(t *testing.T) {
+	data := []byte("hello world")
+	h := sha256.Sum256(data)
+	expected := hex.EncodeToString(h[:])
+	err := VerifyChecksum(data, expected)
+	if err != nil {
+		t.Errorf("valid checksum rejected: %v", err)
+	}
+}

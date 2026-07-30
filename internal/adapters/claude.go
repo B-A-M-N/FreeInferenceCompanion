@@ -500,12 +500,12 @@ func (a *ClaudeAdapter) HandleUserPromptSubmitWith(input *schema.ClaudeHookInput
 			if snap.LiveContext != nil && snap.LiveContext.UsedPercentage != nil {
 				usedPct := *snap.LiveContext.UsedPercentage
 				switch {
-				case usedPct >= 90.0:
+				case usedPct >= engine.ContextCriticalEnterThreshold():
 					contextSeverity = schema.WarningSeverityCritical
-					contextMsg = fmt.Sprintf("FreeInference: context usage is %.0f%% on %s. Compact or start a fresh session.", usedPct, snap.Model.ID)
-				case usedPct >= 80.0:
+					contextMsg = fmt.Sprintf("FreeInference: context usage is %.0f%%%% on %s. Compact or start a fresh session.", usedPct, snap.Model.ID)
+				case usedPct >= engine.ContextWarnEnterThreshold():
 					contextSeverity = schema.WarningSeverityWarn
-					contextMsg = fmt.Sprintf("FreeInference: context usage is %.0f%% on %s. Consider compacting soon.", usedPct, snap.Model.ID)
+					contextMsg = fmt.Sprintf("FreeInference: context usage is %.0f%%%% on %s. Consider compacting soon.", usedPct, snap.Model.ID)
 				}
 			}
 			if contextMsg != "" {
@@ -519,7 +519,7 @@ func (a *ClaudeAdapter) HandleUserPromptSubmitWith(input *schema.ClaudeHookInput
 					ActiveContextTokens(snap),
 					promptByteSize(input),
 					snap.Model.ContextLength,
-					engine.DefaultOutputReserve,
+					engine.DefaultOutputReserve(),
 				)
 				projectionMsg = projection.AdvisoryMessage()
 			}
@@ -564,7 +564,12 @@ func (a *ClaudeAdapter) HandleUserPromptSubmitWith(input *schema.ClaudeHookInput
 			// TTL resolves when the user sends a prompt without an idle gap
 			// (the cache is being actively used again). Uses cacheClock
 			// (derived from CacheTiming when available).
-			if snap.Warnings.CacheTTLWarningActive && !ttlWouldShow && now.Sub(cacheClock) < engine.PromptCacheTTL {
+			// Uses the provider-confirmed TTL when available, fall back to PromptCacheTTL.
+			ttlWindow := engine.PromptCacheTTL
+			if snap.CacheTiming != nil && snap.CacheTiming.CacheTTLSeconds != nil && *snap.CacheTiming.CacheTTLSeconds > 0 {
+				ttlWindow = time.Duration(*snap.CacheTiming.CacheTTLSeconds) * time.Second
+			}
+			if snap.Warnings.CacheTTLWarningActive && !ttlWouldShow && now.Sub(cacheClock) < ttlWindow {
 				snap.Warnings.CacheTTLWarningActive = false
 				events = append(events, state.Event{Type: state.EventWarningResolved, Detail: "cache_ttl_expiry"})
 			}
@@ -660,7 +665,7 @@ func shouldShowProjectionWarning(snap *schema.Snapshot, now time.Time) bool {
 	if snap.LiveContext == nil || snap.LiveContext.UsedPercentage == nil {
 		return false
 	}
-	if *snap.LiveContext.UsedPercentage < 60.0 {
+	if *snap.LiveContext.UsedPercentage < engine.ContextWatchEnterThreshold() {
 		return false
 	}
 	if snap.Warnings.LastContextShownAt != nil &&

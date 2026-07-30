@@ -64,7 +64,7 @@ func NewRefresher(client *api.Client, paths state.Paths, healthURL string) *Refr
 }
 
 // ============================================================
-// Worker path (fi refresh --worker <name>)
+// Worker path (freeinference refresh --worker <name>)
 // ============================================================
 
 // WorkerRefresh runs one refresh worker under a non-blocking process lock.
@@ -146,7 +146,7 @@ func (r *Refresher) WorkerRefresh(worker string) *RefreshResult {
 // ============================================================
 
 // RefreshIfStale synchronously refreshes any stale resource whose breaker is
-// closed. Intended for interactive use (fi refresh).
+// closed. Intended for interactive use (freeinference refresh).
 func (r *Refresher) RefreshIfStale() *RefreshResult {
 	result := &RefreshResult{}
 	now := time.Now()
@@ -195,7 +195,7 @@ func (r *Refresher) ForceRefresh() *RefreshResult {
 }
 
 // ============================================================
-// Detached coalescing (fi refresh --if-stale --detach, and hooks)
+// Detached coalescing (freeinference refresh --if-stale --detach, and hooks)
 // ============================================================
 
 // StaleWorkers returns the workers whose caches are stale and whose breakers
@@ -224,7 +224,7 @@ func StaleWorkersWithClient(paths state.Paths, healthURL string, apiKey string) 
 	return stale
 }
 
-// SpawnDetachedWorkers launches one detached `fi refresh --worker <name>`
+// SpawnDetachedWorkers launches one detached `freeinference refresh --worker <name>`
 // process per worker and returns immediately. Worker-side file locks make
 // duplicate spawns harmless.
 func SpawnDetachedWorkers(executable string, workers []string) error {

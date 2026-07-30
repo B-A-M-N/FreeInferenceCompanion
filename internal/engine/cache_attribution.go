@@ -378,7 +378,7 @@ func AttributeCacheMisses(snap *schema.Snapshot) CacheAttribution {
 		Pattern:        "unclassified", // was PatternThrashing (Finding 4)
 		Confidence:     confidence,
 		Diagnosis:      fmt.Sprintf("Cache read share is low (%.0f%%), but there is insufficient information to determine the exact cause. The provider has not exposed cache miss reason metadata.", readShare*100),
-		Recommendation: "Cache performance may improve with stable system prompts and regular compaction. Run `fi cache` for detailed metrics.",
+		Recommendation: "Cache performance may improve with stable system prompts and regular compaction. Run `freeinference cache` for detailed metrics.",
 	}
 }
 

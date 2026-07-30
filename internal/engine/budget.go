@@ -56,14 +56,14 @@ func ProjectBudget(au *schema.AccountUsage, snap *schema.Snapshot, now time.Time
 	if isCircuitBreakerOpen(circuitBreakers, "account-usage", now) {
 		return BudgetProjection{
 			Status: BudgetUnknown,
-			Detail: "Account usage data may be stale (circuit breaker open for account-usage endpoint). Run `fi refresh` to fetch fresh data.",
+			Detail: "Account usage data may be stale (circuit breaker open for account-usage endpoint). Run `freeinference refresh` to fetch fresh data.",
 		}
 	}
 
 	if au == nil {
 		return BudgetProjection{
 			Status: BudgetUnknown,
-			Detail: "Account usage data not available. Run `fi refresh` to fetch.",
+			Detail: "Account usage data not available. Run `freeinference refresh` to fetch.",
 		}
 	}
 

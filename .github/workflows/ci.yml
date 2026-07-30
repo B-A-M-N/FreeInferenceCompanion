@@ -130,8 +130,8 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
         with:
-          name: fi-linux-amd64
-          path: build/fi
+          name: freeinference-linux-amd64
+          path: build/freeinference
           if-no-files-found: error
 
   cross-build:
@@ -155,16 +155,16 @@ jobs:
         run: make build-${{ matrix.target }}
       - name: Verify static linkage
         run: |
-          file build/fi-${{ matrix.target }}
-          if file build/fi-${{ matrix.target }} | grep -q "dynamically linked"; then
+          file build/freeinference-${{ matrix.target }}
+          if file build/freeinference-${{ matrix.target }} | grep -q "dynamically linked"; then
             echo "error: ${{ matrix.target }} binary is dynamically linked"
             exit 1
           fi
       - name: Upload artifact
         uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
         with:
-          name: fi-${{ matrix.target }}
-          path: build/fi-${{ matrix.target }}
+          name: freeinference-${{ matrix.target }}
+          path: build/freeinference-${{ matrix.target }}
           if-no-files-found: error
 
   pr-packaging:
@@ -245,7 +245,7 @@ jobs:
       - name: Verify static linkage of all binaries
         run: |
           set -euo pipefail
-          for b in build/fi build/fi-linux-amd64 build/fi-linux-arm64 build/fi-darwin-amd64 build/fi-darwin-arm64; do
+          for b in build/freeinference build/freeinference-linux-amd64 build/freeinference-linux-arm64 build/freeinference-darwin-amd64 build/freeinference-darwin-arm64; do
             file "$b"
             if file "$b" | grep -q "dynamically linked"; then
               echo "error: $b is dynamically linked"

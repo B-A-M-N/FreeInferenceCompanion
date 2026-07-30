@@ -12,7 +12,7 @@ import (
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
 
-// cmdModels implements `fi models`.
+// cmdModels implements `freeinference models`.
 func cmdModels(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 	var modelName string
 	var forceRefresh bool

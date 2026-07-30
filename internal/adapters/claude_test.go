@@ -865,8 +865,18 @@ func setLastEventAge(t *testing.T, paths state.Paths, sessionID string, age time
 	snap := loadClaude(t, paths, sessionID)
 	past := time.Now().UTC().Add(-age)
 	snap.Session.LastEventAt = past
-	if snap.CacheTiming != nil && !snap.CacheTiming.LastInferenceObservedAt.IsZero() {
+	if snap.CacheTiming == nil {
+		snap.CacheTiming = &schema.CacheTiming{}
+	}
+	// Move the cache clock too (only if set — zero means "not yet observed").
+	if !snap.CacheTiming.LastInferenceObservedAt.IsZero() {
 		snap.CacheTiming.LastInferenceObservedAt = past
+	}
+	// Set a provider-confirmed TTL so EvaluateCacheTTLExpiryV2 can generate
+	// warnings. Without a confirmed TTL, V2 returns no warning.
+	if snap.CacheTiming.CacheTTLSeconds == nil {
+		ttl := 300 // 5 minutes, matching Anthropic's documented TTL
+		snap.CacheTiming.CacheTTLSeconds = &ttl
 	}
 	if err := state.SaveSnapshot(paths, schema.ClientClaudeCode, sessionID, snap); err != nil {
 		t.Fatalf("save snapshot: %v", err)
@@ -893,7 +903,7 @@ func TestClaudeCacheTTLWarningFiresAfterIdle(t *testing.T) {
 	if out == nil {
 		t.Fatal("expected a cache TTL expiry warning after 6m idle")
 	}
-	if !strings.Contains(out.SystemMessage, "prompt cache may have expired") {
+	if !strings.Contains(out.SystemMessage, "prompt cache expired") {
 		t.Errorf("expected TTL warning text, got: %q", out.SystemMessage)
 	}
 }

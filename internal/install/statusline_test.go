@@ -55,7 +55,7 @@ func TestLoadMetadata_DistinguishesNotFoundFromOtherErrors(t *testing.T) {
 // metadata must remain intact (no partial uninstall).
 func TestUninstallRefusesOnMalformedSettings(t *testing.T) {
 	home := t.TempDir()
-	if err := InstallClaudeStatusLine(home, "/opt/fi", ScopeUser, home, io.Discard); err != nil {
+	if err := InstallClaudeStatusLine(home, "/opt/freeinference", ScopeUser, home, io.Discard); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 	// Corrupt the settings file.
@@ -81,7 +81,7 @@ func TestUninstallRefusesOnMalformedSettings(t *testing.T) {
 // deleted — it is the authoritative record needed for manual reconciliation.
 func TestUninstallRetainsMetadataOnDrift(t *testing.T) {
 	home := t.TempDir()
-	if err := InstallClaudeStatusLine(home, "/opt/fi", ScopeUser, home, io.Discard); err != nil {
+	if err := InstallClaudeStatusLine(home, "/opt/freeinference", ScopeUser, home, io.Discard); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 	// Simulate the user replacing our statusLine with their own.
@@ -106,7 +106,7 @@ func TestUninstallRetainsMetadataOnDrift(t *testing.T) {
 // lost its executable bits is repaired (chmod 0755).
 func TestReinstallRepairsWrapperMode(t *testing.T) {
 	home := t.TempDir()
-	if err := InstallClaudeStatusLine(home, "/opt/fi", ScopeUser, home, io.Discard); err != nil {
+	if err := InstallClaudeStatusLine(home, "/opt/freeinference", ScopeUser, home, io.Discard); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 	// Strip executable bits from the wrapper.
@@ -114,7 +114,7 @@ func TestReinstallRepairsWrapperMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Reinstall — must repair the mode.
-	if err := InstallClaudeStatusLine(home, "/opt/fi", ScopeUser, home, io.Discard); err != nil {
+	if err := InstallClaudeStatusLine(home, "/opt/freeinference", ScopeUser, home, io.Discard); err != nil {
 		t.Fatalf("reinstall: %v", err)
 	}
 	info, err := os.Stat(wrapperPath(home))
@@ -128,7 +128,7 @@ func TestReinstallRepairsWrapperMode(t *testing.T) {
 
 func TestInstallFresh(t *testing.T) {
 	home := t.TempDir()
-	if err := InstallClaudeStatusLine(home, "/opt/bin/fi", ScopeUser, home, io.Discard); err != nil {
+	if err := InstallClaudeStatusLine(home, "/opt/bin/freeinference", ScopeUser, home, io.Discard); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 
@@ -141,11 +141,11 @@ func TestInstallFresh(t *testing.T) {
 		t.Error("wrapper must be executable")
 	}
 	content, _ := os.ReadFile(wrapper)
-	if !strings.Contains(string(content), "/opt/bin/fi") {
+	if !strings.Contains(string(content), "/opt/bin/freeinference") {
 		t.Error("wrapper should embed the resolved binary path")
 	}
-	if !strings.Contains(string(content), "status --compact --client claude-code") {
-		t.Error("wrapper should invoke fi status with the canonical client name")
+	if !strings.Contains(string(content), "status --compact --color=always --client claude-code") {
+		t.Error("wrapper should invoke freeinference status with the canonical client name")
 	}
 
 	settings := loadSettingsMap(t, home)
@@ -323,7 +323,7 @@ func TestInstallAtomicSettingsUpdate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := InstallClaudeStatusLine(home, "/opt/bin/fi", ScopeUser, home, io.Discard); err != nil {
+	if err := InstallClaudeStatusLine(home, "/opt/bin/freeinference", ScopeUser, home, io.Discard); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 
@@ -349,7 +349,7 @@ func TestInstallAtomicSettingsUpdate(t *testing.T) {
 }
 
 // TestInstallFallsBackToPATH verifies that when no binary path is recorded,
-// the wrapper still resolves `fi` from PATH at runtime rather than failing.
+// the wrapper still resolves `freeinference` from PATH at runtime rather than failing.
 func TestInstallFallsBackToPATH(t *testing.T) {
 	home := t.TempDir()
 	if err := InstallClaudeStatusLine(home, "", ScopeUser, home, io.Discard); err != nil {
@@ -357,7 +357,7 @@ func TestInstallFallsBackToPATH(t *testing.T) {
 	}
 	content, _ := os.ReadFile(wrapperPath(home))
 	body := string(content)
-	if !strings.Contains(body, "command -v fi") {
+	if !strings.Contains(body, "command -v freeinference") {
 		t.Errorf("wrapper should fall back to PATH lookup when binary is empty: %s", body)
 	}
 	// And never embed an empty path that would break the wrapper.
@@ -376,12 +376,12 @@ func TestInstallFallsBackToPATH(t *testing.T) {
 func TestInstallWithMissingBinaryOnDisk(t *testing.T) {
 	home := t.TempDir()
 	// Point at a path that doesn't exist.
-	if err := InstallClaudeStatusLine(home, "/definitely/not/installed/fi", ScopeUser, home, io.Discard); err != nil {
+	if err := InstallClaudeStatusLine(home, "/definitely/not/installed/freeinference", ScopeUser, home, io.Discard); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 	content, _ := os.ReadFile(wrapperPath(home))
 	body := string(content)
-	if !strings.Contains(body, "command -v fi") {
+	if !strings.Contains(body, "command -v freeinference") {
 		t.Errorf("wrapper must fall back to PATH when the recorded binary is missing: %s", body)
 	}
 }
@@ -407,7 +407,7 @@ func TestReinstallPreservesOriginalPreInstallValue(t *testing.T) {
 	}
 
 	// First install records the precious original.
-	if err := InstallClaudeStatusLine(home, "/opt/fi", ScopeUser, home, io.Discard); err != nil {
+	if err := InstallClaudeStatusLine(home, "/opt/freeinference", ScopeUser, home, io.Discard); err != nil {
 		t.Fatalf("first install: %v", err)
 	}
 	metaAfter1, _ := loadMetadataForTest(t, home)
@@ -416,7 +416,7 @@ func TestReinstallPreservesOriginalPreInstallValue(t *testing.T) {
 	}
 
 	// Second install — must NOT collapse the prior-history pointer.
-	if err := InstallClaudeStatusLine(home, "/opt/fi", ScopeUser, home, io.Discard); err != nil {
+	if err := InstallClaudeStatusLine(home, "/opt/freeinference", ScopeUser, home, io.Discard); err != nil {
 		t.Fatalf("reinstall: %v", err)
 	}
 	metaAfter2, _ := loadMetadataForTest(t, home)
@@ -451,7 +451,7 @@ func TestReinstallPreservesOriginalPreInstallValue(t *testing.T) {
 // their customization.
 func TestUninstallRefusesToDeleteUserCustomization(t *testing.T) {
 	home := t.TempDir()
-	if err := InstallClaudeStatusLine(home, "/opt/fi", ScopeUser, home, io.Discard); err != nil {
+	if err := InstallClaudeStatusLine(home, "/opt/freeinference", ScopeUser, home, io.Discard); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 	// Simulate the user replacing our statusLine with their own.
@@ -494,7 +494,7 @@ func TestInstallPreservesCustomFileMode(t *testing.T) {
 	if err := os.WriteFile(settingsPath(home), []byte(`{"theme":"dark"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := InstallClaudeStatusLine(home, "/opt/fi", ScopeUser, home, io.Discard); err != nil {
+	if err := InstallClaudeStatusLine(home, "/opt/freeinference", ScopeUser, home, io.Discard); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 	info, err := os.Stat(settingsPath(home))
@@ -522,16 +522,16 @@ func TestReinstallAfterUserKeepsCustomOriginal(t *testing.T) {
 	if err := os.WriteFile(settingsPath(home), data, 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := InstallClaudeStatusLine(home, "/opt/fi", ScopeUser, home, io.Discard); err != nil {
+	if err := InstallClaudeStatusLine(home, "/opt/freeinference", ScopeUser, home, io.Discard); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 	// User does NOT touch statusLine — a reinstall should refresh cleanly.
-	if err := InstallClaudeStatusLine(home, "/opt/fi/v2", ScopeUser, home, io.Discard); err != nil {
+	if err := InstallClaudeStatusLine(home, "/opt/freeinference/v2", ScopeUser, home, io.Discard); err != nil {
 		t.Fatalf("reinstall: %v", err)
 	}
 	// Wrapper should now embed the v2 path.
 	content, _ := os.ReadFile(wrapperPath(home))
-	if !strings.Contains(string(content), "/opt/fi/v2") {
+	if !strings.Contains(string(content), "/opt/freeinference/v2") {
 		t.Errorf("reinstall did not refresh the wrapper binary path: %s", string(content))
 	}
 }

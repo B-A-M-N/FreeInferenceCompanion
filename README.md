@@ -13,13 +13,13 @@ Community-built and unofficial. Not affiliated with or endorsed by FreeInference
 make install
 
 # Run diagnostics
-fi doctor
+freeinference doctor
 
 # Browse available models
-fi models --refresh
+freeinference models --refresh
 
 # Install the Claude Code status line (composes with any existing one)
-fi status-line install
+freeinference status-line install
 ```
 
 Supported platforms: Linux amd64, Linux arm64, macOS amd64, macOS arm64.
@@ -28,37 +28,37 @@ The release binary is fully static (`CGO_ENABLED=0`, verified with `ldd`).
 ## Architecture
 
 ```
-fi CLI (Go, static binary)
+freeinference CLI (Go, static binary)
   ├── reads/writes ~/.cache/freeinference-companion/
   │   ├── global/          # Provider health, model catalog, circuit breakers,
   │   │                    # session index, refresh locks
   │   └── sessions/        # Per-session snapshots and advisory locks
   ├── commands: status, sessions, snapshot, render, models, doctor,
   │             report, dashboard, context, refresh, status-line
-  └── hook: fi hook claude-code|codex <event>
+  └── hook: freeinference hook claude-code|codex <event>
 
-Claude Code plugin → scripts/run-hook.sh → fi hook claude-code <event>
-Codex plugin       → scripts/run-hook.sh → fi hook codex <event>
+Claude Code plugin → scripts/run-hook.sh → freeinference hook claude-code <event>
+Codex plugin       → scripts/run-hook.sh → freeinference hook codex <event>
 ```
 
-Plugin hooks resolve the `fi` binary from `PATH`, the plugin-bundled `bin/fi`,
-or `~/.local/bin/fi` — and exit 0 no matter what.
+Plugin hooks resolve the `freeinference` binary from `PATH`, the plugin-bundled `bin/freeinference`,
+or `~/.local/bin/freeinference` — and exit 0 no matter what.
 
 ### Where the data shows up
 
 FreeInference Companion is **not a separate TUI**. It composes into the
 surfaces the user already has:
 
-- **Claude Code** — the status line command (`fi status --compact`) renders
+- **Claude Code** — the status line command (`freeinference status --compact`) renders
   into the client's existing statusline footer, below the prompt bar. The
-  installer (`fi status-line install`) preserves and replays stdin to any
+  installer (`freeinference status-line install`) preserves and replays stdin to any
   prior statusline, so an existing footer segment keeps working alongside
   ours. Nothing takes over the prompt or the transcript.
 - **Codex** — Codex has no arbitrary script-backed statusline in the same
-  sense; we expose the data through `fi status` / `fi snapshot --json` /
-  `fi render` for whoever the user wires in (their shell prompt, DevDesktop,
+  sense; we expose the data through `freeinference status` / `freeinference snapshot --json` /
+  `freeinference render` for whoever the user wires in (their shell prompt, DevDesktop,
   tmux status bar, etc.).
-- **External integrators** — `fi snapshot --json` and `fi render --mode line`
+- **External integrators** — `freeinference snapshot --json` and `freeinference render --mode line`
   are stable contracts. DevDesktop, tmux, and similar panels can subscribe
   without redesigning core state.
 
@@ -71,7 +71,7 @@ surfaces the user already has:
 - **Surface eligibility is gated by seven checks** — runtime active, client matches, session matches, session active, activation identity matches, observation fresh, provider confirmed FreeInference; any gate failing produces zero bytes
 - **Provider detection gates all warnings** — no FreeInference warning or health symbol ever appears in a non-FreeInference session
 - **Background refreshes are detached and coalesced across processes** — file-lock single-flight, per-endpoint circuit breakers (2→30min backoff), `Retry-After` honored
-- **No inference probes for monitoring** — `fi doctor --probe --model <name>` is manual only, marked `X-Probe: synthetic`
+- **No inference probes for monitoring** — `freeinference doctor --probe --model <name>` is manual only, marked `X-Probe: synthetic`
 - **Advisory warnings, never blocking** — context pressure, projection overflow, cache-low with root-cause attribution, cache TTL expiry; all labeled with confidence, all advisory
 - **Schema validation + quarantine** — corrupt or unsupported state files are renamed aside so subsequent writes start fresh; hooks never block on bad state
 - **Sanitized structured event log** — per-session `events.jsonl` records only event types and short categories; never prompt text, responses, transcripts, paths, keys, or raw error bodies
@@ -80,19 +80,19 @@ surfaces the user already has:
 
 | Command | Description |
 |---------|-------------|
-| `fi status [--compact] [--client <type>] [--session <id>]` | Show session metrics (resolves the current session automatically) |
-| `fi sessions` | List known sessions from the local index |
-| `fi snapshot --json [--session <id>]` | Machine-readable normalized view model |
-| `fi render --mode line\|expanded [--session <id>]` | Stable line/expanded render for panels |
-| `fi models [--model <name>] [--refresh]` | List FreeInference models |
-| `fi doctor [--probe --model <name>]` | Diagnose connectivity and configuration |
-| `fi report [--client <type>] [--session <id>] [--format markdown\|json]` | Generate a sanitized support report (includes budget projection) |
-| `fi dashboard [--status] [--print-url]` | Open FreeInference account dashboard (`--status` for service health page) |
-| `fi context [--session <id>]` | Show context pressure information |
-| `fi cache [--session <id>]` | Show cache efficiency analysis with root-cause attribution |
-| `fi refresh [--force] [--if-stale --detach] [--worker models\|health\|account-usage]` | Refresh cached provider metadata |
-| `fi hook <client> <event>` | Process a lifecycle hook event (internal) |
-| `fi status-line install\|uninstall` | Manage the Claude Code status line |
+| `freeinference status [--compact] [--client <type>] [--session <id>]` | Show session metrics (resolves the current session automatically) |
+| `freeinference sessions` | List known sessions from the local index |
+| `freeinference snapshot --json [--session <id>]` | Machine-readable normalized view model |
+| `freeinference render --mode line\|expanded [--session <id>]` | Stable line/expanded render for panels |
+| `freeinference models [--model <name>] [--refresh]` | List FreeInference models |
+| `freeinference doctor [--probe --model <name>]` | Diagnose connectivity and configuration |
+| `freeinference report [--client <type>] [--session <id>] [--format markdown\|json]` | Generate a sanitized support report (includes budget projection) |
+| `freeinference dashboard [--status] [--print-url]` | Open FreeInference account dashboard (`--status` for service health page) |
+| `freeinference context [--session <id>]` | Show context pressure information |
+| `freeinference cache [--session <id>]` | Show cache efficiency analysis with root-cause attribution |
+| `freeinference refresh [--force] [--if-stale --detach] [--worker models\|health\|account-usage]` | Refresh cached provider metadata |
+| `freeinference hook <client> <event>` | Process a lifecycle hook event (internal) |
+| `freeinference status-line install\|uninstall` | Manage the Claude Code status line |
 
 ## Environment
 
@@ -144,7 +144,7 @@ cache before the real query. Gated on ≥10K active context and a
 
 ### Cache miss pattern attribution
 
-`fi cache` classifies cache miss patterns with likely diagnosis instead of
+`freeinference cache` classifies cache miss patterns with likely diagnosis instead of
 generic diagnostics:
 
 | Pattern | Meaning | Example cause |
@@ -159,7 +159,7 @@ the likely cause at the moment it fires.
 
 ### Token budget projection
 
-`fi status` and `fi report` show account quota status with a projected
+`freeinference status` and `freeinference report` show account quota status with a projected
 exhaustion timeline based on the session's observed token burn rate:
 
 ```
@@ -214,8 +214,8 @@ log) but produce no cache/context telemetry because Codex does not expose
 token counts in hook payloads.
 
 After installing the plugin in Codex, the following skills are available:
-`$fi-status`, `$fi-models`, `$fi-doctor`, `$fi-report`, `$fi-dashboard`,
-`$fi-cache`. These work regardless of hook trust state.
+`$freeinference-status`, `$freeinference-models`, `$freeinference-doctor`, `$freeinference-report`, `$freeinference-dashboard`,
+`$freeinference-cache`. These work regardless of hook trust state.
 
 Codex exposes no live token telemetry, so context and cache metrics stay
 `unknown` for Codex sessions — they are never fabricated.
@@ -223,7 +223,7 @@ Codex exposes no live token telemetry, so context and cache metrics stay
 ## Development
 
 ```bash
-make build      # Static build into build/fi (ldd-verified)
+make build      # Static build into build/freeinference (ldd-verified)
 make test       # Run tests
 make test-race  # Run tests with the race detector
 make vet        # Run go vet

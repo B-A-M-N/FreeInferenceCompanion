@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # FreeInference Companion — hook runner for Claude Code.
-# Resolves the fi binary from PATH or the plugin-bundled bin/.
+# Resolves the freeinference binary from PATH or the plugin-bundled bin/.
 # Always exits 0 — hooks must never block Claude Code.
 set -u
 
@@ -11,12 +11,14 @@ fi
 
 event="${1:-}"
 
-if command -v fi >/dev/null 2>&1; then
-    command fi hook claude-code "$event" || true
+if type -P freeinference >/dev/null 2>&1; then
+    freeinference hook claude-code "$event" || true
     exit 0
 fi
 
-plugin_root="${CLAUDE_PLUGIN_ROOT:-}"
+# Claude Code sets CLAUDE_PLUGIN_ROOT; some builds also export PLUGIN_ROOT.
+# Accept both so the wrapper keeps working across versions.
+plugin_root="${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}"
 
 if [[ -n "$plugin_root" ]]; then
     # Try platform-specific binary first, then fall back to a generic one.
@@ -28,7 +30,7 @@ if [[ -n "$plugin_root" ]]; then
         aarch64) arch_name="arm64" ;;
     esac
     plat="$os_name-$arch_name"
-    for candidate in "$plugin_root/bin/$plat/fi" "$plugin_root/bin/fi"; do
+    for candidate in "$plugin_root/bin/$plat/freeinference" "$plugin_root/bin/freeinference" "$plugin_root/freeinference"; do
         if [[ -n "$candidate" && -x "$candidate" ]]; then
             "$candidate" hook claude-code "$event" || true
             exit 0

@@ -1,6 +1,5 @@
 /build/
 /release/
-/fi
 /.claude/
 /.crush/
 *.test
@@ -17,4 +16,3 @@ plugins/codex/bin/
 /hooks/
 /plugin.json
 /scripts/
-/skills/

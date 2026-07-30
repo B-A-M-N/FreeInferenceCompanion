@@ -186,27 +186,11 @@ func TestUnknownTTLNoDefinitiveWarning(t *testing.T) {
 	now := time.Now()
 	decision := EvaluateCacheTTLExpiryV2(snap, 50000, time.Now().Add(-10*time.Minute), now)
 
-	// Even with 10min idle, V2 should still warn (uses PromptCacheTTL fallback)
-	// BUT the message should say "may have expired" not "expired".
-	if !decision.Warn {
-		t.Error("should warn after idle exceeds PromptCacheTTL")
-	}
-
-	msg := CacheTTLWarningMessageV2(snap, 10, 50000)
-	if msg == "" {
-		t.Fatal("message should not be empty")
-	}
-	// Unknown TTL → should say "may have expired" not "expired"
-	if containsString(msg, "may have expired") {
-		// Correct: uncertainty language
-	} else {
-		t.Errorf("expected uncertainty language, got: %s", msg)
+	// Without provider-confirmed TTL data, V2 does not warn.
+	if decision.Warn {
+		t.Error("should not warn without provider-confirmed TTL")
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Test: Provider-confirmed TTL generates correct warning
-// ---------------------------------------------------------------------------
 
 func TestProviderConfirmedTTLGeneratesCorrectWarning(t *testing.T) {
 	snap := &schema.Snapshot{
@@ -272,8 +256,8 @@ func TestLegacyFallbackToLastEventAt(t *testing.T) {
 
 	now := time.Now()
 	decision := EvaluateCacheTTLExpiryV2(snap, 50000, snap.Session.LastEventAt, now)
-	if !decision.Warn {
-		t.Error("legacy session should fall back to lastEventAt and warn")
+	if decision.Warn {
+		t.Error("legacy session without CacheTiming should not warn")
 	}
 }
 
@@ -355,8 +339,8 @@ func TestZeroProviderTTLFallback(t *testing.T) {
 	decision := EvaluateCacheTTLExpiryV2(snap, 50000, time.Now().Add(-10*time.Minute), now)
 	// 0 should not be treated as a valid TTL, so falls back to PromptCacheTTL (5min).
 	// 10min idle > 5min → should warn.
-	if !decision.Warn {
-		t.Error("zero TTL should fall back to PromptCacheTTL and warn after 10min")
+	if decision.Warn {
+		t.Error("zero TTL should not warn without provider-confirmed TTL")
 	}
 }
 

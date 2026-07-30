@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"github.com/b-a-m-n/freeinference-companion/internal/adapters"
 	"github.com/b-a-m-n/freeinference-companion/internal/api"
 	"github.com/b-a-m-n/freeinference-companion/internal/config"
+	"github.com/b-a-m-n/freeinference-companion/internal/runtime"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
@@ -19,11 +21,12 @@ type doctorCheck struct {
 	result api.CheckResult
 }
 
-// cmdDoctor implements `fi doctor`. All independent checks run; the command
+// cmdDoctor implements `freeinference doctor`. All independent checks run; the command
 // exits 1 if any check failed, 2 on usage error, 0 otherwise.
 func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 	probe := false
 	probeModel := ""
+	jsonOut := false
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--probe":
@@ -35,6 +38,8 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 			}
 			i++
 			probeModel = args[i]
+		case "--json":
+			jsonOut = true
 		default:
 			if strings.HasPrefix(args[i], "--") {
 				fmt.Fprintf(stdout, "usage error: unknown flag %q\n", args[i])
@@ -50,9 +55,6 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 		checks = append(checks, doctorCheck{name, r})
 	}
 
-	fmt.Fprintln(stdout, "FreeInference Doctor")
-	fmt.Fprintln(stdout, repeat("-", 60))
-
 	// 1. Cache directory exists and is writable.
 	add("Cache directory", checkCacheDir(paths))
 
@@ -61,7 +63,7 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 	add("Configuration", checkConfigValid())
 
 	// 3. Binary resolvable.
-	add("fi binary", checkBinaryResolvable())
+	add("freeinference binary", checkBinaryResolvable())
 
 	// 4. Claude hook configuration present.
 	add("Claude hook config", checkClaudeHookConfig())
@@ -81,9 +83,6 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 	if healthURL := os.Getenv("FI_HEALTH_URL"); healthURL != "" {
 		sanitized, err := api.NormalizeHealthURL(healthURL)
 		if err != nil {
-			// Never echo raw healthURL — it may contain userinfo or a
-			// credential-bearing query string. Report only the validation
-			// failure category.
 			add("Health source", api.CheckResult{State: api.CheckFail, Detail: "configured but invalid: " + err.Error()})
 		} else if adapters.IsFreeInferenceURL(sanitized.Origin) {
 			add("Health source", api.CheckResult{State: api.CheckPass, Detail: "configured (" + sanitized.Origin + ")"})
@@ -95,54 +94,57 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 	}
 
 	// 8. Model catalog reachable.
-	client, clientErr := newAPIClient()
-	if clientErr != nil {
-		// newAPIClient returned an error because the base URL failed
-		// validation or the endpoint is not an approved FreeInference host
-		// while an API key is set. Don't make a request — report the
-		// configuration error. All probe-dependent checks are skipped.
-		add("API endpoint", api.CheckResult{State: api.CheckFail, Detail: endpointFailDetail(clientErr)})
-		add("Model catalog", api.CheckResult{State: api.CheckUnknown, Detail: "skipped due to invalid endpoint"})
-		add("API key format", api.CheckResult{State: api.CheckUnknown, Detail: "skipped due to invalid endpoint"})
-		add("Authentication", api.CheckResult{State: api.CheckUnknown, Detail: "skipped due to invalid endpoint"})
-		add("Model access", api.CheckResult{State: api.CheckUnknown, Detail: "skipped due to invalid endpoint"})
+	// In disabled mode, skip all network-dependent checks.
+	activation := runtime.Evaluate()
+	disabled := os.Getenv("FI_DISABLED") == "1" || activation.Disabled
+	if disabled {
+		add("Model catalog", api.CheckResult{State: api.CheckUnknown, Detail: "skipped - disabled"})
+		add("API key format", api.CheckResult{State: api.CheckUnknown, Detail: "skipped - disabled"})
+		add("Authentication", api.CheckResult{State: api.CheckUnknown, Detail: "skipped - disabled"})
+		add("Model access", api.CheckResult{State: api.CheckUnknown, Detail: "skipped - disabled"})
 	} else {
-		probeResult := client.Probe()
-		add("API endpoint", probeResult.Endpoint)
-		add("Model catalog", probeResult.Catalog)
+		client, clientErr := newAPIClient()
+		if clientErr != nil {
+			add("API endpoint", api.CheckResult{State: api.CheckFail, Detail: endpointFailDetail(clientErr)})
+			add("Model catalog", api.CheckResult{State: api.CheckUnknown, Detail: "skipped due to invalid endpoint"})
+			add("API key format", api.CheckResult{State: api.CheckUnknown, Detail: "skipped due to invalid endpoint"})
+			add("Authentication", api.CheckResult{State: api.CheckUnknown, Detail: "skipped due to invalid endpoint"})
+			add("Model access", api.CheckResult{State: api.CheckUnknown, Detail: "skipped due to invalid endpoint"})
+		} else {
+			probeResult := client.Probe()
+			add("API endpoint", probeResult.Endpoint)
+			add("Model catalog", probeResult.Catalog)
 
-		// Authentication is only claimed when verified by a real authenticated
-		// operation — never inferred from key presence.
-		if os.Getenv("FREEINFERENCE_API_KEY") != "" {
-			if api.VerifyAPIKey(os.Getenv("FREEINFERENCE_API_KEY")) {
-				add("API key format", api.CheckResult{State: api.CheckPass, Detail: "present, format valid (not verified)"})
+			if os.Getenv("FREEINFERENCE_API_KEY") != "" {
+				if api.VerifyAPIKey(os.Getenv("FREEINFERENCE_API_KEY")) {
+					add("API key format", api.CheckResult{State: api.CheckPass, Detail: "present, format valid (not verified)"})
+				} else {
+					add("API key format", api.CheckResult{State: api.CheckUnknown, Detail: "unusual format"})
+				}
 			} else {
-				add("API key format", api.CheckResult{State: api.CheckUnknown, Detail: "unusual format"})
+				add("API key format", api.CheckResult{State: api.CheckUnknown, Detail: "not set"})
 			}
-		} else {
-			add("API key format", api.CheckResult{State: api.CheckUnknown, Detail: "not set"})
+			add("Authentication", probeResult.Authentication)
+			add("Model access", probeResult.ModelAccess)
 		}
-		add("Authentication", probeResult.Authentication)
-		add("Model access", probeResult.ModelAccess)
-	}
 
-	// 9. Optional synthetic inference probe (explicit consent + model required).
-	if probe {
-		model := probeModel
-		if model == "" {
-			add("Inference probe", api.CheckResult{State: api.CheckUnknown, Detail: "no model given -- pass --model to specify a model for the synthetic probe"})
-		} else if client == nil {
-			// Endpoint validation failed earlier; cannot probe inference against
-			// a misconfigured or unapproved host. Skip rather than panic.
-			add("Inference probe", api.CheckResult{State: api.CheckUnknown, Detail: "skipped due to invalid endpoint"})
-		} else {
-			pr := client.ProbeInference(model)
-			add("Probe endpoint", pr.Endpoint)
-			add("Probe authentication", pr.Authentication)
-			add("Probe model access", pr.ModelAccess)
+		// 9. Optional synthetic inference probe (explicit consent + model required).
+		if probe {
+			model := probeModel
+			if model == "" {
+				add("Inference probe", api.CheckResult{State: api.CheckUnknown, Detail: "no model given -- pass --model to specify a model for the synthetic probe"})
+			} else if client == nil {
+				add("Inference probe", api.CheckResult{State: api.CheckUnknown, Detail: "skipped due to invalid endpoint"})
+			} else {
+				pr := client.ProbeInference(model)
+				add("Probe endpoint", pr.Endpoint)
+				add("Probe authentication", pr.Authentication)
+				add("Probe model access", pr.ModelAccess)
+			}
 		}
 	}
 
+	// 10. Circuit breaker status.
 	// 10. Circuit breaker status.
 	gs := loadGlobal(paths)
 	if len(gs.CircuitBreakers) > 0 {
@@ -156,7 +158,6 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 				detail += fmt.Sprintf(", retry: %s", cb.NextRetryAt.Format("15:04:05"))
 			}
 			detail += ")"
-			// An open circuit breaker is a failure, not a pass.
 			if cb.State == schema.CircuitOpen {
 				add(fmt.Sprintf("Circuit: %s", cb.Endpoint), api.CheckResult{State: api.CheckFail, Detail: detail})
 			} else {
@@ -182,11 +183,35 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 			symbol = "✗"
 			failures++
 		}
-		line := fmt.Sprintf("%-22s %s", c.name+":", symbol)
-		if c.result.Detail != "" {
-			line += " " + c.result.Detail
+		if !jsonOut {
+			line := fmt.Sprintf("%-22s %s", c.name+":", symbol)
+			if c.result.Detail != "" {
+				line += " " + c.result.Detail
+			}
+			fmt.Fprintln(stdout, line)
 		}
-		fmt.Fprintln(stdout, line)
+	}
+
+	if jsonOut {
+		type doctorResult struct {
+			Name   string          `json:"name"`
+			Result api.CheckResult `json:"result"`
+		}
+		results := make([]doctorResult, len(checks))
+		for i, c := range checks {
+			results[i] = doctorResult{Name: c.name, Result: c.result}
+		}
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		enc.Encode(map[string]any{
+			"results":  results,
+			"failures": failures,
+			"warnings": warnings,
+		})
+		if failures > 0 {
+			return 1
+		}
+		return 0
 	}
 
 	fmt.Fprintln(stdout)
@@ -264,11 +289,11 @@ func checkBinaryResolvable() api.CheckResult {
 	case onPath && runningBinary:
 		return api.CheckResult{State: api.CheckPass, Detail: "on PATH"}
 	case runningBinary:
-		// Binary exists but `fi` is not on PATH — hooks configured to call
-		// `fi` by name will fail to resolve it.
-		return api.CheckResult{State: api.CheckFail, Detail: "running binary found, but `fi` is not on PATH — plugin hooks may not resolve it"}
+		// Binary exists but `freeinference` is not on PATH — hooks configured to call
+		// `freeinference` by name will fail to resolve it.
+		return api.CheckResult{State: api.CheckFail, Detail: "running binary found, but `freeinference` is not on PATH — plugin hooks may not resolve it"}
 	default:
-		return api.CheckResult{State: api.CheckFail, Detail: "fi not resolvable"}
+		return api.CheckResult{State: api.CheckFail, Detail: "freeinference not resolvable"}
 	}
 }
 
@@ -376,10 +401,10 @@ func endpointFailDetail(err error) string {
 func lookPathFI() (string, error) {
 	paths := os.Getenv("PATH")
 	for _, dir := range filepath.SplitList(paths) {
-		candidate := filepath.Join(dir, "fi")
+		candidate := filepath.Join(dir, "freeinference")
 		if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode()&0111 != 0 {
 			return candidate, nil
 		}
 	}
-	return "", fmt.Errorf("fi not found on PATH")
+	return "", fmt.Errorf("freeinference not found on PATH")
 }

@@ -1,6 +1,6 @@
 .PHONY: build test test-race vet fmt-check plugin-syntax-check plugin-validate check release release-check checksums clean install lint tidy tidy-check mod-verify clean-tree-check security-scan smoke bench bench-ci run package package-smoke plugin-clean-install sbom provenance
 
-BINARY=fi
+BINARY=freeinference
 BUILD_DIR=build
 VERSION?=$(shell git describe --tags --always --dirty 2>/dev/null || echo "0.1.0-dev")
 COMMIT?=$(shell git rev-parse HEAD 2>/dev/null || echo "dev")
@@ -75,11 +75,11 @@ checksums:
 # reproducible and traceable to a committed state.
 #
 # Source archives (tar.gz) have a single versioned top-level directory so
-# extraction never pollutes the cwd. Each archive contains fi, README, and
+# extraction never pollutes the cwd. Each archive contains freeinference, README, and
 # LICENSE under freeinference-companion-<version>-<plat>/.
 #
 # Plugin bundles (zip) preserve the vendor's expected layout:
-#   .claude-plugin/plugin.json, hooks/, scripts/, skills/, bin/<plat>/fi
+#   .claude-plugin/plugin.json, hooks/, scripts/, skills/, bin/<plat>/freeinference
 #   .codex-plugin/plugin.json, hooks/, scripts/, skills/, bin/<plat>/fi
 # The version is patched only on the staged copy; source manifests are
 # never mutated.
@@ -93,7 +93,7 @@ package: build-all plugin-bin
 		exit 1; \
 	fi
 	@REL_VERSION=$$(echo "$(VERSION)" | sed 's/^v//' | sed 's/-.*//'); \
-	staging="$$(mktemp -d "$${TMPDIR:-/tmp}/fi-release-stage.XXXXXX")"; \
+	staging="$$(mktemp -d "$${TMPDIR:-/tmp}/freeinference-release-stage.XXXXXX")"; \
 	trap 'rm -rf "$$staging"' EXIT; \
 	rm -rf $(RELEASE_DIR); \
 	mkdir -p $(RELEASE_DIR); \
@@ -104,7 +104,7 @@ package: build-all plugin-bin
 		archive_name="freeinference-companion-$$REL_VERSION-$$p"; \
 		stage_dir="$$staging/$$archive_name"; \
 		mkdir -p "$$stage_dir"; \
-		install -m 0755 $(BUILD_DIR)/$(BINARY)-$$p "$$stage_dir/fi"; \
+		install -m 0755 $(BUILD_DIR)/$(BINARY)-$$p "$$stage_dir/$(BINARY)"; \
 		cp LICENSE README.md "$$stage_dir/"; \
 		archive="$(RELEASE_DIR)/$$archive_name.tar.gz"; \
 		tar -czf "$$archive" -C "$$staging" "$$archive_name"; \
@@ -144,8 +144,8 @@ package: build-all plugin-bin
 	echo "packaging complete"
 
 # plugin-bin builds all platform binaries into each plugin's bin/ directory
-# so that the installed hook wrappers can find a working fi binary without
-# relying on the user having fi on PATH or pre-installed.
+# so that the installed hook wrappers can find a working freeinference binary without
+# relying on the user having freeinference on PATH or pre-installed.
 plugin-bin: build-all
 	@mkdir -p plugins/claude-code/bin plugins/codex/bin
 	@for p in $(PLATFORMS); do \
@@ -166,7 +166,7 @@ plugin-bin: build-all
 # Validates that source archives have a versioned top-level directory and that
 # plugin bundles preserve the vendor-expected manifest directory layout.
 package-smoke:
-	@tmp="$$(mktemp -d "$${TMPDIR:-/tmp}/fi-pkg-smoke.XXXXXX")"; \
+	@tmp="$$(mktemp -d "$${TMPDIR:-/tmp}/freeinference-pkg-smoke.XXXXXX")"; \
 	trap 'rm -rf "$$tmp"' EXIT; \
 	cur="$$(go env GOOS)-$$(go env GOARCH)"; \
 	REL_VERSION=$$(echo "$(VERSION)" | sed 's/^v//' | sed 's/-.*//'); \
@@ -183,8 +183,8 @@ package-smoke:
 		if [ ! -d "$$extract/$$archive_name" ]; then \
 			echo "FAIL: $$p archive missing top-level dir $$archive_name"; exit 1; \
 		fi; \
-		if [ ! -x "$$extract/$$archive_name/fi" ]; then \
-			echo "FAIL: $$p archive fi not executable"; exit 1; \
+		if [ ! -x "$$extract/$$archive_name/$(BINARY)" ]; then \
+			echo "FAIL: $$p archive $(BINARY) not executable"; exit 1; \
 		fi; \
 		if [ ! -f "$$extract/$$archive_name/README.md" ] || [ ! -f "$$extract/$$archive_name/LICENSE" ]; then \
 			echo "FAIL: $$p archive missing README.md or LICENSE"; exit 1; \
@@ -195,7 +195,7 @@ package-smoke:
 	extract="$$tmp/extract-$$cur"; \
 	mkdir -p "$$extract"; \
 	tar -xzf "$(RELEASE_DIR)/freeinference-companion-$$REL_VERSION-$$cur.tar.gz" -C "$$extract"; \
-	bin="$$extract/freeinference-companion-$$REL_VERSION-$$cur/fi"; \
+	bin="$$extract/freeinference-companion-$$REL_VERSION-$$cur/$(BINARY)"; \
 	if "$$bin" help >/dev/null 2>&1; then \
 		echo "smoke OK: $$cur (binary executes)"; \
 	else \
@@ -227,11 +227,11 @@ package-smoke:
 	echo "package smoke tests passed"
 
 # plugin-clean-install extracts each plugin ZIP into a temp directory with an
-# empty HOME, removes `fi` from PATH, and exercises the hook wrapper. The
+# empty HOME, removes `freeinference` from PATH, and exercises the hook wrapper. The
 # wrapper must locate the bundled platform binary and exit zero. This proves
-# that a fresh install with no preinstalled fi binary still works.
+# that a fresh install with no preinstalled freeinference binary still works.
 plugin-clean-install: package
-	@tmpdir="$$(mktemp -d "$${TMPDIR:-/tmp}/fi-plugin.XXXXXX")"; \
+	@tmpdir="$$(mktemp -d "$${TMPDIR:-/tmp}/freeinference-plugin.XXXXXX")"; \
 	trap 'rm -rf "$$tmpdir"' EXIT; \
 	empty_path="$$tmpdir/empty-bin"; \
 	mkdir -p "$$empty_path"; \
@@ -247,7 +247,7 @@ plugin-clean-install: package
 		hooks_file="$$edir/hooks/hooks.json"; \
 		test -f "$$hooks_file" || { echo "FAIL: $$(basename $$z) missing hooks/hooks.json"; exit 1; }; \
 		plat="$$(uname -s | tr '[:upper:]' '[:lower:]')-$$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"; \
-		bin="$$edir/bin/$$plat/fi"; \
+		bin="$$edir/bin/$$plat/$(BINARY)"; \
 		test -x "$$bin" || { echo "FAIL: $$(basename $$z) missing bundled binary $$plat"; exit 1; }; \
 		CLAUDE_PLUGIN_ROOT="$$edir" \
 			HOME="$$empty_home" \
@@ -268,7 +268,7 @@ plugin-clean-install: package
 		hooks_file="$$edir/hooks/hooks.json"; \
 		test -f "$$hooks_file" || { echo "FAIL: $$(basename $$z) missing hooks/hooks.json"; exit 1; }; \
 		plat="$$(uname -s | tr '[:upper:]' '[:lower:]')-$$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"; \
-		bin="$$edir/bin/$$plat/fi"; \
+		bin="$$edir/bin/$$plat/$(BINARY)"; \
 		test -x "$$bin" || { echo "FAIL: $$(basename $$z) missing bundled binary $$plat"; exit 1; }; \
 		PLUGIN_ROOT="$$edir" \
 			HOME="$$empty_home" \
@@ -430,18 +430,18 @@ run:
 # reads or mutates the operator's real cache, and never inherits real
 # credentials. Each command is asserted to exit cleanly.
 smoke: build
-	tmp="$$(mktemp -d "$${TMPDIR:-/tmp}/fi-smoke.XXXXXX")"; \
+	tmp="$$(mktemp -d "$${TMPDIR:-/tmp}/freeinference-smoke.XXXXXX")"; \
 	trap 'rm -rf "$$tmp"' EXIT; \
 	HOME="$$tmp/home" \
 	FI_CACHE_DIR="$$tmp/cache" \
 	FI_NO_BACKGROUND=1 \
 	FREEINFERENCE_API_KEY="" \
 	FREEINFERENCE_BASE_URL="" \
-	./$(BUILD_DIR)/$(BINARY) help || { echo "FAIL: fi help"; exit 1; }; \
+	./$(BUILD_DIR)/$(BINARY) help || { echo "FAIL: freeinference help"; exit 1; }; \
 	HOME="$$tmp/home" \
 	FI_CACHE_DIR="$$tmp/cache" \
 	FI_NO_BACKGROUND=1 \
 	FREEINFERENCE_API_KEY="" \
 	FREEINFERENCE_BASE_URL="" \
-	./$(BUILD_DIR)/$(BINARY) sessions || { echo "FAIL: fi sessions"; exit 1; }; \
+	./$(BUILD_DIR)/$(BINARY) sessions || { echo "FAIL: freeinference sessions"; exit 1; }; \
 	echo "Smoke test complete"

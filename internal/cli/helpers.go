@@ -61,44 +61,48 @@ func displaySessionID(id string, reveal bool) string {
 // --include-identifiers flags. Rejects unknown flags (arguments starting
 // with "--" that aren't recognized) and missing flag values.
 // Returns an error describing the first invalid input.
-func parseClientSessionFlags(args []string) (clientType, sessionID, format string, reveal bool, err error) {
+func parseClientSessionFlags(args []string) (clientType, sessionID, format string, reveal, jsonOut bool, err error) {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if a == "--include-identifiers" {
 			reveal = true
 			continue
 		}
+		if a == "--json" {
+			jsonOut = true
+			continue
+		}
 		switch a {
 		case "--client":
 			if i+1 >= len(args) {
-				return "", "", "", false, fmt.Errorf("--client requires a value")
+				return "", "", "", false, false, fmt.Errorf("--client requires a value")
 			}
 			i++
 			clientType = args[i]
 			if clientType != schema.ClientClaudeCode && clientType != schema.ClientCodex {
-				return "", "", "", false, fmt.Errorf("unknown client %q (supported: %s, %s)",
+				return "", "", "", false, false, fmt.Errorf("unknown client %q (supported: %s, %s)",
 					clientType, schema.ClientClaudeCode, schema.ClientCodex)
 			}
 		case "--session":
 			if i+1 >= len(args) {
-				return "", "", "", false, fmt.Errorf("--session requires a value")
+				return "", "", "", false, false, fmt.Errorf("--session requires a value")
 			}
 			i++
 			sessionID = args[i]
 		case "--format":
 			if i+1 >= len(args) {
-				return "", "", "", false, fmt.Errorf("--format requires a value")
+				return "", "", "", false, false, fmt.Errorf("--format requires a value")
 			}
 			i++
 			format = args[i]
 		default:
 			if strings.HasPrefix(a, "--") {
-				return "", "", "", false, fmt.Errorf("unknown flag %q", a)
+				return "", "", "", false, false, fmt.Errorf("unknown flag %q", a)
 			}
-			return "", "", "", false, fmt.Errorf("unexpected argument %q", a)
+			return "", "", "", false, false, fmt.Errorf("unexpected argument %q", a)
 		}
 	}
-	return clientType, sessionID, format, reveal, nil
+	return clientType, sessionID, format, reveal, jsonOut, nil
 }
 
 // resolvedSession pairs a session identity with its loaded snapshot.
@@ -191,11 +195,69 @@ func buildView(snap *schema.Snapshot, gs *schema.GlobalState, currentActivationI
 	return render.BuildViewModel(Version, snap, gs, currentActivationID, time.Now(), runtimeActive, clientType, sessionID)
 }
 
+// renderConfig returns a RenderConfig with color mode resolved from the
+// explicit CLI flag or auto-detected from the environment.
+//
+// When the user passes --color auto (or nothing), DetectColorMode() is called
+// which checks NO_COLOR first, then FORCE_COLOR, then whether stdout is a
+// terminal.  --color always/never override detection.
+func renderConfigWith(args []string) render.RenderConfig {
+	cfg := render.DefaultRenderConfig()
+
+	// Parse --color flag from command arguments.
+	for _, a := range args {
+		switch a {
+		case "--color":
+			// --color needs a value from the next arg; fall through if missing.
+		case "--color=auto", "--color=always", "--color=never":
+			if eq := strings.SplitN(a, "=", 2); len(eq) == 2 {
+				cfg.ColorMode = render.ParseColorFlag(eq[1])
+			}
+		default:
+			if strings.HasPrefix(a, "--color") {
+				cfg.ColorMode = render.ParseColorFlag(strings.TrimPrefix(a, "--color="))
+			}
+		}
+		// Handle --color auto / --color always / --color never (space-separated).
+		// This is done by callers before passing args; here we catch the case
+		// where the whole flag value was already resolved.
+	}
+
+	// If no explicit flag was set, fall back to env/terminal detection.
+	cfg.ColorMode = render.ApplyEnv(cfg.ColorMode)
+	return cfg
+}
+
 // renderConfig returns a RenderConfig with auto-detected color mode.
 func renderConfig() render.RenderConfig {
-	cfg := render.DefaultRenderConfig()
-	cfg.ColorMode = render.DetectColorMode()
-	return cfg
+	return renderConfigWith(nil)
+}
+
+// parseColorFlag extracts a --color flag from args, returning the resolved
+// ColorMode and the remaining args (with --color and its value removed).
+func parseColorFlag(args []string) (render.ColorMode, []string) {
+	var remaining []string
+	mode := render.ColorAuto
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--color" {
+			if i+1 >= len(args) {
+				// Missing value — treat as unknown, fall back to auto.
+				mode = render.ColorAuto
+				continue
+			}
+			mode = render.ParseColorFlag(args[i+1])
+			i++ // skip value
+			continue
+		}
+		if strings.HasPrefix(a, "--color=") {
+			mode = render.ParseColorFlag(strings.TrimPrefix(a, "--color="))
+			continue
+		}
+		remaining = append(remaining, a)
+	}
+	mode = render.ApplyEnv(mode)
+	return mode, remaining
 }
 
 // formatTokenCount renders a token count compactly.

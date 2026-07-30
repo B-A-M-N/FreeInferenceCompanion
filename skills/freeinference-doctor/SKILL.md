@@ -1,5 +1,5 @@
 ---
-name: fi-doctor
+name: freeinference-doctor
 description: This skill is used when diagnosing FreeInference connection problems, configuration issues, authentication failures, or when the user needs to verify their setup is working correctly. Trigger when the user reports errors, connection issues, or wants to verify their API configuration. Community-built and unofficial. Not affiliated with or endorsed by FreeInference.
 argument-hint: "[--probe --model <name>]"
 allowed-tools: Bash
@@ -11,9 +11,9 @@ Diagnose FreeInference API connectivity and configuration. Community-built and u
 
 ## Usage
 
-Run `fi doctor` to check:
+Run `freeinference doctor` to check:
 - Cache directory writability and state readability
-- fi binary resolvability for hooks
+- freeinference binary resolvability for hooks
 - Claude hook configuration and status-line wrapper
 - Provider detection result
 - Endpoint reachability and model catalog
@@ -25,6 +25,27 @@ an explicit probe — doctor never infers them from API key presence.
 ### Options
 
 - `--probe --model <name>` — Also send a minimal synthetic inference request (marked `X-Probe: synthetic`) to verify the full request pipeline. Without `--model`, a model is selected from the cached catalog and the selection is printed.
+
+### Example output
+
+```
+FreeInference Doctor
+------------------------------------------------------------
+Cache directory:       ✓
+State schema:          ✓
+freeinference binary:             ✓ on PATH
+Claude hook config:    ✓
+Status-line wrapper:   ✓
+Provider detection:    ✓ freeinference via FREEINFERENCE_API_KEY
+Health source:         ? not configured (optional)
+API endpoint:          ✓
+Model catalog:         ✓ 12 models listed
+API key format:        ✓ present, format valid (not verified)
+Authentication:        ? not verified without an authenticated operation
+Model access:          ? catalog presence does not imply access
+
+Doctor complete.
+```
 
 ### Notes
 

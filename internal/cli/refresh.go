@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -13,21 +14,24 @@ import (
 
 // cmdRefresh implements:
 //
-//	fi refresh                        synchronous if-stale refresh
-//	fi refresh --force                synchronous refresh ignoring staleness
-//	fi refresh --if-stale --detach    spawn detached workers for stale caches
-//	fi refresh --worker models|health|account-usage single worker under a process lock
+//	freeinference refresh                        synchronous if-stale refresh
+//	freeinference refresh --force                synchronous refresh ignoring staleness
+//	freeinference refresh --if-stale --detach    spawn detached workers for stale caches
+//	freeinference refresh --worker models|health|account-usage single worker under a process lock
 func cmdRefresh(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 	force := false
 	ifStale := false
 	detach := false
 	worker := ""
+	jsonOut := false
 
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch a {
 		case "--force":
 			force = true
+		case "--json":
+			jsonOut = true
 		case "--if-stale":
 			ifStale = true
 		case "--detach":
@@ -80,7 +84,7 @@ func cmdRefresh(paths state.Paths, args []string, stdout, stderr io.Writer) int 
 		result := refresher.WorkerRefresh(worker)
 		if result.Skipped {
 			if result.SkipReason == "unknown worker" {
-				fmt.Fprintf(stderr, "error: unknown worker %q (valid: models, health)\n", worker)
+				fmt.Fprintf(stderr, "error: unknown worker %q (valid: models, health, account-usage)\n", worker)
 				return 2
 			}
 			// Another worker is running — not an error, but report it.
@@ -136,6 +140,22 @@ func cmdRefresh(paths state.Paths, args []string, stdout, stderr io.Writer) int 
 	// retention window. Best-effort — failures here do not affect the
 	// refresh result.
 	_ = state.CleanupStaleSessions(paths, time.Now())
+
+	if jsonOut {
+		r := map[string]any{
+			"models_refreshed": result.ModelsRefreshed,
+			"health_refreshed": result.HealthRefreshed,
+		}
+		if result.Error != "" {
+			r["error"] = result.Error
+		}
+		out, _ := json.Marshal(r)
+		fmt.Fprintln(stdout, string(out))
+		if result.Error != "" {
+			return 1
+		}
+		return 0
+	}
 
 	if result.ModelsRefreshed {
 		fmt.Fprintln(stdout, "Models refreshed.")

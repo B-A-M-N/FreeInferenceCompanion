@@ -1,5 +1,5 @@
 ---
-name: fi-install-statusline
+name: freeinference-install-statusline
 description: Install or uninstall the FreeInference status line for the Claude Code bottom bar. This configures Claude Code to show real-time model, context, and cache metrics. Community-built and unofficial. Not affiliated with or endorsed by FreeInference.
 argument-hint: "install|uninstall"
 allowed-tools: Bash
@@ -12,7 +12,7 @@ Configure the Claude Code status line to show FreeInference metrics. Community-b
 
 ## Usage
 
-Run `fi status-line install` to:
+Run `freeinference status-line install` to:
 
 1. Generate a status line wrapper script at `~/.claude/statusline-freeinference.sh`
 2. Compose with any existing status line (both run; outputs are joined)
@@ -33,7 +33,7 @@ FI minimax-m3 ● | ctx 42% | read 78%
 
 ### Uninstall
 
-Run `fi status-line uninstall` to:
+Run `freeinference status-line uninstall` to:
 
 1. Remove the wrapper script
 2. Restore the previous statusLine value (or remove the key) — the rest of

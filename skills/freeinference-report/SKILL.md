@@ -1,5 +1,5 @@
 ---
-name: fi-report
+name: freeinference-report
 description: This skill is triggered when the user asks to generate a support report, a troubleshooting bundle, or diagnostic information for sharing with FreeInference maintainers. Use when reporting issues to FreeInference support or when asked for session diagnostics. Community-built and unofficial. Not affiliated with or endorsed by FreeInference.
 argument-hint: "[--session <id>] [--format markdown|json]"
 allowed-tools: Bash
@@ -11,7 +11,7 @@ Generate a sanitized support report for FreeInference maintainers. Community-bui
 
 ## Usage
 
-Run `fi report --session <id>` to generate a report with:
+Run `freeinference report --session <id>` to generate a report with:
 - Plugin version
 - Client type and session ID
 - Current model
@@ -59,6 +59,6 @@ This report is designed to exclude known sensitive fields. Review it before shar
 ### Notes
 
 - Review the report before sharing — it is designed to exclude sensitive fields
-- Run `fi doctor` first to diagnose any connectivity or configuration issues separately
+- Run `freeinference doctor` first to diagnose any connectivity or configuration issues separately
 - Without `--session`, the most recent session is resolved from the local session index
 - Use `--format json` for a machine-readable report

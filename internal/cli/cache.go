@@ -1,19 +1,21 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/engine"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
 
-// cmdCache implements `fi cache` — analyzes cache efficiency and gives
+// cmdCache implements `freeinference cache` — analyzes cache efficiency and gives
 // actionable, zero-risk recommendations to improve cache hit rates.
 func cmdCache(paths state.Paths, args []string, stdout, stderr io.Writer) int {
-	clientType, sessionID, _, reveal, err := parseClientSessionFlags(args)
+	clientType, sessionID, _, reveal, jsonOut, err := parseClientSessionFlags(args)
 	if err != nil {
 		fmt.Fprintf(stderr, "usage error: %v\n", err)
 		return 2
@@ -24,14 +26,51 @@ func cmdCache(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-	if resolved == nil {
-		fmt.Fprintln(stdout, "FI: no session")
+
+	snap := (*schema.Snapshot)(nil)
+	ca := (*schema.CacheAnalysis)(nil)
+	lc := (*schema.LiveContext)(nil)
+	if resolved != nil {
+		snap = resolved.Snap
+		ca = snap.CacheAnalysis
+		lc = snap.LiveContext
+	}
+
+	if jsonOut {
+		cacheJSON(stdout, snap, ca, lc, resolved,
+			func() string {
+				if snap != nil {
+					return displaySessionID(snap.Session.ID, reveal)
+				}
+				return "<none>"
+			}(),
+			reveal,
+		)
 		return 0
 	}
 
-	snap := resolved.Snap
-	ca := snap.CacheAnalysis
-	lc := snap.LiveContext
+	fmt.Fprintf(stdout, "Cache Analysis for %s (%s)\n",
+		func() string {
+			if snap != nil {
+				return displaySessionID(snap.Session.ID, reveal)
+			}
+			return "<none>"
+		}(),
+		func() string {
+			if resolved != nil {
+				return resolved.Client
+			}
+			return "unknown"
+		}(),
+	)
+	fmt.Fprintln(stdout, strings.Repeat("-", 60))
+
+	if ca == nil || ca.RequestSamples == 0 {
+		fmt.Fprintln(stdout, "No cache data yet. Send a few requests first.")
+		fmt.Fprintln(stdout)
+		printCacheBasics(stdout, lc)
+		return 0
+	}
 
 	fmt.Fprintf(stdout, "Cache Analysis for %s (%s)\n", displaySessionID(snap.Session.ID, reveal), snap.Client.Type)
 	fmt.Fprintln(stdout, strings.Repeat("-", 60))
@@ -75,22 +114,61 @@ func cmdCache(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout)
 	}
 
-	// Pattern attribution — root-cause diagnosis instead of generic heuristics.
-	attribution := engine.AttributeCacheMisses(snap)
+	// Structured diagnosis using BuildCacheDiagnosis (Finding 4).
+	diag := engine.BuildCacheDiagnosis(snap, time.Now())
 
 	fmt.Fprintln(stdout, "Diagnosis:")
-	switch attribution.Pattern {
-	case engine.PatternNone:
-		fmt.Fprintln(stdout, "  ✅ Cache efficiency looks good. Keep current patterns.")
-	case engine.PatternInsufficientData:
-		fmt.Fprintf(stdout, "  ℹ️  %s\n", attribution.Diagnosis)
-	default:
-		patternLabel := patternLabel(attribution.Pattern)
-		fmt.Fprintf(stdout, "  %s %s\n", patternLabel, attribution.Diagnosis)
-		if attribution.Recommendation != "" {
-			fmt.Fprintf(stdout, "     → %s\n", attribution.Recommendation)
+	if diag.Kind == schema.AttributionUnknown {
+		fmt.Fprintf(stdout, "  info: %s\n", "Not enough cache observations yet to diagnose patterns.")
+		if len(diag.Evidence) > 0 {
+			for _, e := range diag.Evidence {
+				fmt.Fprintf(stdout, "     (%s)\n", e.Description)
+			}
 		}
-		fmt.Fprintf(stdout, "     (confidence: %s)\n", attribution.Confidence)
+	} else {
+		switch diag.Kind {
+		case schema.AttributionHeuristic:
+			fmt.Fprintf(stdout, "  Likely diagnosis (heuristic):\n")
+		case schema.AttributionClientObserved:
+			fmt.Fprintf(stdout, "  Client-observed:\n")
+		case schema.AttributionProviderConfirmed:
+			fmt.Fprintf(stdout, "  Provider-confirmed:\n")
+		}
+		fmt.Fprintf(stdout, "     Cache read: %.0f%% over %d samples\n", readPct, ca.RequestSamples)
+
+		if len(diag.CandidateCauses) > 0 {
+			top := diag.CandidateCauses[0]
+			fmt.Fprintf(stdout, "     Possible cause: %s (likelihood: %.0f%%)\n", top.Label, top.Likelihood*100)
+			if len(diag.CandidateCauses) > 1 {
+				for _, cc := range diag.CandidateCauses[1:] {
+					fmt.Fprintf(stdout, "     Also possible: %s (%.0f%%)\n", cc.Label, cc.Likelihood*100)
+				}
+			}
+		}
+
+		if len(diag.Evidence) > 0 {
+			fmt.Fprintln(stdout, "     Evidence:")
+			for _, e := range diag.Evidence {
+				src := "observed"
+				if e.Source == "inferred" {
+					src = "inferred"
+				}
+				if e.Value != "" {
+					fmt.Fprintf(stdout, "       - %s (%s: %s)\n", e.Description, src, e.Value)
+				} else {
+					fmt.Fprintf(stdout, "       - %s (%s)\n", e.Description, src)
+				}
+			}
+		}
+
+		if len(diag.MissingEvidence) > 0 {
+			fmt.Fprintln(stdout, "     Missing evidence (provider data):")
+			for _, m := range diag.MissingEvidence {
+				fmt.Fprintf(stdout, "       - %s\n", m)
+			}
+		}
+
+		fmt.Fprintf(stdout, "     Confidence: %.0f%%\n", diag.Confidence*100)
 	}
 
 	// Context pressure advisory (supplements the cache diagnosis).
@@ -110,22 +188,6 @@ func cmdCache(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// patternLabel returns the icon+label for a cache pattern in the diagnosis.
-func patternLabel(p engine.CachePattern) string {
-	switch p {
-	case engine.PatternThrashing:
-		return "🔴 THRASHING:"
-	case engine.PatternNoCaching:
-		return "🔴 NO CACHING:"
-	case engine.PatternDecay:
-		return "🟡 DECAYING:"
-	case engine.PatternIntermittent:
-		return "🟡 INTERMITTENT:"
-	default:
-		return "🟡"
-	}
-}
-
 func printCacheBasics(stdout io.Writer, lc *schema.LiveContext) {
 	if lc == nil || lc.LatestRequest == nil {
 		return
@@ -136,4 +198,98 @@ func printCacheBasics(stdout io.Writer, lc *schema.LiveContext) {
 	fmt.Fprintf(stdout, "  Cache Read: %s\n", formatTokenPtr(lr.CacheReadInputTokens))
 	fmt.Fprintf(stdout, "  Cache New:  %s\n", formatTokenPtr(lr.CacheCreationInputTokens))
 	fmt.Fprintf(stdout, "  Output:     %s\n", formatTokenPtr(lr.OutputTokens))
+}
+
+// cacheJSON emits a JSON representation of cache analysis to stdout.
+func cacheJSON(stdout io.Writer, snap *schema.Snapshot, ca *schema.CacheAnalysis,
+	lc *schema.LiveContext, resolved *resolvedSession, sessionID string, reveal bool) {
+	obj := map[string]any{
+		"session": sessionID,
+	}
+	if resolved != nil {
+		obj["client"] = resolved.Client
+	}
+
+	if ca != nil && ca.RequestSamples > 0 {
+		cacheObj := map[string]any{
+			"samples": ca.RequestSamples,
+			"trend":   ca.Trend,
+		}
+		if ca.CacheReadShare != nil {
+			cacheObj["read_share"] = *ca.CacheReadShare
+		}
+		if ca.CacheCreationShare != nil {
+			cacheObj["creation_share"] = *ca.CacheCreationShare
+		}
+		if ca.FreshInputShare != nil {
+			cacheObj["fresh_share"] = *ca.FreshInputShare
+		}
+		obj["cache"] = cacheObj
+	}
+
+	if lc != nil && lc.LatestRequest != nil {
+		lr := lc.LatestRequest
+		req := map[string]any{}
+		if lr.FreshInputTokens != nil {
+			req["fresh_input_tokens"] = *lr.FreshInputTokens
+		}
+		if lr.CacheReadInputTokens != nil {
+			req["cache_read_input_tokens"] = *lr.CacheReadInputTokens
+		}
+		if lr.CacheCreationInputTokens != nil {
+			req["cache_creation_input_tokens"] = *lr.CacheCreationInputTokens
+		}
+		if lr.OutputTokens != nil {
+			req["output_tokens"] = *lr.OutputTokens
+		}
+		obj["latest_request"] = req
+	}
+
+	if lc != nil && lc.UsedPercentage != nil {
+		obj["context_used_pct"] = *lc.UsedPercentage
+	}
+
+	if lc != nil {
+		dd := engine.BuildCacheDiagnosis(snap, time.Now())
+		diagObj := map[string]any{
+			"kind":              string(dd.Kind),
+			"reason_code":       string(dd.ReasonCode),
+			"confidence":        dd.Confidence,
+			"algorithm_version": dd.AlgorithmVersion,
+		}
+		if len(dd.CandidateCauses) > 0 {
+			causes := make([]map[string]any, len(dd.CandidateCauses))
+			for i, cc := range dd.CandidateCauses {
+				causes[i] = map[string]any{
+					"reason":     string(cc.Reason),
+					"label":      cc.Label,
+					"likelihood": cc.Likelihood,
+				}
+			}
+			diagObj["candidate_causes"] = causes
+		}
+		if len(dd.Evidence) > 0 {
+			evidence := make([]map[string]any, len(dd.Evidence))
+			for i, e := range dd.Evidence {
+				evidence[i] = map[string]any{
+					"description": e.Description,
+					"value":       e.Value,
+					"source":      e.Source,
+				}
+			}
+			diagObj["evidence"] = evidence
+		}
+		if len(dd.MissingEvidence) > 0 {
+			diagObj["missing_evidence"] = dd.MissingEvidence
+		}
+		obj["diagnosis"] = diagObj
+	}
+
+	if snap != nil && snap.Pressure.State != "" {
+		obj["pressure"] = snap.Pressure.State
+	}
+
+	enc := json.NewEncoder(stdout)
+	enc.SetIndent("", "  ")
+	enc.Encode(obj)
 }

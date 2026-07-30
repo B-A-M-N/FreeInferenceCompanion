@@ -1,5 +1,5 @@
 ---
-name: fi-status
+name: freeinference-status
 description: This skill is automatically triggered when the user asks about FreeInference session status, current metrics, token usage, or context consumption. Use when the user wants to see their current session's token counts, cache performance, model information, or context pressure level. Community-built and unofficial. Not affiliated with or endorsed by FreeInference.
 argument-hint: "[--compact]"
 allowed-tools: Bash
@@ -11,7 +11,7 @@ Display current session metrics for the FreeInference Companion. Community-built
 
 ## Usage
 
-Run `fi status` to show:
+Run `freeinference status` to show:
 - Current model and session ID
 - Live context window usage (fresh tokens, cache reads, cache writes, output)
 - Context pressure state (healthy/watch/warn/critical)

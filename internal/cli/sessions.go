@@ -14,12 +14,15 @@ import (
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
 
-// cmdSessions implements `fi sessions`.
+// cmdSessions implements `freeinference sessions`.
 func cmdSessions(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 	reveal := false
+	jsonOut := false
 	for _, a := range args {
 		if a == "--include-identifiers" {
 			reveal = true
+		} else if a == "--json" {
+			jsonOut = true
 		} else if strings.HasPrefix(a, "--") {
 			fmt.Fprintf(stderr, "usage error: unknown flag %q\n", a)
 			return 2
@@ -34,9 +37,38 @@ func cmdSessions(paths state.Paths, args []string, stdout, stderr io.Writer) int
 		return 1
 	}
 	if len(idx.Sessions) == 0 {
+		if jsonOut {
+			fmt.Fprintln(stdout, "[]")
+			return 0
+		}
 		fmt.Fprintln(stdout, "No sessions recorded.")
 		return 0
 	}
+
+	if jsonOut {
+		type sessionEntry struct {
+			Client      string `json:"client"`
+			SessionID   string `json:"session_id"`
+			ModelID     string `json:"model_id"`
+			Status      string `json:"status"`
+			LastEventAt string `json:"last_event_at"`
+		}
+		entries := make([]sessionEntry, 0, len(idx.Sessions))
+		for _, e := range idx.Sessions {
+			entries = append(entries, sessionEntry{
+				Client:      e.Client,
+				SessionID:   displaySessionID(e.SessionID, reveal),
+				ModelID:     secure.SanitizeField(e.ModelID),
+				Status:      e.Status,
+				LastEventAt: e.LastEventAt.Format(time.RFC3339),
+			})
+		}
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		enc.Encode(entries)
+		return 0
+	}
+
 	fmt.Fprintf(stdout, "%-12s %-40s %-20s %-10s %s\n", "CLIENT", "SESSION", "MODEL", "STATUS", "LAST EVENT")
 	for _, e := range idx.Sessions {
 		sessionID := displaySessionID(e.SessionID, reveal)
@@ -53,7 +85,7 @@ func cmdSessions(paths state.Paths, args []string, stdout, stderr io.Writer) int
 	return 0
 }
 
-// cmdSnapshot implements `fi snapshot --json` — the machine-readable
+// cmdSnapshot implements `freeinference snapshot --json` — the machine-readable
 // normalized view model consumed by panels and scripts.
 func cmdSnapshot(paths state.Paths, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	jsonOut := false
@@ -65,7 +97,7 @@ func cmdSnapshot(paths state.Paths, args []string, stdin io.Reader, stdout, stde
 			flagArgs = append(flagArgs, a)
 		}
 	}
-	clientType, sessionID, _, reveal, err := parseClientSessionFlags(flagArgs)
+	clientType, sessionID, _, reveal, _, err := parseClientSessionFlags(flagArgs)
 	if err != nil {
 		fmt.Fprintf(stderr, "usage error: %v\n", err)
 		return 2
@@ -151,19 +183,28 @@ func printSnapshot(stdout, stderr io.Writer, snap *schema.Snapshot, gs *schema.G
 	return 0
 }
 
-// cmdRender implements `fi render --mode line|expanded`.
+// cmdRender implements `freeinference render --mode line|expanded`.
 func cmdRender(paths state.Paths, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	mode := ""
-	var flagArgs []string
-	for i := 0; i < len(args); i++ {
-		if args[i] == "--mode" && i+1 < len(args) {
-			i++
-			mode = args[i]
+	// Extract --color flag.
+	_, remainingArgs := parseColorFlag(args)
+	// Build a filtered args list for parseClientSessionFlags: skip --mode and its
+	// value so the flag parser doesn't choke on the positional-looking mode token.
+	var parseArgs []string
+	for i := 0; i < len(remainingArgs); i++ {
+		if remainingArgs[i] == "--mode" && i+1 < len(remainingArgs) {
+			i++ // skip value
 		} else {
-			flagArgs = append(flagArgs, args[i])
+			parseArgs = append(parseArgs, remainingArgs[i])
 		}
 	}
-	clientType, sessionID, _, reveal, err := parseClientSessionFlags(flagArgs)
+	for i := 0; i < len(remainingArgs); i++ {
+		if remainingArgs[i] == "--mode" && i+1 < len(remainingArgs) {
+			i++
+			mode = remainingArgs[i]
+		}
+	}
+	clientType, sessionID, _, reveal, _, err := parseClientSessionFlags(parseArgs)
 	if err != nil {
 		fmt.Fprintf(stderr, "usage error: %v\n", err)
 		return 2

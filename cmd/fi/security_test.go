@@ -29,9 +29,9 @@ func TestSecretNeverPersistsOrRenders(t *testing.T) {
 	t.Setenv("ANTHROPIC_BASE_URL", "")
 	// Use a fresh nested subdir the companion creates itself, so the dir-perm
 	// assertion reflects the companion's contract (not t.TempDir's umask).
-	t.Setenv("FI_CACHE_DIR", filepath.Join(t.TempDir(), "fi-cache"))
+	t.Setenv("FI_CACHE_DIR", filepath.Join(t.TempDir(), "freeinference-cache"))
 
-	exitCode := cli.Run([]string{"fi", "hook", "claude-code", "SessionStart"},
+	exitCode := cli.Run([]string{"freeinference", "hook", "claude-code", "SessionStart"},
 		strings.NewReader(`{"session_id":"secret-test","model":"glm-5.1"}`), &bytes.Buffer{}, &bytes.Buffer{})
 	if exitCode != 0 {
 		t.Fatalf("SessionStart hook returned %d, want 0", exitCode)
@@ -46,7 +46,7 @@ func TestSecretNeverPersistsOrRenders(t *testing.T) {
 	}
 	statusJSON, _ := json.Marshal(statusPayload)
 	var stdout bytes.Buffer
-	exitCode = cli.Run([]string{"fi", "status", "--compact"},
+	exitCode = cli.Run([]string{"freeinference", "status", "--compact"},
 		bytes.NewReader(statusJSON), &stdout, &bytes.Buffer{})
 	if exitCode != 0 {
 		t.Fatalf("status returned %d", exitCode)
@@ -114,7 +114,7 @@ func TestSecretNeverPersistsOrRenders(t *testing.T) {
 	// 4. Reports must not contain the key, regardless of format.
 	for _, format := range []string{"markdown", "json"} {
 		var out bytes.Buffer
-		exitCode = cli.Run([]string{"fi", "report", "--format", format, "--session", "secret-test", "--client", "claude-code"},
+		exitCode = cli.Run([]string{"freeinference", "report", "--format", format, "--session", "secret-test", "--client", "claude-code"},
 			&bytes.Buffer{}, &out, &bytes.Buffer{})
 		if exitCode != 0 {
 			t.Errorf("report --format %s returned %d", format, exitCode)
@@ -126,7 +126,7 @@ func TestSecretNeverPersistsOrRenders(t *testing.T) {
 
 	// 5. Snapshot --json must not contain the key.
 	var snapOut bytes.Buffer
-	exitCode = cli.Run([]string{"fi", "snapshot", "--json", "--session", "secret-test", "--client", "claude-code"},
+	exitCode = cli.Run([]string{"freeinference", "snapshot", "--json", "--session", "secret-test", "--client", "claude-code"},
 		&bytes.Buffer{}, &snapOut, &bytes.Buffer{})
 	if exitCode != 0 {
 		t.Fatalf("snapshot returned %d", exitCode)
@@ -138,7 +138,7 @@ func TestSecretNeverPersistsOrRenders(t *testing.T) {
 	// 6. Render modes must not contain the key.
 	for _, mode := range []string{"line", "expanded"} {
 		var out bytes.Buffer
-		exitCode = cli.Run([]string{"fi", "render", "--mode", mode, "--session", "secret-test", "--client", "claude-code"},
+		exitCode = cli.Run([]string{"freeinference", "render", "--mode", mode, "--session", "secret-test", "--client", "claude-code"},
 			&bytes.Buffer{}, &out, &bytes.Buffer{})
 		if exitCode != 0 {
 			t.Errorf("render --mode %s returned %d", mode, exitCode)
@@ -163,7 +163,7 @@ func TestSecretNeverPersistsOrRenders(t *testing.T) {
 
 	// 8. Doctor must not print the key.
 	var docOut bytes.Buffer
-	_ = cli.Run([]string{"fi", "doctor"},
+	_ = cli.Run([]string{"freeinference", "doctor"},
 		&bytes.Buffer{}, &docOut, &bytes.Buffer{})
 	if strings.Contains(docOut.String(), apiKey) {
 		t.Errorf("API key leaked into doctor output: %s", docOut.String())

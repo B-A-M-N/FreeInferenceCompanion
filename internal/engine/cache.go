@@ -4,8 +4,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"sync"
 	"time"
 
+	"github.com/b-a-m-n/freeinference-companion/internal/config"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
 
@@ -54,6 +56,57 @@ const MaxUsageObservations = CacheHistoryRetention
 
 // AnalysisWindow is retained as an alias for CacheAnalysisWindow.
 const AnalysisWindow = CacheAnalysisWindow
+
+// cacheConfig holds the resolved cache warning thresholds.
+type cacheConfig struct {
+	lowThreshold       float64
+	recoveredThreshold float64
+	warningCooldown    time.Duration
+}
+
+var (
+	cacheConfOnce sync.Once
+	cacheConf     *cacheConfig
+)
+
+func initCacheConfig() {
+	mgr, err := config.NewManager()
+	if err != nil {
+		return
+	}
+	eff, err := mgr.Resolve()
+	if err != nil {
+		return
+	}
+
+	c := &cacheConfig{
+		lowThreshold:       CacheReadLowThreshold,
+		recoveredThreshold: CacheReadRecoveredThreshold,
+		warningCooldown:    CacheWarningCooldown,
+	}
+	if eff.Cache.WarnThreshold.Valid {
+		c.lowThreshold = eff.Cache.WarnThreshold.Value
+	}
+	if eff.Cache.RecoveredThreshold.Valid {
+		c.recoveredThreshold = eff.Cache.RecoveredThreshold.Value
+	}
+	if eff.Cache.CooldownMins.Valid && eff.Cache.CooldownMins.Value > 0 {
+		c.warningCooldown = time.Duration(eff.Cache.CooldownMins.Value) * time.Minute
+	}
+	cacheConf = c
+}
+
+func cacheConfigGet() *cacheConfig {
+	cacheConfOnce.Do(initCacheConfig)
+	if cacheConf == nil {
+		return &cacheConfig{
+			lowThreshold:       CacheReadLowThreshold,
+			recoveredThreshold: CacheReadRecoveredThreshold,
+			warningCooldown:    CacheWarningCooldown,
+		}
+	}
+	return cacheConf
+}
 
 // ObservationFingerprint builds a stable fingerprint for a usage sample so
 // re-renders of the same status-line data are not double-counted.
@@ -204,10 +257,11 @@ func AnalyzeCache(snap *schema.Snapshot, currentContextTokens int64, now time.Ti
 			break // incomplete observation breaks the streak
 		}
 		var bucket int // -1 low, 0 neutral, +1 recovered
+		cfg := cacheConfigGet()
 		switch {
-		case *share < CacheReadLowThreshold:
+		case *share < cfg.lowThreshold:
 			bucket = -1
-		case *share > CacheReadRecoveredThreshold:
+		case *share > cfg.recoveredThreshold:
 			bucket = 1
 		default:
 			bucket = 0
@@ -287,7 +341,7 @@ func QualifyCacheWarning(snap *schema.Snapshot, currentContextTokens int64, prov
 	if analysis.ConsecutiveLow >= ConsecutiveToWarn {
 		// Cooldown since last shown warning.
 		if snap.Warnings.LastCacheShownAt != nil &&
-			now.Sub(*snap.Warnings.LastCacheShownAt) < CacheWarningCooldown {
+			now.Sub(*snap.Warnings.LastCacheShownAt) < cacheConfigGet().warningCooldown {
 			return decision
 		}
 		decision.Warn = true

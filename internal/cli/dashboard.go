@@ -23,11 +23,11 @@ const (
 	dashboardAccountURL = "https://freeinference.org/dashboard"
 )
 
-// cmdDashboard implements `fi dashboard`.
+// cmdDashboard implements `freeinference dashboard`.
 //
-//	fi dashboard              → user/account dashboard (default)
-//	fi dashboard --status     → public service health page
-//	fi dashboard --print-url  → print the URL without opening a browser
+//	freeinference dashboard              → user/account dashboard (default)
+//	freeinference dashboard --status     → public service health page
+//	freeinference dashboard --print-url  → print the URL without opening a browser
 func cmdDashboard(args []string, stdout, stderr io.Writer) int {
 	target := DashboardAccount
 	printURL := false

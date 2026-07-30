@@ -35,10 +35,10 @@ func TestDoctorRunsAllChecksWithoutEarlyExit(t *testing.T) {
 	t.Setenv("FI_HEALTH_URL", "")
 	t.Setenv("FI_ALLOW_INSECURE_LOCALHOST", "1")
 
-	// Put the running binary on PATH so `fi` resolves correctly.
+	// Put the running binary on PATH so `freeinference` resolves correctly.
 	if exe, err := os.Executable(); err == nil {
 		fiDir := t.TempDir()
-		fiPath := filepath.Join(fiDir, "fi")
+		fiPath := filepath.Join(fiDir, "freeinference")
 		if err := os.Symlink(exe, fiPath); err == nil {
 			t.Setenv("PATH", fiDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 		}
@@ -52,7 +52,7 @@ func TestDoctorRunsAllChecksWithoutEarlyExit(t *testing.T) {
 	for _, want := range []string{
 		"Cache directory:",
 		"State schema:",
-		"fi binary:",
+		"freeinference binary:",
 		"Provider detection:",
 		"Health source:",
 		"API endpoint:",
@@ -185,7 +185,7 @@ func TestStatusLineSubcommandValidation(t *testing.T) {
 
 func TestRunUnknownCommand(t *testing.T) {
 	var out, errOut strings.Builder
-	code := Run([]string{"fi", "bogus-command"}, strings.NewReader(""), &out, &errOut)
+	code := Run([]string{"freeinference", "bogus-command"}, strings.NewReader(""), &out, &errOut)
 	if code != 1 {
 		t.Errorf("exit = %d", code)
 	}
@@ -195,14 +195,14 @@ func TestRunHookNeverPanics(t *testing.T) {
 	// Even with completely empty environment, hook commands return 0.
 	t.Setenv("FI_CACHE_DIR", t.TempDir())
 	var out, errOut strings.Builder
-	code := Run([]string{"fi", "hook", "claude-code", "SessionStart"}, strings.NewReader("{bad json"), &out, &errOut)
+	code := Run([]string{"freeinference", "hook", "claude-code", "SessionStart"}, strings.NewReader("{bad json"), &out, &errOut)
 	if code != 0 {
 		t.Errorf("hook exit = %d", code)
 	}
 }
 
 // TestDoctorProbeWithInvalidEndpoint is the P0-1 regression test: an invalid
-// API URL combined with `fi doctor --probe` must NOT panic. It must skip the
+// API URL combined with `freeinference doctor --probe` must NOT panic. It must skip the
 // inference probe, report the configuration failure, and exit 1 (not a runtime
 // panic exit 2).
 func TestDoctorProbeWithInvalidEndpoint(t *testing.T) {
@@ -279,7 +279,7 @@ func TestDisabledModeHookExitsZero(t *testing.T) {
 	t.Setenv("FI_CACHE_DIR", t.TempDir())
 	var out, errOut strings.Builder
 	// Even with disabled, hook commands must return 0 and produce no output.
-	code := Run([]string{"fi", "hook", "claude-code", "SessionStart"}, strings.NewReader("{}"), &out, &errOut)
+	code := Run([]string{"freeinference", "hook", "claude-code", "SessionStart"}, strings.NewReader("{}"), &out, &errOut)
 	if code != 0 {
 		t.Errorf("disabled hook exit = %d, want 0", code)
 	}
@@ -293,14 +293,14 @@ func TestDisabledModeHookExitsZero(t *testing.T) {
 
 func TestDisabledModeBlocksProviderStateCommands(t *testing.T) {
 	t.Setenv("FI_DISABLED", "1")
-	// Provider-state commands (status, report, doctor) must be blocked in
+	// Provider-state commands (status, report) must be blocked in
 	// disabled mode: exit 1 and print the DISABLED warning.
+	// Note: doctor is NOT blocked — it runs and reports skipped checks.
 	tests := []struct {
 		args []string
 	}{
-		{args: []string{"fi", "status"}},
-		{args: []string{"fi", "report"}},
-		{args: []string{"fi", "doctor"}},
+		{args: []string{"freeinference", "status"}},
+		{args: []string{"freeinference", "report"}},
 	}
 	for _, tt := range tests {
 		t.Run(strings.Join(tt.args[1:], ""), func(t *testing.T) {
@@ -323,14 +323,17 @@ func TestDisabledModeDiagnosticCommandsDoNotProbe(t *testing.T) {
 	t.Setenv("FREEINFERENCE_BASE_URL", "https://freeinference.org/v1")
 	t.Setenv("FREEINFERENCE_API_KEY", "test-key")
 	var out, errOut strings.Builder
-	code := Run([]string{"fi", "doctor"}, strings.NewReader(""), &out, &errOut)
-	if code != 1 {
-		t.Errorf("disabled doctor exit = %d, want 1", code)
+	code := Run([]string{"freeinference", "doctor"}, strings.NewReader(""), &out, &errOut)
+	if code != 0 {
+		t.Errorf("disabled doctor exit = %d, want 0 (diagnostic commands work when disabled)", code)
 	}
 	// Diagnostic commands must not probe the provider in disabled mode.
 	output := out.String()
-	if strings.Contains(output, "Inference probe") || strings.Contains(output, "API endpoint:") {
-		t.Error("disabled doctor must not probe provider endpoints")
+	if strings.Contains(output, "Inference probe") {
+		t.Error("disabled doctor must not probe inference endpoints")
+	}
+	if !strings.Contains(output, "skipped - disabled") {
+		t.Error("disabled doctor should report skipped checks, got:", output)
 	}
 }
 

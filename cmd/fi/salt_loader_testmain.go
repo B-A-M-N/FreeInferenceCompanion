@@ -14,7 +14,7 @@ func init() {
 	// Only compiled when the saltloader build tag is set.
 	if len(os.Args) > 1 && os.Args[1] == "-salt-test" {
 		if len(os.Args) < 3 {
-			os.Stderr.WriteString("usage: fi -salt-test <cache-dir>\n")
+			os.Stderr.WriteString("usage: freeinference -salt-test <cache-dir>\n")
 			os.Exit(1)
 		}
 		os.Setenv("FI_CACHE_DIR", os.Args[2])

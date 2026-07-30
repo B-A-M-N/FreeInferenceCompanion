@@ -17,18 +17,29 @@ import (
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
 
-// cmdStatus implements `fi status`.
+// cmdStatus implements `freeinference status`.
 func cmdStatus(paths state.Paths, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	compact := false
-	var flagArgs []string
-	for _, a := range args {
-		if a == "--compact" {
+	jsonOut := false
+
+	// Extract --color flag.
+	colorMode, remainingArgs := parseColorFlag(args)
+	_ = colorMode // used below via renderConfigWith
+
+	// Extract --compact and --json from remainingArgs, and filter them out
+	// so parseClientSessionFlags doesn't reject them as unknown.
+	var passthroughArgs []string
+	for _, a := range remainingArgs {
+		switch a {
+		case "--compact":
 			compact = true
-		} else {
-			flagArgs = append(flagArgs, a)
+		case "--json":
+			jsonOut = true
+		default:
+			passthroughArgs = append(passthroughArgs, a)
 		}
 	}
-	clientType, sessionID, _, reveal, err := parseClientSessionFlags(flagArgs)
+	clientType, sessionID, _, reveal, _, err := parseClientSessionFlags(passthroughArgs)
 	if err != nil {
 		fmt.Fprintf(stderr, "usage error: %v\n", err)
 		return 2
@@ -69,7 +80,7 @@ func cmdStatus(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 			}
 			gs := loadGlobal(paths)
 			vm := buildView(snap, gs, aid, activation.Active, clientType, sessionID)
-			rc := renderConfig()
+			rc := renderConfigWith(args)
 			if compact {
 				// Zero-output contract: write nothing when ineligible.
 				// Never write a newline for an empty line.
@@ -98,6 +109,10 @@ func cmdStatus(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 		return 1
 	}
 	if resolved == nil {
+		if jsonOut {
+			statusJSON(stdout, nil, loadGlobal(paths), reveal, "", nil, "", "", "", "")
+			return 0
+		}
 		fmt.Fprintln(stdout, "FI: no session")
 		return 0
 	}
@@ -110,7 +125,7 @@ func cmdStatus(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 		return 1
 	}
 	vm := buildView(resolved.Snap, gs, aid, activation.Active, clientType, resolved.Snap.Session.ID)
-	rc := renderConfig()
+	rc := renderConfigWith(args)
 
 	if compact {
 		if line := vm.Line(rc); line != "" {
@@ -119,8 +134,95 @@ func cmdStatus(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 		return 0
 	}
 
-	printFullStatus(stdout, resolved.Snap, gs, reveal)
+	if jsonOut {
+		statusJSON(stdout, resolved.Snap, gs, reveal, aid, &activation.Active,
+			resolved.Client, resolved.Snap.Session.ID, resolved.Snap.Model.ID,
+			resolved.Snap.Provider.Name)
+		return 0
+	}
+
+	fmt.Fprint(stdout, vm.Expanded(rc))
 	return 0
+}
+
+// statusJSON emits a JSON representation of status to stdout.
+func statusJSON(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalState, reveal bool,
+	activationID string, active *bool, client, sessionID, model, providerName string) {
+	var ctx map[string]any
+	if snap != nil && snap.LiveContext != nil {
+		lc := snap.LiveContext
+		ctx = map[string]any{
+			"used_pct": lc.UsedPercentage,
+			"source":   lc.Source,
+		}
+		if lc.ContextWindowSize != nil {
+			ctx["window_size"] = *lc.ContextWindowSize
+		}
+		if lc.TotalInputTokens != nil {
+			ctx["total_input_tokens"] = *lc.TotalInputTokens
+		}
+		if lc.TotalOutputTokens != nil {
+			ctx["total_output_tokens"] = *lc.TotalOutputTokens
+		}
+	}
+
+	cacheObj := map[string]any{}
+	if snap != nil && snap.CacheAnalysis != nil {
+		ca := snap.CacheAnalysis
+		cacheObj["samples"] = ca.RequestSamples
+		cacheObj["trend"] = ca.Trend
+		if ca.CacheReadShare != nil {
+			cacheObj["read_share"] = *ca.CacheReadShare
+		}
+		if ca.CacheCreationShare != nil {
+			cacheObj["creation_share"] = *ca.CacheCreationShare
+		}
+		if ca.FreshInputShare != nil {
+			cacheObj["fresh_share"] = *ca.FreshInputShare
+		}
+	}
+
+	pressure := ""
+	if snap != nil {
+		pressure = snap.Pressure.State
+	}
+
+	var modelID string
+	if model != "" {
+		modelID = secure.SanitizeField(model)
+	}
+	var provName string
+	if providerName != "" {
+		provName = secure.SanitizeField(providerName)
+	}
+	if snap != nil && !snap.Provider.Confirmed {
+		provName = "unknown (unconfirmed)"
+	}
+
+	sessionDisplay := ""
+	if snap != nil {
+		sessionDisplay = displaySessionID(snap.Session.ID, reveal)
+	}
+
+	obj := map[string]any{
+		"session_id": sessionDisplay,
+		"model":      modelID,
+		"provider":   provName,
+		"client":     client,
+		"context":    ctx,
+		"cache":      cacheObj,
+		"pressure":   pressure,
+	}
+	if activationID != "" {
+		obj["activation_id"] = activationID
+	}
+	if active != nil {
+		obj["active"] = *active
+	}
+
+	enc := json.NewEncoder(stdout)
+	enc.SetIndent("", "  ")
+	enc.Encode(obj)
 }
 
 func printFullStatus(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalState, reveal bool) {
@@ -252,10 +354,10 @@ func printFullStatus(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalS
 	}
 }
 
-// cmdContext implements `fi context`. Missing metrics render as "unknown",
+// cmdContext implements `freeinference context`. Missing metrics render as "unknown",
 // never as zero.
 func cmdContext(paths state.Paths, args []string, _ io.Reader, stdout, stderr io.Writer) int {
-	clientType, sessionID, _, _, err := parseClientSessionFlags(args)
+	clientType, sessionID, _, _, _, err := parseClientSessionFlags(args)
 	if err != nil {
 		fmt.Fprintf(stderr, "usage error: %v\n", err)
 		return 2

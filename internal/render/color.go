@@ -2,7 +2,7 @@
 // it as a single line, an expanded panel, or JSON. The view model is the
 // one normalized surface every consumer reads: the Claude Code status line
 // (which renders in the client's existing footer, below the prompt bar),
-// the `fi` CLI, scripts, and any external integrator such as DevDesktop.
+// the `freeinference` CLI, scripts, and any external integrator such as DevDesktop.
 // There is no separate TUI — we compose into the status surface the user
 // already has.
 package render
@@ -91,7 +91,7 @@ var unicodeSymbols = symbols{
 	Arrow:              "→",
 	Separator:          "|",
 	Bullet:             "•",
-	Shield:             "🛡",
+	Shield:             "\U0001F6E1\uFE0E",
 }
 
 type symbols struct {
@@ -121,6 +121,38 @@ type RenderConfig struct {
 	UseASCII  bool
 	Compact   bool
 	Width     int // terminal width in columns; 0 = unknown (use wide default)
+}
+
+// ParseColorMode converts a string argument to a ColorMode value.
+// Accepts "auto", "always", "never" (case-insensitive). Returns
+// ColorAuto for unknown values so callers can fall back to detection.
+func ParseColorMode(s string) ColorMode {
+	switch strings.ToLower(s) {
+	case "auto":
+		return ColorAuto
+	case "always", "yes", "on", "true":
+		return ColorAlways
+	case "never", "no", "off", "false", "none":
+		return ColorNever
+	default:
+		return ColorAuto
+	}
+}
+
+// ParseColorFlag processes a single --color flag argument and returns the
+// resolved ColorMode. Unknown or missing values fall back to ColorAuto.
+func ParseColorFlag(arg string) ColorMode {
+	return ParseColorMode(arg)
+}
+
+// ApplyEnv overrides a ColorMode with environment-variable resolution.
+// Called only when the user did not explicitly set --color. Respects
+// NO_COLOR first (strongest signal), then FORCE_COLOR, then terminal check.
+func ApplyEnv(m ColorMode) ColorMode {
+	if m != ColorAuto {
+		return m // explicit CLI flag wins
+	}
+	return DetectColorMode()
 }
 
 // DefaultRenderConfig returns a config with auto-detection.

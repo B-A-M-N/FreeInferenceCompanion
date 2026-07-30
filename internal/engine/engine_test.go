@@ -1,12 +1,29 @@
 package engine
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
 
+// resetThresholds forces re-initialization of the lazy threshold singleton,
+// allowing tests to run with a clean state.
+func resetThresholds() {
+	once = sync.Once{}
+	thresholds = nil
+}
+
 func TestComputePressure_Healthy(t *testing.T) {
+	// Force default thresholds via env vars to ensure deterministic behavior.
+	t.Setenv("FI_WATCH_ENTER", "70")
+	t.Setenv("FI_WARN_ENTER", "80")
+	t.Setenv("FI_CRITICAL_ENTER", "90")
+	t.Setenv("FI_WATCH_LEAVE", "60")
+	t.Setenv("FI_WARN_LEAVE", "65")
+	t.Setenv("FI_CRITICAL_LEAVE", "75")
+	resetThresholds()
+
 	tests := []struct {
 		pct     float64
 		current string
@@ -28,6 +45,13 @@ func TestComputePressure_Healthy(t *testing.T) {
 }
 
 func TestComputePressure_Hysteresis_Warn(t *testing.T) {
+	t.Setenv("FI_WATCH_ENTER", "70")
+	t.Setenv("FI_WARN_ENTER", "80")
+	t.Setenv("FI_CRITICAL_ENTER", "90")
+	t.Setenv("FI_WATCH_LEAVE", "60")
+	t.Setenv("FI_WARN_LEAVE", "65")
+	t.Setenv("FI_CRITICAL_LEAVE", "75")
+	resetThresholds()
 	// Hysteresis: enter WARN at 80%, but don't leave until below 65%
 	tests := []struct {
 		pct     float64
@@ -49,6 +73,13 @@ func TestComputePressure_Hysteresis_Warn(t *testing.T) {
 }
 
 func TestComputePressure_Hysteresis_Critical(t *testing.T) {
+	t.Setenv("FI_WATCH_ENTER", "70")
+	t.Setenv("FI_WARN_ENTER", "80")
+	t.Setenv("FI_CRITICAL_ENTER", "90")
+	t.Setenv("FI_WATCH_LEAVE", "60")
+	t.Setenv("FI_WARN_LEAVE", "65")
+	t.Setenv("FI_CRITICAL_LEAVE", "75")
+	resetThresholds()
 	tests := []struct {
 		pct     float64
 		current string
@@ -69,6 +100,13 @@ func TestComputePressure_Hysteresis_Critical(t *testing.T) {
 }
 
 func TestComputePressure_Recovering(t *testing.T) {
+	t.Setenv("FI_WATCH_ENTER", "70")
+	t.Setenv("FI_WARN_ENTER", "80")
+	t.Setenv("FI_CRITICAL_ENTER", "90")
+	t.Setenv("FI_WATCH_LEAVE", "60")
+	t.Setenv("FI_WARN_LEAVE", "65")
+	t.Setenv("FI_CRITICAL_LEAVE", "75")
+	resetThresholds()
 	tests := []struct {
 		pct     float64
 		current string
@@ -88,6 +126,13 @@ func TestComputePressure_Recovering(t *testing.T) {
 }
 
 func TestComputePressure_Unknown(t *testing.T) {
+	t.Setenv("FI_WATCH_ENTER", "70")
+	t.Setenv("FI_WARN_ENTER", "80")
+	t.Setenv("FI_CRITICAL_ENTER", "90")
+	t.Setenv("FI_WATCH_LEAVE", "60")
+	t.Setenv("FI_WARN_LEAVE", "65")
+	t.Setenv("FI_CRITICAL_LEAVE", "75")
+	resetThresholds()
 	tests := []struct {
 		pct     float64
 		current string
@@ -108,6 +153,13 @@ func TestComputePressure_Unknown(t *testing.T) {
 }
 
 func TestClassifyPressure(t *testing.T) {
+	t.Setenv("FI_WATCH_ENTER", "70")
+	t.Setenv("FI_WARN_ENTER", "80")
+	t.Setenv("FI_CRITICAL_ENTER", "90")
+	t.Setenv("FI_WATCH_LEAVE", "60")
+	t.Setenv("FI_WARN_LEAVE", "65")
+	t.Setenv("FI_CRITICAL_LEAVE", "75")
+	resetThresholds()
 	state, reason := ClassifyPressure(85.0, schema.PressureHealthy)
 	if state != schema.PressureWarn {
 		t.Errorf("expected warn, got %s", state)
@@ -132,6 +184,13 @@ func TestClassifyPressure(t *testing.T) {
 }
 
 func TestValidateThresholds_ValidDefaults(t *testing.T) {
+	t.Setenv("FI_WATCH_ENTER", "70")
+	t.Setenv("FI_WARN_ENTER", "80")
+	t.Setenv("FI_CRITICAL_ENTER", "90")
+	t.Setenv("FI_WATCH_LEAVE", "60")
+	t.Setenv("FI_WARN_LEAVE", "65")
+	t.Setenv("FI_CRITICAL_LEAVE", "75")
+	resetThresholds()
 	// Default thresholds should be valid
 	if err := ValidateThresholds(); err != nil {
 		t.Errorf("default thresholds should be valid: %v", err)
