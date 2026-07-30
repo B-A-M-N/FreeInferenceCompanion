@@ -35,7 +35,7 @@ build-all: build-linux-amd64 build-linux-arm64 build-darwin-amd64 build-darwin-a
 # releases. Every gate listed here MUST pass or the release stops. This is the
 # single source of truth — the tag workflow depends on this exact target.
 release-check: clean-tree-check fmt-check vet mod-verify tidy-check test test-race security-scan bench-ci plugin-syntax-check build-all build
-	@if file $(BUILD_DIR)/$(BINARY) 2>&1 | grep -q "not a dynamic executable"; then \
+	@if file $(BUILD_DIR)/$(BINARY) 2>&1 | grep -q "statically linked"; then \
 		echo "static binary verified"; \
 	else \
 		echo "error: binary is dynamically linked"; exit 1; \
