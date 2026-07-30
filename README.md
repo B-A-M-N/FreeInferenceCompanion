@@ -1,6 +1,6 @@
 # FreeInference Companion
 
-Lightweight observability layer for FreeInference-powered coding-agent sessions. Shows live context metrics, rolling cache performance with root-cause attribution, model health, account budget projection, and context-pressure warnings — without adding latency, making network calls from hooks, or sending inference probes without explicit consent.
+Lightweight observability layer for FreeInference-powered coding-agent sessions. Shows live context metrics, rolling cache performance with root-cause attribution, model health, account budget projection, and context-pressure warnings — without adding latency, making network calls from hooks, or sending inference probes without explicit consent. The companion provides conversational management through Claude Code and Codex skills so users can query their session state naturally.
 
 **Companion, not proxy.** No prompt interception, no transcript scraping, no automatic failover, no daemon.
 
@@ -103,7 +103,7 @@ surfaces the user already has:
 | `FI_HEALTH_URL` | — | Provider health monitoring URL (optional) |
 | `FI_CACHE_DIR` | `~/.cache/freeinference-companion` | State cache directory |
 | `FI_SESSION_ID` | — | Explicit session override for status/context/report |
-| `FI_PROVIDER` | — | Set to `freeinference` to force provider detection |
+| `FI_PROVIDER` | — | Set to `freeinference` for attribution metadata only. Does NOT activate the companion. Activation requires a supported endpoint and credential. |
 | `FI_NO_BACKGROUND` | — | Set to `1` to disable detached background refresh |
 
 Provider detection order: `FI_PROVIDER` → `FREEINFERENCE_BASE_URL` →
@@ -122,11 +122,11 @@ The plugin uses three separate concepts for metrics:
 
 Missing fields are `null` — never converted to zero. A zero-token field remains zero; a missing field remains null.
 
-Cache-low warnings qualify only when all hold: 3+ unique observations, ≥50K
-active context, read share <20% for 3 sequential observations, confirmed
+Cache-low warnings fire under these hypothetical conditions: 3+ unique
+observations, ≥50K active context, read share <20% for 3 sequential observations, confirmed
 FreeInference provider, and a 30-minute cooldown. They resolve after 3
-sequential observations above 40%. The warning includes root-cause
-attribution (see below).
+sequential observations above 40%. The warning includes likely diagnosis
+(see below).
 
 Projection warnings qualify when active context is at least 60% of the
 model's window and the projected next request (active + estimated prompt +
@@ -135,16 +135,16 @@ reserve (default 16,000 tokens). Confidence is labeled `low` or `medium` —
 never `high` in v0.1.0 because the companion does not see the full request
 body the client sends.
 
-Cache TTL expiry warnings fire when a session has been idle past the
-Anthropic prompt cache lifetime (~5 minutes). The next request will
-re-read the entire context at full price because the cached prefix has
-evicted. The warning suggests sending a short warm-up message first to
-refill the cache cheaply before the real query. Gated on ≥10K active
-context and a 30-minute cooldown.
+Cache TTL expiry warnings may fire when a session has been idle past a
+hypothetical prompt cache lifetime (~5 minutes). The next request might
+re-read context at full price if the cached prefix has evicted. The
+warning suggests sending a short warm-up message first to refill the
+cache before the real query. Gated on ≥10K active context and a
+30-minute cooldown.
 
 ### Cache miss pattern attribution
 
-`fi cache` classifies cache miss patterns into root causes instead of
+`fi cache` classifies cache miss patterns with likely diagnosis instead of
 generic diagnostics:
 
 | Pattern | Meaning | Example cause |

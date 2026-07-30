@@ -249,13 +249,15 @@ func (a *ClaudeAdapter) HandleStatusLineUpdateWith(input *schema.ClaudeStatusLin
 			// refresh rolling cache analysis.
 			newObservation := false
 			if latest != nil {
+				fp, fpSource := engine.ObservationFingerprint(
+					snap.Model.ID,
+					input.PromptID,
+					deref(totalInput), deref(totalOutput),
+					latest.FreshInputTokens, latest.CacheReadInputTokens,
+					latest.CacheCreationInputTokens, latest.OutputTokens)
 				obs := schema.UsageObservation{
-					Fingerprint: engine.ObservationFingerprint(
-						snap.Model.ID,
-						input.PromptID,
-						deref(totalInput), deref(totalOutput),
-						latest.FreshInputTokens, latest.CacheReadInputTokens,
-						latest.CacheCreationInputTokens, latest.OutputTokens),
+					Fingerprint:              fp,
+					FingerprintSource:        fpSource,
 					ObservedAt:               now,
 					ModelID:                  snap.Model.ID,
 					TotalInputTokens:         totalInput,
@@ -266,6 +268,15 @@ func (a *ClaudeAdapter) HandleStatusLineUpdateWith(input *schema.ClaudeStatusLin
 					OutputTokens:             latest.OutputTokens,
 				}
 				newObservation = engine.AddObservation(snap, obs)
+			}
+			// Track cache timing separately from general session activity.
+			// Only refresh on new inference observations so we don't
+			// pollute the cache clock with lifecycle noise.
+			if newObservation {
+				if snap.CacheTiming == nil {
+					snap.CacheTiming = &schema.CacheTiming{}
+				}
+				snap.CacheTiming.LastInferenceObservedAt = now
 			}
 			if newObservation {
 				engine.AnalyzeCache(snap, ActiveContextTokens(snap), now)
@@ -456,6 +467,16 @@ func (a *ClaudeAdapter) HandleUserPromptSubmitWith(input *schema.ClaudeHookInput
 			// The cache TTL warning needs the idle gap between the last event
 			// and this prompt — if we overwrite first, the gap is always zero.
 			prevLastEventAt := snap.Session.LastEventAt
+			// Use CacheTiming as the authoritative cache clock. The cache
+			// TTL evaluation must not be driven by Session.LastEventAt which
+			// gets updated for every lifecycle event. Instead use
+			// LastInferenceObservedAt which only advances on real inference
+			// observations. Fall back to LastEventAt if CacheTiming has never
+			// been set (legacy sessions).
+			cacheClock := prevLastEventAt
+			if snap.CacheTiming != nil && !snap.CacheTiming.LastInferenceObservedAt.IsZero() {
+				cacheClock = snap.CacheTiming.LastInferenceObservedAt
+			}
 			snap.Activity.TurnActive = &active
 			snap.Activity.TurnStartedAt = &now
 			snap.Session.Status = schema.SessionActive
@@ -512,12 +533,12 @@ func (a *ClaudeAdapter) HandleUserPromptSubmitWith(input *schema.ClaudeHookInput
 			// context warning won't show (context is urgent safety; TTL is
 			// cost — but both matter, so TTL gets priority over projection
 			// and cache-low because it's the most actionable cost signal).
-			// Uses prevLastEventAt (captured before overwrite) — the idle
-			// gap is between the LAST activity and now, not zero.
+			// Uses cacheClock (derived from CacheTiming when available) — the
+			// idle gap is between the last inference observation and now.
 			var ttlDecision engine.CacheTTLDecision
 			var ttlWouldShow bool
 			if !contextWouldShow {
-				ttlDecision = engine.EvaluateCacheTTLExpiry(snap, ActiveContextTokens(snap), prevLastEventAt, now)
+				ttlDecision = engine.EvaluateCacheTTLExpiryV2(snap, ActiveContextTokens(snap), cacheClock, now)
 				if ttlDecision.Warn && engine.ShouldShowCacheTTLWarning(snap, now) {
 					ttlWouldShow = true
 				}
@@ -541,9 +562,9 @@ func (a *ClaudeAdapter) HandleUserPromptSubmitWith(input *schema.ClaudeHookInput
 			}
 
 			// TTL resolves when the user sends a prompt without an idle gap
-			// (the cache is being actively used again). Uses prevLastEventAt
-			// because snap.Session.LastEventAt has already been overwritten.
-			if snap.Warnings.CacheTTLWarningActive && !ttlWouldShow && now.Sub(prevLastEventAt) < engine.PromptCacheTTL {
+			// (the cache is being actively used again). Uses cacheClock
+			// (derived from CacheTiming when available).
+			if snap.Warnings.CacheTTLWarningActive && !ttlWouldShow && now.Sub(cacheClock) < engine.PromptCacheTTL {
 				snap.Warnings.CacheTTLWarningActive = false
 				events = append(events, state.Event{Type: state.EventWarningResolved, Detail: "cache_ttl_expiry"})
 			}
@@ -571,7 +592,7 @@ func (a *ClaudeAdapter) HandleUserPromptSubmitWith(input *schema.ClaudeHookInput
 			case ttlWouldShow:
 				output = &schema.ClaudeWarningOutput{
 					Continue:       true,
-					SystemMessage:  engine.CacheTTLWarningMessage(ttlDecision.IdleMinutes, ActiveContextTokens(snap)),
+					SystemMessage:  engine.CacheTTLWarningMessageV2(snap, ttlDecision.IdleMinutes, ActiveContextTokens(snap)),
 					SuppressOutput: true,
 				}
 			case projectionMsg != "":
@@ -587,12 +608,19 @@ func (a *ClaudeAdapter) HandleUserPromptSubmitWith(input *schema.ClaudeHookInput
 				}
 				// Include root-cause attribution so the warning is actionable,
 				// not just diagnostic.
-				attr := engine.AttributeCacheMisses(snap)
+				diag := engine.BuildCacheDiagnosis(snap, now)
+				var hypothesis string
+				if len(diag.CandidateCauses) > 0 {
+					hypothesis = diag.CandidateCauses[0].Label
+				}
 				msg := fmt.Sprintf(
 					"FreeInference: cache reuse is low (read share %.0f%% over recent requests). Repeated full-context re-reads increase latency and cost.",
 					share*100)
-				if attr.Pattern != engine.PatternNone && attr.Pattern != engine.PatternInsufficientData {
-					msg += " Likely cause: " + attr.Diagnosis
+				if hypothesis != "" && diag.Kind != "unknown" {
+					msg += " Possible cause: " + hypothesis + "."
+				}
+				if diag.Kind == "unknown" || diag.Confidence < 0.3 {
+					msg += " FreeInference has not returned a cache-miss reason, so causes are hypothetical."
 				}
 				output = &schema.ClaudeWarningOutput{
 					Continue:       true,

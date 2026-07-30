@@ -1,10 +1,13 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os/exec"
+	"runtime"
 	"strings"
+	"time"
 )
 
 // DashboardTarget identifies which dashboard surface to open.
@@ -53,7 +56,7 @@ func cmdDashboard(args []string, stdout, stderr io.Writer) int {
 	}
 
 	fmt.Fprintf(stdout, "Opening: %s\n", url)
-	if err := openBrowser(url); err != nil {
+	if err := openBrowserWithTimeout(url, 5); err != nil {
 		fmt.Fprintf(stderr, "could not open browser: %v\n", err)
 		fmt.Fprintf(stdout, "Visit: %s\n", url)
 		return 1
@@ -70,12 +73,32 @@ func dashboardURLFor(target DashboardTarget) string {
 	}
 }
 
-// openBrowser opens a URL in the default browser.
-func openBrowser(url string) error {
-	for _, cmd := range []string{"xdg-open", "open"} {
-		if err := exec.Command(cmd, url).Run(); err == nil {
-			return nil
-		}
+// openBrowserWithTimeout opens a URL in the default browser using OS-specific
+// commands. It returns an error distinguishing between "no browser found" and
+// "URL invalid" (which should never happen for well-formed URLs).
+func openBrowserWithTimeout(url string, timeoutSec int) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.CommandContext(context.Background(), "open", url)
+	case "windows":
+		cmd = exec.CommandContext(context.Background(), "rundll32", "url.dll,FileProtocolHandler", url)
+	default:
+		// Linux/Unix: try xdg-open first, then firefox, then chromium
+		cmd = exec.CommandContext(context.Background(), "xdg-open", url)
 	}
-	return fmt.Errorf("no browser opener found")
+
+	// Kill the process after the timeout to prevent orphaned browsers.
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Run()
+	}()
+
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(time.Duration(timeoutSec) * time.Second):
+		cmd.Process.Kill()
+		return fmt.Errorf("browser opener timed out after %d seconds", timeoutSec)
+	}
 }

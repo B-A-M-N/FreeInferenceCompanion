@@ -168,7 +168,7 @@ func Evaluate() Activation {
 func EvaluateWithModel(modelID string) Activation {
 	a := Activation{ModelID: modelID}
 
-	if os.Getenv("FI_DISABLED") == "1" {
+	if os.Getenv("FI_DISABLED") == "1" || os.Getenv("FI_RUNTIME_INACTIVE") == "1" {
 		a.Disabled = true
 		a.InactiveReason = ReasonDisabled
 		return a

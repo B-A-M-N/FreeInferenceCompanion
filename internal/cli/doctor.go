@@ -9,6 +9,7 @@ import (
 
 	"github.com/b-a-m-n/freeinference-companion/internal/adapters"
 	"github.com/b-a-m-n/freeinference-companion/internal/api"
+	"github.com/b-a-m-n/freeinference-companion/internal/config"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
@@ -57,6 +58,7 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 
 	// 2. State files readable.
 	add("State schema", checkStateReadable(paths))
+	add("Configuration", checkConfigValid())
 
 	// 3. Binary resolvable.
 	add("fi binary", checkBinaryResolvable())
@@ -268,6 +270,48 @@ func checkBinaryResolvable() api.CheckResult {
 	default:
 		return api.CheckResult{State: api.CheckFail, Detail: "fi not resolvable"}
 	}
+}
+
+func checkConfigValid() api.CheckResult {
+	mgr, err := config.NewManager()
+	if err != nil {
+		return api.CheckResult{State: api.CheckWarn, Detail: "config manager: " + err.Error()}
+	}
+	eff, err := mgr.Resolve()
+	if err != nil {
+		return api.CheckResult{State: api.CheckWarn, Detail: "config resolve: " + err.Error()}
+	}
+	// Count invalid settings
+	var invalid []string
+	for _, v := range []struct {
+		name  string
+		valid bool
+		err   string
+	}{
+		{"watch_enter", eff.Context.WatchEnter.Valid, eff.Context.WatchEnter.Error},
+		{"warn_enter", eff.Context.WarnEnter.Valid, eff.Context.WarnEnter.Error},
+		{"critical_enter", eff.Context.CriticalEnter.Valid, eff.Context.CriticalEnter.Error},
+		{"watch_leave", eff.Context.WatchLeave.Valid, eff.Context.WatchLeave.Error},
+		{"warn_leave", eff.Context.WarnLeave.Valid, eff.Context.WarnLeave.Error},
+		{"critical_leave", eff.Context.CriticalLeave.Valid, eff.Context.CriticalLeave.Error},
+		{"output_reserve", eff.Context.OutputReserve.Valid, eff.Context.OutputReserve.Error},
+	} {
+		if !v.valid {
+			invalid = append(invalid, v.name+": "+v.err)
+		}
+	}
+	if len(invalid) > 0 {
+		detail := fmt.Sprintf("%d invalid settings: ", len(invalid))
+		for i, s := range invalid {
+			if i > 0 {
+				detail += "; "
+			}
+			detail += s
+		}
+		return api.CheckResult{State: api.CheckWarn, Detail: detail}
+	}
+	detail := fmt.Sprintf("all settings valid (%s)", eff.Context.WatchEnter.Source)
+	return api.CheckResult{State: api.CheckPass, Detail: detail}
 }
 
 func checkClaudeHookConfig() api.CheckResult {

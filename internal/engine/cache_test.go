@@ -11,7 +11,10 @@ func i64(v int64) *int64 { return &v }
 
 func obs(model string, totalIn, totalOut, fresh, read, creation, output int64) schema.UsageObservation {
 	return schema.UsageObservation{
-		Fingerprint:              ObservationFingerprint(model, "", totalIn, totalOut, i64(fresh), i64(read), i64(creation), i64(output)),
+		Fingerprint: func() string {
+			fp, _ := ObservationFingerprint(model, "", totalIn, totalOut, i64(fresh), i64(read), i64(creation), i64(output))
+			return fp
+		}(),
 		ObservedAt:               time.Now(),
 		ModelID:                  model,
 		TotalInputTokens:         i64(totalIn),
@@ -225,26 +228,64 @@ func TestAnalyzeCacheIdempotentCounters(t *testing.T) {
 
 func TestObservationFingerprintWithPromptID(t *testing.T) {
 	// Same token counts but different prompt IDs → distinct fingerprints.
-	fp1 := ObservationFingerprint("m", "prompt-aaa", 100000, 1000, i64(5000), i64(90000), i64(5000), i64(1000))
-	fp2 := ObservationFingerprint("m", "prompt-bbb", 100000, 1000, i64(5000), i64(90000), i64(5000), i64(1000))
+	fp1, src1 := ObservationFingerprint("m", "prompt-aaa", 100000, 1000, i64(5000), i64(90000), i64(5000), i64(1000))
+	fp2, src2 := ObservationFingerprint("m", "prompt-bbb", 100000, 1000, i64(5000), i64(90000), i64(5000), i64(1000))
 	if fp1 == fp2 {
 		t.Fatal("different prompt IDs must produce different fingerprints")
 	}
+	if src1 != schema.FingerprintClientTurnID {
+		t.Errorf("prompt ID source = %s, want %s", src1, schema.FingerprintClientTurnID)
+	}
+	if src2 != schema.FingerprintClientTurnID {
+		t.Errorf("prompt ID source = %s, want %s", src2, schema.FingerprintClientTurnID)
+	}
 
 	// Same prompt ID → same fingerprint even with different tokens (prompt_id wins).
-	fp3 := ObservationFingerprint("m", "prompt-aaa", 200000, 2000, i64(10000), i64(180000), i64(10000), i64(2000))
+	fp3, _ := ObservationFingerprint("m", "prompt-aaa", 200000, 2000, i64(10000), i64(180000), i64(10000), i64(2000))
 	if fp1 != fp3 {
 		t.Fatal("same prompt ID must produce same fingerprint")
 	}
 
 	// No prompt ID → falls back to token-based fingerprint.
-	fp4 := ObservationFingerprint("m", "", 100000, 1000, i64(5000), i64(90000), i64(5000), i64(1000))
-	fp5 := ObservationFingerprint("m", "", 100000, 1000, i64(5000), i64(90000), i64(5000), i64(1000))
+	fp4, src4 := ObservationFingerprint("m", "", 100000, 1000, i64(5000), i64(90000), i64(5000), i64(1000))
+	fp5, src5 := ObservationFingerprint("m", "", 100000, 1000, i64(5000), i64(90000), i64(5000), i64(1000))
 	if fp4 != fp5 {
 		t.Fatal("token-based fallback must be deterministic")
 	}
-	fp6 := ObservationFingerprint("m", "", 100001, 1000, i64(5000), i64(90000), i64(5000), i64(1000))
+	if src4 != schema.FingerprintFallback {
+		t.Errorf("token fallback source = %s, want %s", src4, schema.FingerprintFallback)
+	}
+	if src5 != schema.FingerprintFallback {
+		t.Errorf("token fallback source = %s, want %s", src5, schema.FingerprintFallback)
+	}
+	fp6, _ := ObservationFingerprint("m", "", 100001, 1000, i64(5000), i64(90000), i64(5000), i64(1000))
 	if fp4 == fp6 {
 		t.Fatal("different token counts must produce different fingerprints without prompt_id")
+	}
+}
+
+// TestObservationFingerprintSource verifies that the fingerprint source is
+// correctly reported for both prompt-ID and token-based paths.
+func TestObservationFingerprintSource(t *testing.T) {
+	// Prompt-ID path: source must be FingerprintClientTurnID.
+	_, src1 := ObservationFingerprint("m", "some-request-id", 1000, 100, i64(100), i64(800), i64(100), i64(100))
+	if src1 != schema.FingerprintClientTurnID {
+		t.Errorf("prompt-ID source = %s, want %s", src1, schema.FingerprintClientTurnID)
+	}
+
+	// Token fallback path: source must be FingerprintFallback.
+	_, src2 := ObservationFingerprint("m", "", 1000, 100, i64(100), i64(800), i64(100), i64(100))
+	if src2 != schema.FingerprintFallback {
+		t.Errorf("token fallback source = %s, want %s", src2, schema.FingerprintFallback)
+	}
+}
+
+// TestDistinctRequestsSameTokenCounts verifies that requests with the same
+// token counts but different model IDs produce different fingerprints.
+func TestDistinctRequestsSameTokenCounts(t *testing.T) {
+	fpA, _ := ObservationFingerprint("model-a", "", 100000, 1000, i64(5000), i64(90000), i64(5000), i64(1000))
+	fpB, _ := ObservationFingerprint("model-b", "", 100000, 1000, i64(5000), i64(90000), i64(5000), i64(1000))
+	if fpA == fpB {
+		t.Fatal("different models must produce different fingerprints when no prompt ID is available")
 	}
 }

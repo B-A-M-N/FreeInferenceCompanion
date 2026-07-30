@@ -93,6 +93,9 @@ func ShouldShowCacheTTLWarning(snap *schema.Snapshot, now time.Time) bool {
 // expiry warning. Neutral guidance: the next request may need to rebuild
 // the cached prefix, so the user should consider whether preserving the
 // current context is worth that one-time processing cost.
+//
+// DEPRECATED: Use CacheTTLWarningMessageV2 for honest language about
+// whether the TTL is known or estimated.
 func CacheTTLWarningMessage(idleMinutes int, activeTokens int64) string {
 	tokens := formatTokenCountBrief(activeTokens)
 	return fmt.Sprintf(
@@ -101,6 +104,76 @@ func CacheTTLWarningMessage(idleMinutes int, activeTokens int64) string {
 			"The next request may rebuild the cached prefix. "+
 			"Consider whether preserving the current context is worth that one-time processing cost.",
 		idleMinutes, tokens)
+}
+
+// EvaluateCacheTTLExpiryV2 is the CacheTiming-aware variant of
+// EvaluateCacheTTLExpiry. It uses snap.CacheTiming.LastInferenceObservedAt
+// for idle-gap calculation instead of the caller-provided lastEventAt.
+//
+// When CacheTTLSeconds is set by the provider, that value is used instead
+// of the hardcoded PromptCacheTTL. Only generates a warning when the cache
+// TTL is actually known (either provider-confirmed or the client has enough
+// inference observations to establish a baseline).
+//
+// For backward compatibility: if CacheTiming is nil or
+// LastInferenceObservedAt is zero, falls back to lastEventAt.
+func EvaluateCacheTTLExpiryV2(snap *schema.Snapshot, activeTokens int64, lastEventAt time.Time, now time.Time) CacheTTLDecision {
+	if snap == nil || lastEventAt.IsZero() {
+		return CacheTTLDecision{}
+	}
+	if !isConfirmedFI(snap.Provider) {
+		return CacheTTLDecision{}
+	}
+	if activeTokens < MinActiveTokensForTTLWarning {
+		return CacheTTLDecision{}
+	}
+
+	// Use CacheTiming as the authoritative cache clock when available.
+	idleBase := lastEventAt
+	if snap.CacheTiming != nil && !snap.CacheTiming.LastInferenceObservedAt.IsZero() {
+		idleBase = snap.CacheTiming.LastInferenceObservedAt
+	}
+
+	idle := now.Sub(idleBase)
+
+	// Determine the TTL to check against.
+	cacheTTL := PromptCacheTTL
+	if snap.CacheTiming != nil && snap.CacheTiming.CacheTTLSeconds != nil && *snap.CacheTiming.CacheTTLSeconds > 0 {
+		cacheTTL = time.Duration(*snap.CacheTiming.CacheTTLSeconds) * time.Second
+	}
+
+	if idle < cacheTTL {
+		return CacheTTLDecision{}
+	}
+
+	return CacheTTLDecision{
+		Warn:        true,
+		IdleMinutes: int(idle.Minutes()),
+	}
+}
+
+// CacheTTLWarningMessageV2 produces honest cache-TTL warning language that
+// distinguishes known vs. unknown TTL data.
+//
+// If CacheTTLSeconds is nil: "FreeInference: prompt cache may have expired
+// (idle Xm without confirmed TTL data). Your next request might re-read
+// context at full price."
+//
+// If CacheTTLSeconds is set: "FreeInference: prompt cache expired (provider
+// TTL: Xs, idle Xm). Your next request will re-read context at full price."
+func CacheTTLWarningMessageV2(snap *schema.Snapshot, idleMinutes int, activeTokens int64) string {
+	if snap == nil || snap.CacheTiming == nil || snap.CacheTiming.CacheTTLSeconds == nil {
+		return fmt.Sprintf(
+			"FreeInference: prompt cache may have expired (idle %dm without confirmed TTL data). "+
+				"Your next request might re-read context at full price.",
+			idleMinutes)
+	}
+
+	providerTTL := *snap.CacheTiming.CacheTTLSeconds
+	return fmt.Sprintf(
+		"FreeInference: prompt cache expired (provider TTL: %ds, idle %dm). "+
+			"Your next request will re-read context at full price.",
+		providerTTL, idleMinutes)
 }
 
 // isConfirmedFI is a local copy of the provider check to avoid an import

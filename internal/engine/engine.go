@@ -123,6 +123,9 @@ func (c ThresholdConfig) Validate() error {
 	return nil
 }
 
+// DEPRECATED: Use internal/config.Manager.Resolve() for configuration.
+// These functions silently default on parse errors, which is unsafe for
+// operational thresholds. The config package returns proper diagnostics.
 func getEnvFloat(key string, def float64) float64 {
 	if v := os.Getenv(key); v != "" {
 		if f, err := strconv.ParseFloat(v, 64); err == nil {
@@ -132,6 +135,9 @@ func getEnvFloat(key string, def float64) float64 {
 	return def
 }
 
+// DEPRECATED: Use internal/config.Manager.Resolve() for configuration.
+// These functions silently default on parse errors, which is unsafe for
+// operational thresholds. The config package returns proper diagnostics.
 func getEnvInt(key string, def int) int {
 	if v := os.Getenv(key); v != "" {
 		if i, err := strconv.Atoi(v); err == nil {

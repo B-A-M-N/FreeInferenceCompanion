@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/b-a-m-n/freeinference-companion/internal/runtime"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
@@ -266,5 +267,85 @@ func minimalSnapshot(id string) *schema.Snapshot {
 		},
 		Model:    schema.ModelInfo{ID: "glm-5.1"},
 		Pressure: schema.PressureState{State: schema.PressureUnknown},
+	}
+}
+
+// ============================================================
+// Disabled mode tests
+// ============================================================
+
+func TestDisabledModeHookExitsZero(t *testing.T) {
+	t.Setenv("FI_DISABLED", "1")
+	t.Setenv("FI_CACHE_DIR", t.TempDir())
+	var out, errOut strings.Builder
+	// Even with disabled, hook commands must return 0 and produce no output.
+	code := Run([]string{"fi", "hook", "claude-code", "SessionStart"}, strings.NewReader("{}"), &out, &errOut)
+	if code != 0 {
+		t.Errorf("disabled hook exit = %d, want 0", code)
+	}
+	if out.String() != "" {
+		t.Errorf("disabled hook stdout = %q, want empty", out.String())
+	}
+	if errOut.String() != "" {
+		t.Errorf("disabled hook stderr = %q, want empty", errOut.String())
+	}
+}
+
+func TestDisabledModeBlocksProviderStateCommands(t *testing.T) {
+	t.Setenv("FI_DISABLED", "1")
+	// Provider-state commands (status, report, doctor) must be blocked in
+	// disabled mode: exit 1 and print the DISABLED warning.
+	tests := []struct {
+		args []string
+	}{
+		{args: []string{"fi", "status"}},
+		{args: []string{"fi", "report"}},
+		{args: []string{"fi", "doctor"}},
+	}
+	for _, tt := range tests {
+		t.Run(strings.Join(tt.args[1:], ""), func(t *testing.T) {
+			var out, errOut strings.Builder
+			code := Run(tt.args, strings.NewReader(""), &out, &errOut)
+			if code != 1 {
+				t.Errorf("disabled %s exit = %d, want 1", tt.args[1], code)
+			}
+			errStr := errOut.String()
+			if !strings.Contains(errStr, "DISABLED") && !strings.Contains(errStr, "disabled") {
+				t.Errorf("disabled %s must print DISABLED warning to stderr:\n%s", tt.args[1], errStr)
+			}
+		})
+	}
+}
+
+func TestDisabledModeDiagnosticCommandsDoNotProbe(t *testing.T) {
+	t.Setenv("FI_DISABLED", "1")
+	t.Setenv("FI_CACHE_DIR", t.TempDir())
+	t.Setenv("FREEINFERENCE_BASE_URL", "https://freeinference.org/v1")
+	t.Setenv("FREEINFERENCE_API_KEY", "test-key")
+	var out, errOut strings.Builder
+	code := Run([]string{"fi", "doctor"}, strings.NewReader(""), &out, &errOut)
+	if code != 1 {
+		t.Errorf("disabled doctor exit = %d, want 1", code)
+	}
+	// Diagnostic commands must not probe the provider in disabled mode.
+	output := out.String()
+	if strings.Contains(output, "Inference probe") || strings.Contains(output, "API endpoint:") {
+		t.Error("disabled doctor must not probe provider endpoints")
+	}
+}
+
+// TestDisabledModeActivationGate ensures the runtime activation gate correctly
+// blocks when FI_DISABLED=1 even with valid endpoint+key configured.
+func TestDisabledModeActivationGate(t *testing.T) {
+	t.Setenv("FI_DISABLED", "1")
+	t.Setenv("FREEINFERENCE_BASE_URL", "https://freeinference.org/v1")
+	t.Setenv("FREEINFERENCE_API_KEY", "test-key")
+
+	a := runtime.Evaluate()
+	if a.Active {
+		t.Fatal("FI_DISABLED=1 must prevent activation even with valid endpoint+key")
+	}
+	if !a.Disabled {
+		t.Error("Disabled flag should be set")
 	}
 }

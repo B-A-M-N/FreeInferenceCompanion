@@ -3,7 +3,15 @@
 BINARY=fi
 BUILD_DIR=build
 VERSION?=$(shell git describe --tags --always --dirty 2>/dev/null || echo "0.1.0-dev")
-COMMIT?=$(shell git rev-parse --short HEAD 2>/dev/null || echo "dev")
+COMMIT?=$(shell git rev-parse HEAD 2>/dev/null || echo "dev")
+
+# Reproducible builds: set SOURCE_DATE_EPOCH from the latest commit
+# so archive timestamps are deterministic. Override via environment.
+SOURCE_DATE_EPOCH ?= $(shell git log -1 --format=%ct 2>/dev/null || echo "")
+ifneq ($(SOURCE_DATE_EPOCH),)
+export SOURCE_DATE_EPOCH
+endif
+
 LDFLAGS=-ldflags "-s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT)"
 STATIC_FLAGS=CGO_ENABLED=0
 RELEASE_DIR=release
@@ -297,7 +305,7 @@ test:
 	go test ./... -count=1
 
 test-race:
-	go test -race ./... -count=1
+	go test -race -tags=saltloader ./... -count=1
 
 vet:
 	go vet ./...
@@ -313,6 +321,16 @@ fmt-check:
 # that the Codex runtime will load plugin-local hooks. Use the official
 # `claude` plugin validator and a real Codex install for runtime validation
 # (tracked separately under P0-1).
+#
+# Remaining gaps requiring real runtime validation:
+# - Salt race detection: only exercised when test binaries are built with
+#   the `saltloader` build tag (via `make test-race` or `go test -tags=saltloader`).
+# - Full activation flow: end-to-end activation across hook, status-line, and
+#   background refresh requires real FreeInference credentials and a live
+#   endpoint. No unit test can exercise this without network access.
+# - Plugin-SDK compatibility: the exact hook contract with Claude Code and
+#   Codex versions 0.145+ should be verified on a real installation from time
+#   to time, especially after platform updates.
 plugin-syntax-check:
 	@python3 -c "import json; json.load(open('plugins/claude-code/.claude-plugin/plugin.json')); json.load(open('plugins/claude-code/hooks/hooks.json')); json.load(open('plugins/codex/.codex-plugin/plugin.json')); json.load(open('plugins/codex/hooks/hooks.json')); print('plugin manifests are syntactically valid JSON')"
 	@bash -n plugins/claude-code/scripts/run-hook.sh && bash -n plugins/codex/scripts/run-hook.sh && echo "hook wrappers are syntactically valid bash"
@@ -412,7 +430,7 @@ run:
 # reads or mutates the operator's real cache, and never inherits real
 # credentials. Each command is asserted to exit cleanly.
 smoke: build
-	tmp="$$(mktemp -d "${TMPDIR:-/tmp}/fi-smoke.XXXXXX")"; \
+	tmp="$$(mktemp -d "$${TMPDIR:-/tmp}/fi-smoke.XXXXXX")"; \
 	trap 'rm -rf "$$tmp"' EXIT; \
 	HOME="$$tmp/home" \
 	FI_CACHE_DIR="$$tmp/cache" \

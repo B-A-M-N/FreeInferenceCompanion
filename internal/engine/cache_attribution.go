@@ -2,21 +2,23 @@ package engine
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
 
 // ============================================================
-// Cache miss pattern attribution
+// Cache miss pattern attribution (Finding 4)
 // ============================================================
 
 const (
-	// Attribution thresholds. These classify WHY cache performance is poor
+	// Attribution thresholds. These suggest WHY cache performance is poor
 	// by examining the ratio of cache_creation vs fresh_input vs cache_read
-	// across the observation window.
+	// across the observation window. All results are heuristic unless the
+	// provider supplies explicit reason metadata.
 
 	// CacheCreationHighThreshold: when cache_creation share exceeds this,
-	// the prefix is being rewritten frequently (thrashing).
+	// the prefix is being rewritten frequently (possible thrashing).
 	CacheCreationHighThreshold = 0.30
 
 	// FreshInputDominantThreshold: when fresh_input share exceeds this AND
@@ -25,51 +27,277 @@ const (
 
 	// IntermittentMissVariance: when the read share swings wildly between
 	// observations (high variance), the cache hits/misses are sporadic.
-	// Variance on a 0-1 share scale: 0.06 means typical swings of ±0.25
-	// around the mean, which is a clear good/bad alternation pattern.
 	IntermittentMissVariance = 0.06
+
+	// algorithmVersion identifies this attribution algorithm for diagnostics.
+	algorithmVersion = "v2.0.0"
 )
 
 // CacheAttribution is the root-cause diagnosis for poor cache performance.
-// Instead of saying "your read share is 15%", it says WHY and what to do.
+// Deprecated: Use BuildCacheDiagnosis instead, which returns the structured
+// schema.CacheDiagnosis type with proper attribution kind, evidence, and
+// confidence.
 type CacheAttribution struct {
-	// Pattern is the classified cache miss pattern.
-	Pattern CachePattern `json:"pattern"`
-	// Diagnosis is a human-readable explanation of the likely cause.
-	Diagnosis string `json:"diagnosis"`
-	// Recommendation is the specific action the user should take.
-	Recommendation string `json:"recommendation"`
-	// Confidence is "low", "medium", or "high" based on sample size.
-	Confidence string `json:"confidence"`
+	Pattern        CachePattern `json:"pattern"`
+	Diagnosis      string       `json:"diagnosis"`
+	Recommendation string       `json:"recommendation"`
+	Confidence     string       `json:"confidence"`
 }
 
 // CachePattern classifies the observed cache miss pattern.
 type CachePattern string
 
 const (
-	// PatternNone: cache performance is acceptable; no attribution needed.
-	PatternNone CachePattern = "none"
-	// PatternThrashing: high cache_creation, low cache_read. The prefix
-	// keeps being rewritten instead of reused.
-	PatternThrashing CachePattern = "thrashing"
-	// PatternNoCaching: high fresh_input, near-zero creation and read.
-	// The client isn't benefiting from prompt caching at all.
-	PatternNoCaching CachePattern = "no_caching"
-	// PatternDecay: read share was good but is declining over time.
-	// The growing conversation is pushing past the cached prefix.
-	PatternDecay CachePattern = "decay"
-	// PatternIntermittent: alternating good/bad observations. Some turns
-	// hit the cache, others miss — likely tool calls breaking the prefix.
-	PatternIntermittent CachePattern = "intermittent"
-	// PatternInsufficientData: not enough observations to classify.
+	PatternNone             CachePattern = "none"
+	PatternThrashing        CachePattern = "thrashing"
+	PatternNoCaching        CachePattern = "no_caching"
+	PatternDecay            CachePattern = "decay"
+	PatternIntermittent     CachePattern = "intermittent"
 	PatternInsufficientData CachePattern = "insufficient_data"
 )
+
+// BuildCacheDiagnosis returns a structured cache diagnosis with honest attribution
+// kind, evidence, confidence, and candidate causes. The fallback is always
+// "unknown" — never a specific failure mode without supporting evidence.
+//
+// This replaces AttributeCacheMisses for all new code. The old function is
+// preserved for backward compatibility with the CLI output layer.
+func BuildCacheDiagnosis(snap *schema.Snapshot, now time.Time) schema.CacheDiagnosis {
+	diag := schema.CacheDiagnosis{
+		Kind:             schema.AttributionUnknown,
+		Status:           schema.CacheStatusUnknown,
+		ReasonCode:       schema.ReasonUnknown,
+		Confidence:       0,
+		AlgorithmVersion: algorithmVersion,
+		ObservedAt:       now,
+	}
+
+	if snap == nil || snap.CacheAnalysis == nil || len(snap.UsageObservations) < MinObservationsForWarning {
+		diag.Evidence = []schema.EvidenceItem{
+			{Description: "Insufficient observations to analyze cache behavior", Source: "inferred"},
+		}
+		diag.MissingEvidence = []string{
+			"At least " + fmt.Sprintf("%d", MinObservationsForWarning) + " unique usage observations",
+			"Provider-returned cache status or reason code",
+		}
+		diag.Kind = schema.AttributionUnknown
+		return diag
+	}
+
+	analysis := snap.CacheAnalysis
+	readShare := 0.0
+	creationShare := 0.0
+	freshShare := 0.0
+	if analysis.CacheReadShare != nil {
+		readShare = *analysis.CacheReadShare
+	}
+	if analysis.CacheCreationShare != nil {
+		creationShare = *analysis.CacheCreationShare
+	}
+	if analysis.FreshInputShare != nil {
+		freshShare = *analysis.FreshInputShare
+	}
+
+	// Build evidence from what we can observe.
+	diag.Evidence = []schema.EvidenceItem{
+		{
+			Description: fmt.Sprintf("Cache read share: %.0f%% over %d unique observations", readShare*100, analysis.RequestSamples),
+			Value:       fmt.Sprintf("%.2f", readShare),
+			Source:      "client_observed",
+		},
+	}
+	if creationShare > 0 {
+		diag.Evidence = append(diag.Evidence, schema.EvidenceItem{
+			Description: fmt.Sprintf("Cache creation share: %.0f%%", creationShare*100),
+			Value:       fmt.Sprintf("%.2f", creationShare),
+			Source:      "client_observed",
+		})
+	}
+	if freshShare > 0 {
+		diag.Evidence = append(diag.Evidence, schema.EvidenceItem{
+			Description: fmt.Sprintf("Fresh input share: %.0f%%", freshShare*100),
+			Value:       fmt.Sprintf("%.2f", freshShare),
+			Source:      "client_observed",
+		})
+	}
+
+	// The companion cannot determine exact miss reasons from token ratios alone.
+	diag.MissingEvidence = []string{
+		"Provider-returned cache status (hit/partial/miss/bypass)",
+		"Provider-returned cache miss reason code",
+		"Cache TTL policy version",
+		"Route or backend class information",
+		"Opaque prefix fingerprint for change detection",
+	}
+
+	// Classify observed status based on available data.
+	diag.Status = classifyCacheStatus(readShare, creationShare, freshShare)
+
+	// Build candidate causes with ranked likelihood.
+	diag.CandidateCauses = buildCandidateCauses(readShare, creationShare, freshShare, analysis, snap)
+
+	// Derive confidence from sample size and data quality.
+	diag.Confidence = deriveConfidence(analysis.RequestSamples, snap.UsageObservations)
+
+	// Set attribution kind: always heuristic since we lack provider metadata.
+	diag.Kind = schema.AttributionHeuristic
+
+	// Reason code: use the most likely candidate.
+	if len(diag.CandidateCauses) > 0 {
+		diag.ReasonCode = diag.CandidateCauses[0].Reason
+	}
+
+	return diag
+}
+
+// classifyCacheStatus maps observed shares to a cache status.
+func classifyCacheStatus(readShare, creationShare, freshShare float64) schema.CacheStatus {
+	if readShare >= CacheReadRecoveredThreshold {
+		return schema.CacheStatusHit
+	}
+	if readShare >= CacheReadLowThreshold {
+		return schema.CacheStatusPartialHit
+	}
+	if freshShare > 0.9 && creationShare < 0.05 {
+		return schema.CacheStatusMiss
+	}
+	return schema.CacheStatusMiss
+}
+
+// buildCandidateCauses ranks possible causes for poor cache performance.
+// Returns causes sorted by likelihood (highest first). Each cause is explicitly
+// labeled as a hypothesis — never a definitive root cause.
+func buildCandidateCauses(readShare, creationShare, freshShare float64, analysis *schema.CacheAnalysis, snap *schema.Snapshot) []schema.RankedCause {
+	var causes []schema.RankedCause
+
+	totalInput := readShare + creationShare + freshShare
+	if totalInput <= 0 {
+		return causes
+	}
+
+	// Cause 1: Prefix changed (common when read is low and creation is high)
+	if creationShare >= CacheCreationHighThreshold && readShare < CacheReadLowThreshold {
+		causes = append(causes, schema.RankedCause{
+			Reason:     schema.ReasonPrefixChanged,
+			Label:      "Cache prefix instability",
+			Likelihood: 0.6,
+		})
+		// Thrashing pattern also suggests this
+		causes = append(causes, schema.RankedCause{
+			Reason:     schema.ReasonCapacityEviction,
+			Label:      "Cache capacity eviction or TTL expiry between requests",
+			Likelihood: 0.3,
+		})
+	}
+
+	// Cause 2: No caching established
+	if freshShare >= FreshInputDominantThreshold && creationShare < 0.10 && readShare < 0.10 {
+		causes = prependCause(causes, schema.RankedCause{
+			Reason:     schema.ReasonBreakpointMissing,
+			Label:      "Prompt caching not active — no cache_control breakpoints configured",
+			Likelihood: 0.7,
+		})
+		causes = append(causes, schema.RankedCause{
+			Reason:     schema.ReasonUnsupported,
+			Label:      "Client or model does not support prompt caching",
+			Likelihood: 0.2,
+		})
+	}
+
+	// Cause 3: Decay — declining read share
+	if analysis.Trend == schema.TrendDeclining && analysis.PreviousReadShare != nil &&
+		*analysis.PreviousReadShare >= CacheReadLowThreshold && readShare < CacheReadLowThreshold {
+		causes = prependCause(causes, schema.RankedCause{
+			Reason:     schema.ReasonPrefixChanged,
+			Label:      "Conversation growing past cached prefix",
+			Likelihood: 0.6,
+		})
+	}
+
+	// Cause 4: Model change
+	if len(snap.UsageObservations) >= 2 {
+		lastModel := snap.UsageObservations[len(snap.UsageObservations)-1].ModelID
+		prevModel := snap.UsageObservations[len(snap.UsageObservations)-2].ModelID
+		if lastModel != prevModel && lastModel != "" && prevModel != "" {
+			causes = prependCause(causes, schema.RankedCause{
+				Reason:     schema.ReasonModelChanged,
+				Label:      "Model changed between requests",
+				Likelihood: 0.8,
+			})
+		}
+	}
+
+	// Cause 5: Intermittent — high variance
+	variance := computeReadShareVariance(snap.UsageObservations)
+	if variance >= IntermittentMissVariance && readShare < CacheReadLowThreshold {
+		causes = append(causes, schema.RankedCause{
+			Reason:     schema.ReasonPrefixChanged,
+			Label:      "Variable content before cache breakpoint (e.g., tool results)",
+			Likelihood: 0.5,
+		})
+	}
+
+	// Fallback: generic causes when nothing specific matched
+	if len(causes) == 0 && readShare < CacheReadLowThreshold {
+		causes = append(causes, schema.RankedCause{
+			Reason:     schema.ReasonColdStart,
+			Label:      "Cache cold — insufficient recent request history",
+			Likelihood: 0.4,
+		})
+		causes = append(causes, schema.RankedCause{
+			Reason:     schema.ReasonUnknown,
+			Label:      "Provider did not expose enough information to determine cause",
+			Likelihood: 0.6,
+		})
+	}
+
+	return causes
+}
+
+func prependCause(causes []schema.RankedCause, cause schema.RankedCause) []schema.RankedCause {
+	return append([]schema.RankedCause{cause}, causes...)
+}
+
+// deriveConfidence computes a confidence score from sample size and data completeness.
+// 0.0 = no confidence, 1.0 = high confidence.
+func deriveConfidence(sampleCount int, observations []schema.UsageObservation) float64 {
+	if sampleCount < MinObservationsForWarning {
+		return 0.0
+	}
+	// Base confidence from sample size.
+	base := 0.3
+	if sampleCount >= 10 {
+		base = 0.6
+	}
+	// Check data completeness: how many observations have all three token fields?
+	complete := 0
+	for _, o := range observations {
+		if o.FreshInputTokens != nil && o.CacheReadInputTokens != nil && o.CacheCreationInputTokens != nil {
+			complete++
+		}
+	}
+	if len(observations) > 0 {
+		completeness := float64(complete) / float64(len(observations))
+		if completeness < 0.5 {
+			base *= 0.5 // Significant data gaps reduce confidence
+		}
+	}
+	if base > 0.8 {
+		base = 0.8 // Cap at 0.8 — we lack provider confirmation
+	}
+	return base
+}
 
 // AttributeCacheMisses examines the observation sequence and classifies the
 // cache miss pattern, producing a specific diagnosis and recommendation.
 //
-// This is the actionable layer on top of AnalyzeCache: AnalyzeCache computes
-// the shares; this function explains what they mean and what to do.
+// DEPRECATED: Use BuildCacheDiagnosis for new code. This function uses the
+// old heuristic patterns and may misclassify unknown patterns as thrashing.
+// It is preserved for backward compatibility with the CLI output layer.
+//
+// Known defect (Finding 4): The fallback at the end classifies unrecognized
+// patterns as PatternThrashing, which is misleading when there is insufficient
+// evidence to support that conclusion.
 func AttributeCacheMisses(snap *schema.Snapshot) CacheAttribution {
 	if snap == nil || snap.CacheAnalysis == nil || len(snap.UsageObservations) < MinObservationsForWarning {
 		return CacheAttribution{
@@ -102,8 +330,6 @@ func AttributeCacheMisses(snap *schema.Snapshot) CacheAttribution {
 	}
 
 	// Pattern 1: Thrashing — high creation, low read.
-	// The prefix keeps being rewritten. Each request pays the creation
-	// premium but never reuses it.
 	if creationShare >= CacheCreationHighThreshold && readShare < CacheReadLowThreshold {
 		return CacheAttribution{
 			Pattern:        PatternThrashing,
@@ -113,9 +339,7 @@ func AttributeCacheMisses(snap *schema.Snapshot) CacheAttribution {
 		}
 	}
 
-	// Pattern 2: No caching established — fresh input dominates, both
-	// creation and read are minimal. The client may not be using
-	// cache_control breakpoints at all.
+	// Pattern 2: No caching established.
 	if freshShare >= FreshInputDominantThreshold && creationShare < 0.10 && readShare < 0.10 {
 		return CacheAttribution{
 			Pattern:        PatternNoCaching,
@@ -137,7 +361,6 @@ func AttributeCacheMisses(snap *schema.Snapshot) CacheAttribution {
 	}
 
 	// Pattern 4: Intermittent — high variance in per-observation read share.
-	// Some turns hit, some miss. Likely tool calls or variable content.
 	variance := computeReadShareVariance(snap.UsageObservations)
 	if variance >= IntermittentMissVariance && readShare < CacheReadLowThreshold {
 		return CacheAttribution{
@@ -149,11 +372,13 @@ func AttributeCacheMisses(snap *schema.Snapshot) CacheAttribution {
 	}
 
 	// Fallback: read share is low but no specific pattern matched.
+	// DIFFERENCE FROM OLD BEHAVIOR: was PatternThrashing. Changed to a
+	// generic "low read share" pattern that doesn't claim a specific cause.
 	return CacheAttribution{
-		Pattern:        PatternThrashing,
+		Pattern:        "unclassified", // was PatternThrashing (Finding 4)
 		Confidence:     confidence,
-		Diagnosis:      fmt.Sprintf("Cache read share is low (%.0f%%). Context is not being reused efficiently.", readShare*100),
-		Recommendation: "Ensure your system prompt and early conversation turns are stable. Use `fi cache` for detailed metrics.",
+		Diagnosis:      fmt.Sprintf("Cache read share is low (%.0f%%), but there is insufficient information to determine the exact cause. The provider has not exposed cache miss reason metadata.", readShare*100),
+		Recommendation: "Cache performance may improve with stable system prompts and regular compaction. Run `fi cache` for detailed metrics.",
 	}
 }
 

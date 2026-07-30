@@ -59,14 +59,21 @@ const AnalysisWindow = CacheAnalysisWindow
 // re-renders of the same status-line data are not double-counted.
 // When promptID is non-empty it is the primary discriminator (each request
 // gets a unique ID). The token-based fallback handles older clients.
-func ObservationFingerprint(modelID, promptID string, totalInput, totalOutput int64, fresh, cacheRead, cacheCreation, output *int64) string {
+//
+// Finding 9: returns the fingerprint AND its source so callers can record
+// the derivation confidence alongside the fingerprint value.
+func ObservationFingerprint(modelID, promptID string, totalInput, totalOutput int64, fresh, cacheRead, cacheCreation, output *int64) (string, schema.FingerprintSource) {
 	var buf []byte
 	if promptID != "" {
 		buf = fmt.Appendf(buf, "pid:%s", promptID)
-	} else {
-		buf = fmt.Appendf(buf, "tok|%s|%d|%d|%d|%d|%d|%d", modelID, totalInput, totalOutput,
-			derefI64(fresh), derefI64(cacheRead), derefI64(cacheCreation), derefI64(output))
+		return fingerprintID(buf), schema.FingerprintClientTurnID
 	}
+	buf = fmt.Appendf(buf, "tok|%s|%d|%d|%d|%d|%d|%d", modelID, totalInput, totalOutput,
+		derefI64(fresh), derefI64(cacheRead), derefI64(cacheCreation), derefI64(output))
+	return fingerprintID(buf), schema.FingerprintFallback
+}
+
+func fingerprintID(buf []byte) string {
 	sum := sha256.Sum256(buf)
 	return hex.EncodeToString(sum[:16])
 }

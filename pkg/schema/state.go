@@ -34,6 +34,8 @@ type Snapshot struct {
 	LiveContext       *LiveContext       `json:"live_context"`
 	Pressure          PressureState      `json:"pressure"`
 	CacheAnalysis     *CacheAnalysis     `json:"cache_analysis"`
+	CacheDiagnosis    *CacheDiagnosis    `json:"cache_diagnosis,omitempty"`
+	CacheTiming       *CacheTiming       `json:"cache_timing,omitempty"`
 	UsageObservations []UsageObservation `json:"usage_observations,omitempty"`
 	Activity          ActivityState      `json:"activity"`
 	Warnings          WarningState       `json:"warnings"`
@@ -106,16 +108,21 @@ type RequestUsage struct {
 // Pointer fields are used for optional/missing values — nil means "unknown",
 // not zero. This distinguishes a genuine zero-token response from a missing
 // measurement.
+//
+// Finding 9: FingerprintSource records how the fingerprint was derived.
+// Finding 5: RequestReference carries a provider request ID when available.
 type UsageObservation struct {
-	Fingerprint              string    `json:"fingerprint"`
-	ObservedAt               time.Time `json:"observed_at"`
-	ModelID                  string    `json:"model_id"`
-	TotalInputTokens         *int64    `json:"total_input_tokens"`
-	TotalOutputTokens        *int64    `json:"total_output_tokens"`
-	FreshInputTokens         *int64    `json:"fresh_input_tokens"`
-	CacheReadInputTokens     *int64    `json:"cache_read_input_tokens"`
-	CacheCreationInputTokens *int64    `json:"cache_creation_input_tokens"`
-	OutputTokens             *int64    `json:"output_tokens"`
+	Fingerprint              string            `json:"fingerprint"`
+	FingerprintSource        FingerprintSource `json:"fingerprint_source,omitempty"`
+	RequestReference         string            `json:"request_reference,omitempty"`
+	ObservedAt               time.Time         `json:"observed_at"`
+	ModelID                  string            `json:"model_id"`
+	TotalInputTokens         *int64            `json:"total_input_tokens"`
+	TotalOutputTokens        *int64            `json:"total_output_tokens"`
+	FreshInputTokens         *int64            `json:"fresh_input_tokens"`
+	CacheReadInputTokens     *int64            `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens *int64            `json:"cache_creation_input_tokens"`
+	OutputTokens             *int64            `json:"output_tokens"`
 }
 
 // PressureState represents the context pressure state machine.
@@ -177,6 +184,114 @@ type CompactionState struct {
 	InitiatedAt             *time.Time        `json:"initiated_at,omitempty"`
 	PreTokens               *int64            `json:"pre_tokens,omitempty"`
 	LastResult              *CompactionResult `json:"last_result"`
+}
+
+// ============================================================
+// Cache attribution types (Finding 4)
+// ============================================================
+
+// AttributionKind classifies the source of a cache diagnosis.
+type AttributionKind string
+
+const (
+	AttributionProviderConfirmed AttributionKind = "provider_confirmed"
+	AttributionClientObserved    AttributionKind = "client_observed"
+	AttributionHeuristic         AttributionKind = "heuristic"
+	AttributionUnknown           AttributionKind = "unknown"
+)
+
+// CacheStatus is the observable cache result for a request.
+type CacheStatus string
+
+const (
+	CacheStatusHit         CacheStatus = "hit"
+	CacheStatusPartialHit  CacheStatus = "partial_hit"
+	CacheStatusMiss        CacheStatus = "miss"
+	CacheStatusBypass      CacheStatus = "bypass"
+	CacheStatusUnsupported CacheStatus = "unsupported"
+	CacheStatusError       CacheStatus = "error"
+	CacheStatusUnknown     CacheStatus = "unknown"
+)
+
+// CacheReasonCode is a machine-readable cache miss reason.
+type CacheReasonCode string
+
+const (
+	ReasonColdStart         CacheReasonCode = "cold_start"
+	ReasonTTLExpired        CacheReasonCode = "ttl_expired"
+	ReasonPrefixChanged     CacheReasonCode = "prefix_changed"
+	ReasonBreakpointMissing CacheReasonCode = "breakpoint_missing"
+	ReasonNamespaceChanged  CacheReasonCode = "namespace_changed"
+	ReasonModelChanged      CacheReasonCode = "model_changed"
+	ReasonRouteChanged      CacheReasonCode = "route_changed"
+	ReasonPolicyBypass      CacheReasonCode = "policy_bypass"
+	ReasonCapacityEviction  CacheReasonCode = "capacity_eviction"
+	ReasonRequestTooSmall   CacheReasonCode = "request_too_small"
+	ReasonUnsupported       CacheReasonCode = "unsupported"
+	ReasonTelemetryMissing  CacheReasonCode = "telemetry_unavailable"
+	ReasonUnknown           CacheReasonCode = "unknown"
+)
+
+// EvidenceItem is one structured piece of evidence supporting a cache diagnosis.
+type EvidenceItem struct {
+	Description string `json:"description"`
+	Value       string `json:"value,omitempty"`
+	Source      string `json:"source"` // "provider", "client_observed", "inferred"
+}
+
+// RankedCause is one possible cause with a likelihood score.
+type RankedCause struct {
+	Reason     CacheReasonCode `json:"reason"`
+	Label      string          `json:"label"`
+	Likelihood float64         `json:"likelihood"` // 0.0 to 1.0
+}
+
+// CacheDiagnosis is the complete structured diagnosis for cache behavior.
+type CacheDiagnosis struct {
+	Kind             AttributionKind `json:"kind"`
+	Status           CacheStatus     `json:"status"`
+	ReasonCode       CacheReasonCode `json:"reason_code"`
+	CandidateCauses  []RankedCause   `json:"candidate_causes,omitempty"`
+	Confidence       float64         `json:"confidence"`
+	Evidence         []EvidenceItem  `json:"evidence,omitempty"`
+	MissingEvidence  []string        `json:"missing_evidence,omitempty"`
+	AlgorithmVersion string          `json:"algorithm_version"`
+	ObservedAt       time.Time       `json:"observed_at"`
+	RequestReference string          `json:"request_reference,omitempty"`
+}
+
+// ============================================================
+// Observation identity (Finding 9)
+// ============================================================
+
+// FingerprintSource classifies how an observation fingerprint was derived.
+type FingerprintSource string
+
+const (
+	FingerprintProviderID   FingerprintSource = "provider_request_id"
+	FingerprintClientTurnID FingerprintSource = "client_turn_id"
+	FingerprintHookSequence FingerprintSource = "hook_event_sequence"
+	FingerprintFallback     FingerprintSource = "fallback_aggregate"
+)
+
+// UsageObservation is one unique status-line usage sample.
+// Updated for Finding 9: carries the fingerprint source and confidence.
+type UsageObservationOld = UsageObservation // keep old name for binary compat in migration
+
+// ============================================================
+// Cache timing (Finding 8)
+// ============================================================
+
+// CacheTiming tracks separate cache-relevant timestamps distinct from general
+// session activity. Do not use Session.LastEventAt as the cache clock.
+type CacheTiming struct {
+	LastInferenceObservedAt time.Time  `json:"last_inference_observed_at,omitempty"`
+	LastUniqueResponseAt    *time.Time `json:"last_unique_response_at,omitempty"`
+	LastCacheWriteAt        *time.Time `json:"last_cache_write_at,omitempty"`
+	LastCacheReadAt         *time.Time `json:"last_cache_read_at,omitempty"`
+	CachePolicyObservedAt   *time.Time `json:"cache_policy_observed_at,omitempty"`
+	CacheTTLSeconds         *int       `json:"cache_ttl_seconds,omitempty"`
+	CachePolicyVersion      string     `json:"cache_policy_version,omitempty"`
 }
 
 // CompactionResult records the outcome of a compaction.

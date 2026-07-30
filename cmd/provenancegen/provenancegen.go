@@ -105,7 +105,7 @@ func main() {
 					"environment": false,
 					"materials":   false,
 				},
-				"reproducible": false,
+				"reproducible": false, // Build environment (Go version, OS, compiler flags) not fully captured in materials; full reproducibility requires recording all build-tool versions and environment variables.
 			},
 			"materials": []map[string]any{{
 				"uri": "git+https://github.com/b-a-m-n/freeinference-companion@" + commit,

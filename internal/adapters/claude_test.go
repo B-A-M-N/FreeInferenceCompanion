@@ -857,12 +857,17 @@ func TestClaudeContextWarningDoesNotBlockCacheResolution(t *testing.T) {
 }
 
 // setLastEventAge writes a snapshot with LastEventAt set to age duration in the
-// past, simulating an idle period without actually sleeping.
+// past, simulating an idle period without actually sleeping. Also sets
+// CacheTiming.LastInferenceObservedAt to the same age so the cache clock
+// reflects the idle gap (Finding 8: cache TTL uses separate timing fields).
 func setLastEventAge(t *testing.T, paths state.Paths, sessionID string, age time.Duration) {
 	t.Helper()
 	snap := loadClaude(t, paths, sessionID)
 	past := time.Now().UTC().Add(-age)
 	snap.Session.LastEventAt = past
+	if snap.CacheTiming != nil && !snap.CacheTiming.LastInferenceObservedAt.IsZero() {
+		snap.CacheTiming.LastInferenceObservedAt = past
+	}
 	if err := state.SaveSnapshot(paths, schema.ClientClaudeCode, sessionID, snap); err != nil {
 		t.Fatalf("save snapshot: %v", err)
 	}
@@ -888,7 +893,7 @@ func TestClaudeCacheTTLWarningFiresAfterIdle(t *testing.T) {
 	if out == nil {
 		t.Fatal("expected a cache TTL expiry warning after 6m idle")
 	}
-	if !strings.Contains(out.SystemMessage, "prompt cache likely expired") {
+	if !strings.Contains(out.SystemMessage, "prompt cache may have expired") {
 		t.Errorf("expected TTL warning text, got: %q", out.SystemMessage)
 	}
 }

@@ -85,8 +85,15 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int
 	needsProviderState := providerStateCommands[cmd]
 
 	if !activation.Active {
+		if activation.Disabled {
+			fmt.Fprintf(stderr, "WARNING: FreeInference companion is DISABLED (FI_DISABLED=1)\n")
+			fmt.Fprintf(stderr, "         All hooks and automatic features are suppressed.\n")
+			fmt.Fprintf(stderr, "         Remove FI_DISABLED or set it to \"0\" to re-enable.\n")
+		}
 		if needsProviderState {
-			fmt.Fprintf(stderr, "error: FreeInference not active — cannot read/write provider state\n")
+			if !activation.Disabled {
+				fmt.Fprintf(stderr, "error: FreeInference not active — cannot read/write provider state\n")
+			}
 			return 1
 		}
 		// Session-only commands may use unnamespaced paths.
@@ -110,29 +117,67 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int
 
 	switch cmd {
 	case "status":
+		if printCmdHelp(stdout, stderr, "status", rest) {
+			return 0
+		}
 		return cmdStatus(paths, rest, stdin, stdout, stderr)
 	case "sessions":
+		if printCmdHelp(stdout, stderr, "sessions", rest) {
+			return 0
+		}
 		return cmdSessions(paths, rest, stdout, stderr)
 	case "snapshot":
+		if printCmdHelp(stdout, stderr, "snapshot", rest) {
+			return 0
+		}
 		return cmdSnapshot(paths, rest, stdin, stdout, stderr)
 	case "render":
+		if printCmdHelp(stdout, stderr, "render", rest) {
+			return 0
+		}
 		return cmdRender(paths, rest, stdin, stdout, stderr)
 	case "models":
+		if printCmdHelp(stdout, stderr, "models", rest) {
+			return 0
+		}
 		return cmdModels(paths, rest, stdout, stderr)
 	case "doctor":
+		if printCmdHelp(stdout, stderr, "doctor", rest) {
+			return 0
+		}
 		return cmdDoctor(paths, rest, stdout, stderr)
 	case "report":
+		if printCmdHelp(stdout, stderr, "report", rest) {
+			return 0
+		}
 		return cmdReport(paths, rest, stdout, stderr)
 	case "dashboard":
+		if printCmdHelp(stdout, stderr, "dashboard", rest) {
+			return 0
+		}
 		return cmdDashboard(rest, stdout, stderr)
 	case "context":
+		if printCmdHelp(stdout, stderr, "context", rest) {
+			return 0
+		}
 		return cmdContext(paths, rest, stdin, stdout, stderr)
 	case "refresh":
+		if printCmdHelp(stdout, stderr, "refresh", rest) {
+			return 0
+		}
 		return cmdRefresh(paths, rest, stdout, stderr)
 	case "cache":
+		if printCmdHelp(stdout, stderr, "cache", rest) {
+			return 0
+		}
 		return cmdCache(paths, rest, stdout, stderr)
 	case "status-line":
+		if printCmdHelp(stdout, stderr, "status-line", rest) {
+			return 0
+		}
 		return cmdStatusLine(rest, stdout, stderr)
+	case "config":
+		return cmdConfig(rest, stdout, stderr)
 	case "version", "--version", "-v":
 		return cmdVersion(rest, stdout, stderr)
 	case "help", "--help", "-h":
@@ -188,6 +233,7 @@ Usage:
   fi cache [--client <type>] [--session <id>]
   fi refresh [--force|--if-stale] [--detach] [--worker models|health|account-usage]
   fi status-line install|uninstall
+  fi config show|set|reset|path
   fi version [--json]
   fi hook <client> <event>
 
@@ -202,4 +248,216 @@ Environment:
   FI_DISABLED              Disable all companion features
   FI_ALLOW_INSECURE_LOCALHOST  Allow http:// loopback (development only)
 `)
+}
+
+// Command help text constants
+const (
+	helpStatus = `Usage: fi status [--client <type>] [--compact] [--session <id>] [--help]
+
+Show the current session status with context usage, pressure, and cache analysis.
+
+Flags:
+  --client <type>    Client type: claude-code (default) or codex
+  --compact          Output a single line suitable for status-line wrappers
+  --session <id>     Explicit session ID (also via FI_SESSION_ID env var)
+  --help             Show this help message
+`
+
+	helpSessions = `Usage: fi sessions [--include-identifiers] [--help]
+
+List all recorded sessions across clients.
+
+Flags:
+  --include-identifiers  Show full session IDs (default: masked)
+  --help                 Show this help message
+`
+
+	helpSnapshot = `Usage: fi snapshot --json [--client <type>] [--session <id>] [--include-identifiers] [--help]
+
+Output the full session snapshot in JSON format for machine consumption.
+
+Flags:
+  --client <type>        Client type: claude-code (default) or codex
+  --session <id>         Explicit session ID (also via FI_SESSION_ID env var)
+  --include-identifiers  Show full session IDs (default: masked)
+  --help                 Show this help message
+`
+
+	helpRender = `Usage: fi render --mode line|expanded [--client <type>] [--session <id>] [--include-identifiers] [--help]
+
+Render session status as human-readable output.
+
+Flags:
+  --mode line|expanded   Render mode: line (default) or expanded
+  --client <type>        Client type: claude-code (default) or codex
+  --session <id>         Explicit session ID (also via FI_SESSION_ID env var)
+  --include-identifiers  Show full session IDs (default: masked)
+  --help                 Show this help message
+`
+
+	helpModels = `Usage: fi models [--model <name>] [--refresh] [--help]
+
+List available models from the catalog, optionally showing a specific model.
+
+Flags:
+  --model <name>     Show detail for a specific model by ID or name
+  --refresh          Force a refresh of the model catalog before displaying
+  --help             Show this help message
+`
+
+	helpDoctor = `Usage: fi doctor [--probe --model <name>] [--help]
+
+Run diagnostic checks on the companion installation.
+
+Checks performed:
+  - Cache directory exists and is writable
+  - State files are readable
+  - fi binary is resolvable
+  - Claude hook configuration present
+  - Status-line wrapper valid
+  - Provider detection
+  - Health source configured
+  - Model catalog reachable
+  - API key format and authentication
+  - Model access
+  - Circuit breaker status
+
+Flags:
+  --probe --model <name>  Run a synthetic inference probe against the given model
+  --help                  Show this help message
+`
+
+	helpReport = `Usage: fi report [--client <type>] [--session <id>] [--format markdown|json] [--include-identifiers] [--help]
+
+Generate a sanitized report suitable for sharing with support.
+
+Flags:
+  --client <type>         Client type: claude-code (default) or codex
+  --session <id>          Explicit session ID (also via FI_SESSION_ID env var)
+  --format markdown|json  Output format (default: markdown)
+  --include-identifiers   Show full session IDs (default: masked)
+  --help                  Show this help message
+`
+
+	helpDashboard = `Usage: fi dashboard [--status] [--account] [--print-url] [--help]
+
+Open the FreeInference dashboard in your browser.
+
+Flags:
+  --status    Open the public service health page instead of the account dashboard
+  --account   Open the account dashboard (default)
+  --print-url Print the URL without opening a browser
+  --help      Show this help message
+`
+
+	helpContext = `Usage: fi context [--client <type>] [--session <id>] [--help]
+
+Show current context usage for the active session.
+
+Flags:
+  --client <type>  Client type: claude-code (default) or codex
+  --session <id>   Explicit session ID (also via FI_SESSION_ID env var)
+  --help           Show this help message
+`
+
+	helpRefresh = `Usage: fi refresh [--force|--if-stale] [--detach] [--worker models|health] [--help]
+
+Refresh cached data (models, health, account usage).
+
+Modes (mutually exclusive):
+  --force             Force refresh regardless of staleness
+  --if-stale          Refresh only if caches are stale (default)
+  --detach            Spawn detached background workers for stale caches
+  --worker <name>     Single worker: models or health
+
+Flags:
+  --help  Show this help message
+`
+
+	helpCache = `Usage: fi cache [--client <type>] [--session <id>] [--include-identifiers] [--help]
+
+Analyze cache efficiency and provide recommendations to improve hit rates.
+
+Flags:
+  --client <type>         Client type: claude-code (default) or codex
+  --session <id>          Explicit session ID (also via FI_SESSION_ID env var)
+  --include-identifiers   Show full session IDs (default: masked)
+  --help                  Show this help message
+`
+
+	helpStatusLine = `Usage: fi status-line install|uninstall [--scope user|project|local] [--project <dir>] [--help]
+
+Install or uninstall the status-line wrapper for Claude Code.
+
+Subcommands:
+  install   Install the status-line wrapper (default scope: project)
+  uninstall Remove the status-line wrapper
+
+Flags:
+  --scope <type>   Scope: user, project (default), or local
+  --project <dir>  Project directory for project/local scope
+  --help           Show this help message
+`
+
+	helpVersion = `Usage: fi version [--json] [--help]
+
+Show the fi companion version and schema information.
+
+Flags:
+  --json    Output machine-readable JSON
+  --help    Show this help message
+`
+
+	helpHook = `Usage: fi hook <client> <event>
+
+Internal hook entry point for Claude Code and Codex. Never called directly.
+
+Arguments:
+  client    Client type: claude-code or codex
+  event     Event name: SessionStart, SessionEnd, UserPromptSubmit,
+            PreCompact, PostCompact, Stop, StopFailure
+`
+)
+
+// printCmdHelp prints per-command help if --help is in the args.
+// Returns true if help was printed (caller should return 0).
+func printCmdHelp(stdout, stderr io.Writer, cmd string, args []string) bool {
+	for _, a := range args {
+		if a == "--help" || a == "-h" || a == "help" {
+			switch cmd {
+			case "status":
+				fmt.Fprint(stdout, helpStatus)
+			case "sessions":
+				fmt.Fprint(stdout, helpSessions)
+			case "snapshot":
+				fmt.Fprint(stdout, helpSnapshot)
+			case "render":
+				fmt.Fprint(stdout, helpRender)
+			case "models":
+				fmt.Fprint(stdout, helpModels)
+			case "doctor":
+				fmt.Fprint(stdout, helpDoctor)
+			case "report":
+				fmt.Fprint(stdout, helpReport)
+			case "dashboard":
+				fmt.Fprint(stdout, helpDashboard)
+			case "context":
+				fmt.Fprint(stdout, helpContext)
+			case "refresh":
+				fmt.Fprint(stdout, helpRefresh)
+			case "cache":
+				fmt.Fprint(stdout, helpCache)
+			case "status-line":
+				fmt.Fprint(stdout, helpStatusLine)
+			case "version":
+				fmt.Fprint(stdout, helpVersion)
+			case "hook":
+				fmt.Fprint(stdout, helpHook)
+			default:
+				printUsage(stdout)
+			}
+			return true
+		}
+	}
+	return false
 }
