@@ -16,3 +16,17 @@ plugins/codex/bin/
 /hooks/
 /plugin.json
 /scripts/
+
+# Local credentials and private-key material. Keep documented examples
+# explicit and credential-free rather than committing a usable .env file.
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.key
+*.pem
+*.p12
+*.pfx
+secrets/
+.secrets/
+credentials*.json
