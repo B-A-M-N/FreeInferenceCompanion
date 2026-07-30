@@ -164,11 +164,9 @@ plugin-clean-install: package
 	for z in $(RELEASE_DIR)/freeinference-companion-*.zip; do \
 		edir="$$(mktemp -d "$${TMPDIR:-/tmp}/fi-plugin-extract.XXXXXX")"; \
 		unzip -q "$$z" -d "$$edir" && echo "extracted $$(basename $$z)"; \
-		# Find the plugin root directory (single top-level entry) \
-		base=$$(ls -1 "$$edir" | head -1); \
-		test -n "$$base" && test -d "$$edir/$$base" || { echo "FAIL: cannot determine plugin root in $$(basename $$z)"; exit 1; }; \
-		test -d "$$edir/$$base/bin" || { echo "FAIL: bin/ missing in $$(basename $$z)"; exit 1; }; \
-		for bin in "$$edir/$$base/bin"/*; do \
+		# ZIP has flat structure - bin/ is at root \
+		test -d "$$edir/bin" || { echo "FAIL: bin/ missing in $$(basename $$z)"; exit 1; }; \
+		for bin in "$$edir/bin"/*; do \
 			while [ -d "$$bin" ]; do \
 				for f in "$$bin"/*; do \
 					test -x "$$f" && { echo "  executable: $$(basename $$f)"; } || { echo "FAIL: $$(basename $$f) is not executable"; exit 1; }; \
@@ -176,7 +174,7 @@ plugin-clean-install: package
 				break; \
 			done; \
 		done; \
-		ls "$$edir/$$base/scripts/run-hook.sh" >/dev/null 2>&1 || { echo "FAIL: run-hook.sh missing in $$(basename $$z)"; exit 1; }; \
+		ls "$$edir/scripts/run-hook.sh" >/dev/null 2>&1 || { echo "FAIL: run-hook.sh missing in $$(basename $$z)"; exit 1; }; \
 	done; \
 	echo "plugin clean-install smoke tests passed"
 
