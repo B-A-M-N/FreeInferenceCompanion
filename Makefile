@@ -159,10 +159,10 @@ package-smoke:
 # resolution chain (bundled bin/ -> fallback paths). Confirms the plugin
 # archives contain all platform binaries.
 plugin-clean-install: package
-	@tmpdir="$$(mktemp -d "${TMPDIR:-/tmp}/fi-plugin.XXXXXX")"; \
+	@tmpdir="$$(mktemp -d "$${TMPDIR:-/tmp}/fi-plugin.XXXXXX")"; \
 	trap 'rm -rf "$$tmpdir"' EXIT; \
 	for z in $(RELEASE_DIR)/freeinference-companion-*.zip; do \
-		edir="$$(mktemp -d "${TMPDIR:-/tmp}/fi-plugin-extract.XXXXXX")"; \
+		edir="$$(mktemp -d "$${TMPDIR:-/tmp}/fi-plugin-extract.XXXXXX")"; \
 		unzip -q "$$z" -d "$$edir" && echo "extracted $$(basename $$z)"; \
 		# Find the plugin root directory (single top-level entry) \
 		base=$$(ls -1 "$$edir" | head -1); \
