@@ -97,6 +97,9 @@ func cmdRefresh(paths state.Paths, args []string, stdout, stderr io.Writer) int 
 		if result.AccountUsageRefreshed {
 			fmt.Fprintln(stdout, "Account usage refreshed.")
 		}
+		if result.AccountUsageCapability != "" && !result.AccountUsageRefreshed {
+			fmt.Fprintf(stdout, "Account usage capability: %s.\n", result.AccountUsageCapability)
+		}
 		if result.Error != "" {
 			fmt.Fprintf(stderr, "refresh error: %s\n", result.Error)
 			return 1
@@ -150,6 +153,9 @@ func cmdRefresh(paths state.Paths, args []string, stdout, stderr io.Writer) int 
 		if result.Error != "" {
 			r["error"] = result.Error
 		}
+		if result.AccountUsageCapability != "" {
+			r["account_usage_capability"] = result.AccountUsageCapability
+		}
 		out, _ := json.Marshal(r)
 		fmt.Fprintln(stdout, string(out))
 		if result.Error != "" {
@@ -166,6 +172,9 @@ func cmdRefresh(paths state.Paths, args []string, stdout, stderr io.Writer) int 
 	}
 	if result.AccountUsageRefreshed {
 		fmt.Fprintln(stdout, "Account usage refreshed.")
+	}
+	if result.AccountUsageCapability != "" && !result.AccountUsageRefreshed {
+		fmt.Fprintf(stdout, "Account usage capability: %s.\n", result.AccountUsageCapability)
 	}
 	if result.Error != "" {
 		fmt.Fprintf(stderr, "Warning: %s\n", result.Error)

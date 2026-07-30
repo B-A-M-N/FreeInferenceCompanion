@@ -144,6 +144,65 @@ func wrapperPathForScope(scope InstallScope, base string) string {
 	}
 }
 
+// StatusLineStatus describes the status-line integration at one explicit
+// installation scope. It is derived from the same scope resolver used by
+// installation and removal, so status never inspects a different target.
+type StatusLineStatus struct {
+	Scope        string `json:"scope"`
+	SettingsPath string `json:"settings_path"`
+	Wrapper      string `json:"wrapper"`
+	Installed    bool   `json:"installed"`
+	Executable   bool   `json:"executable"`
+	Referenced   bool   `json:"referenced"`
+	Status       string `json:"status"`
+}
+
+// InspectClaudeStatusLine reports whether the exact wrapper for scope is
+// executable and is the configured statusLine command. No substring matching
+// is used because a similarly named user command is not our installation.
+func InspectClaudeStatusLine(home string, scope InstallScope, projectRoot string) (StatusLineStatus, error) {
+	if scope == ScopeUser {
+		projectRoot = home
+	}
+	settingsFile := settingsPathForScope(scope, projectRoot)
+	wrapper := wrapperPathForScope(scope, projectRoot)
+	result := StatusLineStatus{
+		Scope:        scope.String(),
+		SettingsPath: settingsFile,
+		Wrapper:      wrapper,
+		Status:       "not_installed",
+	}
+
+	if info, err := os.Stat(wrapper); err == nil {
+		result.Installed = true
+		result.Executable = info.Mode()&0111 != 0
+	} else if !os.IsNotExist(err) {
+		return result, fmt.Errorf("stat wrapper: %w", err)
+	}
+
+	settings, _, _, err := readSettingsAndMode(settingsFile)
+	if err != nil {
+		return result, fmt.Errorf("read settings: %w", err)
+	}
+	if raw, ok := settings["statusLine"]; ok {
+		if command, ok := commandPathFromStatusLine(raw); ok {
+			result.Referenced = samePath(command, wrapper)
+		}
+	}
+
+	switch {
+	case !result.Installed:
+		result.Status = "not_installed"
+	case !result.Executable:
+		result.Status = "installed_not_executable"
+	case !result.Referenced:
+		result.Status = "installed_not_referenced"
+	default:
+		result.Status = "installed"
+	}
+	return result, nil
+}
+
 // installerLockPath returns the path to the advisory lock serializing
 // install/uninstall operations so two concurrent installer processes cannot
 // race across wrapper, settings, and metadata.

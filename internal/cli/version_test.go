@@ -29,7 +29,6 @@ func TestVersionConsistency(t *testing.T) {
 
 	// Plugin manifests must match.
 	manifestPaths := []string{
-		"../../plugin.json",
 		"../../plugins/claude-code/.claude-plugin/plugin.json",
 		"../../plugins/codex/.codex-plugin/plugin.json",
 	}

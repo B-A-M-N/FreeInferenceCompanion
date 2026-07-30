@@ -82,22 +82,24 @@ func Install(opts Options, stdout, stderr io.Writer) (*Result, error) {
 		return nil, err
 	}
 	fmt.Fprintf(stdout, "  Platform: %s\n  URL: %s\n", opts.Platform, pi.URL)
+	if opts.DryRun {
+		fmt.Fprintln(stdout, "  Dry run: no files will be downloaded or changed.")
+		return result, nil
+	}
 
 	tmpZip := filepath.Join(os.TempDir(), "freeinference-install-"+version+".zip")
-	if !opts.DryRun {
-		if _, err := DownloadTo(pi.URL, tmpZip); err != nil {
-			return nil, fmt.Errorf("download: %w", err)
-		}
+	if _, err := DownloadTo(pi.URL, tmpZip); err != nil {
+		return nil, fmt.Errorf("download: %w", err)
+	}
 
-		// Verify checksum.
-		data, err := os.ReadFile(tmpZip)
-		if err != nil {
-			return nil, fmt.Errorf("read zip for checksum: %w", err)
-		}
-		if err := VerifyChecksum(data, pi.Hash); err != nil {
-			os.Remove(tmpZip)
-			return nil, fmt.Errorf("checksum: %w", err)
-		}
+	// Verify checksum.
+	data, err := os.ReadFile(tmpZip)
+	if err != nil {
+		return nil, fmt.Errorf("read zip for checksum: %w", err)
+	}
+	if err := VerifyChecksum(data, pi.Hash); err != nil {
+		os.Remove(tmpZip)
+		return nil, fmt.Errorf("checksum: %w", err)
 	}
 
 	// Extract the ZIP.
@@ -108,13 +110,11 @@ func Install(opts Options, stdout, stderr io.Writer) (*Result, error) {
 	}
 	defer os.RemoveAll(extractDir)
 
-	if !opts.DryRun {
-		if err := extractZIP(tmpZip, extractDir); err != nil {
-			os.Remove(tmpZip)
-			return nil, fmt.Errorf("extract: %w", err)
-		}
+	if err := extractZIP(tmpZip, extractDir); err != nil {
 		os.Remove(tmpZip)
+		return nil, fmt.Errorf("extract: %w", err)
 	}
+	os.Remove(tmpZip)
 
 	// Install the binary.
 	if !opts.NoBin {
@@ -184,41 +184,41 @@ func Update(opts Options, stdout, stderr io.Writer) (*Result, error) {
 		Version:    manifest.Version,
 		OldVersion: opts.ExistingVersion,
 	}
+	pi, err := manifest.Platform(opts.Platform)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Fprintf(stdout, "  Platform: %s\n  URL: %s\n", opts.Platform, pi.URL)
+	if opts.DryRun {
+		fmt.Fprintln(stdout, "  Dry run: no files will be downloaded or changed.")
+		return result, nil
+	}
 
 	// Backup current binary.
 	if opts.ExistingVersion != "" {
 		backupPath := paths.BinaryPath + ".backup-" + opts.ExistingVersion
 		if _, err := os.Stat(paths.BinaryPath); err == nil {
-			if !opts.DryRun {
-				if err := copyFile(paths.BinaryPath, backupPath); err != nil {
-					return nil, fmt.Errorf("backup binary: %w", err)
-				}
-				fmt.Fprintf(stdout, "  Backed up %s -> %s\n", paths.BinaryPath, backupPath)
+			if err := copyFile(paths.BinaryPath, backupPath); err != nil {
+				return nil, fmt.Errorf("backup binary: %w", err)
 			}
+			fmt.Fprintf(stdout, "  Backed up %s -> %s\n", paths.BinaryPath, backupPath)
 		}
 		result.Updated = true
 	}
 
 	// Download and install the new version.
-	pi, err := manifest.Platform(opts.Platform)
-	if err != nil {
-		return nil, err
+	tmpZip := filepath.Join(os.TempDir(), "freeinference-update-"+manifest.Version+".zip")
+	if _, err := DownloadTo(pi.URL, tmpZip); err != nil {
+		return nil, fmt.Errorf("download: %w", err)
 	}
 
-	tmpZip := filepath.Join(os.TempDir(), "freeinference-update-"+manifest.Version+".zip")
-	if !opts.DryRun {
-		if _, err := DownloadTo(pi.URL, tmpZip); err != nil {
-			return nil, fmt.Errorf("download: %w", err)
-		}
-
-		data, err := os.ReadFile(tmpZip)
-		if err != nil {
-			return nil, fmt.Errorf("read zip for checksum: %w", err)
-		}
-		if err := VerifyChecksum(data, pi.Hash); err != nil {
-			os.Remove(tmpZip)
-			return nil, fmt.Errorf("checksum: %w", err)
-		}
+	data, err := os.ReadFile(tmpZip)
+	if err != nil {
+		return nil, fmt.Errorf("read zip for checksum: %w", err)
+	}
+	if err := VerifyChecksum(data, pi.Hash); err != nil {
+		os.Remove(tmpZip)
+		return nil, fmt.Errorf("checksum: %w", err)
 	}
 
 	extractDir, err := os.MkdirTemp("", "freeinference-extract-*")
@@ -228,13 +228,11 @@ func Update(opts Options, stdout, stderr io.Writer) (*Result, error) {
 	}
 	defer os.RemoveAll(extractDir)
 
-	if !opts.DryRun {
-		if err := extractZIP(tmpZip, extractDir); err != nil {
-			os.Remove(tmpZip)
-			return nil, fmt.Errorf("extract: %w", err)
-		}
+	if err := extractZIP(tmpZip, extractDir); err != nil {
 		os.Remove(tmpZip)
+		return nil, fmt.Errorf("extract: %w", err)
 	}
+	os.Remove(tmpZip)
 
 	if !opts.NoBin {
 		if err := installBinary(extractDir, paths); err != nil {

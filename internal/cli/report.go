@@ -100,7 +100,7 @@ func cmdReport(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 			Unhealthy: gs.Health.UnhealthyCount,
 		}
 	}
-	if gs.AccountUsage != nil {
+	if gs.HasAuthoritativeAccountUsage() {
 		report.AccountUsage = &reportAccountUsage{
 			FetchedAt:     gs.AccountUsage.FetchedAt.UTC().Format(time.RFC3339),
 			RequestsUsed:  gs.AccountUsage.RequestsUsed,
@@ -120,7 +120,7 @@ func cmdReport(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 		report.Session = buildReportSession(resolved.Snap, reveal)
 
 		// Compute budget projection for the markdown report.
-		if gs.AccountUsage != nil {
+		if gs.HasAuthoritativeAccountUsage() {
 			proj := engine.ProjectBudget(gs.AccountUsage, resolved.Snap, time.Now().UTC(), gs.CircuitBreakers)
 			if proj.Status != engine.BudgetUnknown {
 				report.BudgetProjection = engineProjectBudgetFromProj(proj)

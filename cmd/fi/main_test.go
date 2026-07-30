@@ -127,6 +127,31 @@ func TestHookMissingCacheDirExitsZero(t *testing.T) {
 	}
 }
 
+func TestPersistentDisablePreventsHookStateWrites(t *testing.T) {
+	dir := t.TempDir()
+	configDir := t.TempDir()
+	env := []string{
+		"FREEINFERENCE_BASE_URL=https://freeinference.org/v1",
+		"FREEINFERENCE_API_KEY=hyi-test-12345",
+		"FI_CONFIG_DIR=" + configDir,
+	}
+	_, stderr, code := runFI(t, dir, "", env, "companion", "disable", "--json")
+	if code != 0 || stderr != "" {
+		t.Fatalf("disable exit=%d stderr=%q", code, stderr)
+	}
+	stdout, stderr, code := runFI(t, dir, hookInput("disabled-session"), env, "hook", "claude-code", "SessionStart")
+	if code != 0 || stdout != "" || stderr != "" {
+		t.Fatalf("disabled hook exit=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	entries, err := os.ReadDir(dir)
+	if err == nil && len(entries) != 0 {
+		t.Fatalf("disabled hook wrote cache state: %v", entries)
+	}
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+}
+
 func TestHookLockBusyExitsZero(t *testing.T) {
 	dir := t.TempDir()
 	sessionID := "lock-test"

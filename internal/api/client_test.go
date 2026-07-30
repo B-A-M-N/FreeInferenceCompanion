@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
 
 func TestEndpointJoinPreservesBasePath(t *testing.T) {
@@ -69,6 +71,53 @@ func TestListModelsErrorIsSanitizedAndBounded(t *testing.T) {
 	}
 	if len(he.Message) > 250 {
 		t.Errorf("error message not bounded: %d chars", len(he.Message))
+	}
+}
+
+func TestGetAccountUsageNegotiatesCapability(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusCode int
+		body       string
+		want       schema.AccountUsageCapabilityState
+		wantUsage  bool
+	}{
+		{
+			name:       "documented quota shape",
+			statusCode: http.StatusOK,
+			body:       `{"requests_used":42,"requests_limit":100,"tokens_used":1200,"tokens_limit":5000}`,
+			want:       schema.CapabilitySupported,
+			wantUsage:  true,
+		},
+		{name: "endpoint absent", statusCode: http.StatusNotFound, want: schema.CapabilityUnsupported},
+		{name: "credential forbidden", statusCode: http.StatusForbidden, want: schema.CapabilityForbidden},
+		{name: "empty success is not authoritative", statusCode: http.StatusOK, body: `{}`, want: schema.CapabilityUnknown},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/account/usage" {
+					t.Errorf("request path = %s", r.URL.Path)
+				}
+				w.WriteHeader(tt.statusCode)
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer server.Close()
+
+			usage, capability, err := newClientLegacy(server.URL, "test-key", time.Second).GetAccountUsage()
+			if capability != tt.want {
+				t.Errorf("capability = %q, want %q", capability, tt.want)
+			}
+			if (usage != nil) != tt.wantUsage {
+				t.Errorf("usage = %#v, want present=%t", usage, tt.wantUsage)
+			}
+			if tt.want == schema.CapabilityUnknown && tt.body == `{}` && err == nil {
+				t.Error("empty successful response must fail schema validation")
+			}
+			if tt.want != schema.CapabilityUnknown && err != nil {
+				t.Errorf("GetAccountUsage: %v", err)
+			}
+		})
 	}
 }
 

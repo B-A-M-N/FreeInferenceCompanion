@@ -311,6 +311,47 @@ func TestInstallIdempotent(t *testing.T) {
 // TestInstallAtomicSettingsUpdate verifies that after InstallClaudeStatusLine
 // returns, the settings file is parseable JSON — the temp+rename path never
 // leaves a partial write visible to concurrent readers.
+func TestInspectClaudeStatusLineUsesRequestedScope(t *testing.T) {
+	home := t.TempDir()
+	project := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(project, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name  string
+		scope InstallScope
+		base  string
+	}{
+		{name: "user", scope: ScopeUser, base: home},
+		{name: "project", scope: ScopeProject, base: project},
+		{name: "local", scope: ScopeLocal, base: project},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := InstallClaudeStatusLine(home, "/opt/freeinference", tt.scope, project, io.Discard); err != nil {
+				t.Fatalf("install: %v", err)
+			}
+			status, err := InspectClaudeStatusLine(home, tt.scope, project)
+			if err != nil {
+				t.Fatalf("inspect: %v", err)
+			}
+			if status.Status != "installed" || !status.Installed || !status.Executable || !status.Referenced {
+				t.Errorf("unexpected status: %#v", status)
+			}
+			if tt.scope == ScopeUser && status.SettingsPath != filepath.Join(home, ".claude", "settings.json") {
+				t.Errorf("user settings path = %s", status.SettingsPath)
+			}
+			if tt.scope == ScopeProject && status.SettingsPath != filepath.Join(project, ".claude", "settings.json") {
+				t.Errorf("project settings path = %s", status.SettingsPath)
+			}
+			if tt.scope == ScopeLocal && status.SettingsPath != filepath.Join(project, ".claude", "settings.local.json") {
+				t.Errorf("local settings path = %s", status.SettingsPath)
+			}
+		})
+	}
+}
+
 func TestInstallAtomicSettingsUpdate(t *testing.T) {
 	home := t.TempDir()
 	if err := os.MkdirAll(claudeDir(home), 0755); err != nil {

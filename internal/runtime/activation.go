@@ -28,6 +28,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/api"
@@ -51,6 +52,8 @@ const (
 	ReasonConflictingEndpoints   ActivationReason = "conflicting_runtime_endpoints"
 	ReasonUnsafeForced           ActivationReason = "unsafe_force_activation"
 )
+
+const companionDisabledMarker = ".companion-disabled"
 
 // RuntimeKind identifies which coding-agent runtime the activation targets.
 type RuntimeKind string
@@ -81,8 +84,13 @@ const (
 type Activation struct {
 	// Active is true iff every hard-contract requirement passed.
 	Active bool `json:"active"`
-	// Disabled is true when FI_DISABLED=1 short-circuited evaluation.
+	// Disabled is true when an environment or persistent disable control
+	// short-circuited evaluation before any runtime state is touched.
 	Disabled bool `json:"disabled"`
+	// DisabledByEnv identifies an explicit process-level opt-out.
+	DisabledByEnv bool `json:"disabled_by_env,omitempty"`
+	// DisabledByMarker identifies a persistent user opt-out.
+	DisabledByMarker bool `json:"disabled_by_marker,omitempty"`
 	// UnsafeForced is true when FI_UNSAFE_FORCE_ACTIVATION=1 overrode the gate.
 	// Recorded so downstream code and audits can distinguish a real activation
 	// from a dev override.
@@ -178,6 +186,13 @@ func EvaluateWithModel(modelID string) Activation {
 
 	if os.Getenv("FI_DISABLED") == "1" || os.Getenv("FI_RUNTIME_INACTIVE") == "1" {
 		a.Disabled = true
+		a.DisabledByEnv = true
+		a.InactiveReason = ReasonDisabled
+		return a
+	}
+	if disabled, err := PersistentDisableState(); err == nil && disabled {
+		a.Disabled = true
+		a.DisabledByMarker = true
 		a.InactiveReason = ReasonDisabled
 		return a
 	}
@@ -252,6 +267,85 @@ func EvaluateWithModel(modelID string) Activation {
 	// Capture credential at evaluation time so Identity() never re-reads env.
 	a.capturedCredential = a.rawCredential()
 	return a
+}
+
+// CompanionConfigDir returns the private configuration directory used for
+// persistent companion controls. FI_CONFIG_DIR is primarily useful for tests
+// and isolated installations; otherwise standard XDG/home locations apply.
+func CompanionConfigDir() (string, error) {
+	if d := os.Getenv("FI_CONFIG_DIR"); d != "" {
+		return d, nil
+	}
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		return filepath.Join(xdg, "freeinference-companion"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("home dir: %w", err)
+	}
+	return filepath.Join(home, ".config", "freeinference-companion"), nil
+}
+
+func companionMarkerPath() (string, error) {
+	dir, err := CompanionConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, companionDisabledMarker), nil
+}
+
+// PersistentDisableState reports whether the user has disabled the companion
+// across future processes. A missing marker is the enabled state.
+func PersistentDisableState() (bool, error) {
+	p, err := companionMarkerPath()
+	if err != nil {
+		return false, err
+	}
+	_, err = os.Stat(p)
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, fmt.Errorf("stat persistent disable marker: %w", err)
+}
+
+// DisablePersistently writes the user-controlled runtime kill switch with
+// private permissions. Runtime evaluation checks it before any state or salt
+// operation, so hooks remain completely silent while disabled.
+func DisablePersistently() error {
+	dir, err := CompanionConfigDir()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	if err := os.Chmod(dir, 0700); err != nil {
+		return fmt.Errorf("secure config dir: %w", err)
+	}
+	p, err := companionMarkerPath()
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(p, []byte("disabled\n"), 0600); err != nil {
+		return fmt.Errorf("write persistent disable marker: %w", err)
+	}
+	return os.Chmod(p, 0600)
+}
+
+// EnablePersistently removes the persistent kill switch. A missing marker is
+// already enabled and therefore succeeds.
+func EnablePersistently() error {
+	p, err := companionMarkerPath()
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove persistent disable marker: %w", err)
+	}
+	return nil
 }
 
 // collectEndpointCandidates returns every non-empty runtime endpoint env var

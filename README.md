@@ -1,6 +1,6 @@
 # FreeInference Companion
 
-Lightweight observability layer for FreeInference-powered coding-agent sessions. Shows live context metrics, rolling cache performance with root-cause attribution, model health, account budget projection, and context-pressure warnings — without adding latency, making network calls from hooks, or sending inference probes without explicit consent. The companion provides conversational management through Claude Code and Codex skills so users can query their session state naturally.
+Lightweight observability layer for FreeInference-powered coding-agent sessions. Shows live Claude context metrics, rolling cache pattern classification with likely diagnoses, model health, optional account-budget projection, and context-pressure warnings — without adding latency, making network calls from hooks, or sending inference probes without explicit consent. The companion provides conversational management through Claude Code and a Codex skill package so users can query supported state naturally.
 
 **Companion, not proxy.** No prompt interception, no transcript scraping, no automatic failover, no daemon.
 
@@ -35,10 +35,10 @@ freeinference CLI (Go, static binary)
   │   └── sessions/        # Per-session snapshots and advisory locks
   ├── commands: status, sessions, snapshot, render, models, doctor,
   │             report, dashboard, context, refresh, status-line
-  └── hook: freeinference hook claude-code|codex <event>
+  └── hook: freeinference hook claude-code <event>
 
 Claude Code plugin → scripts/run-hook.sh → freeinference hook claude-code <event>
-Codex plugin       → scripts/run-hook.sh → freeinference hook codex <event>
+Codex plugin       → skills only → user-requested CLI diagnostics
 ```
 
 Plugin hooks resolve the `freeinference` binary from `PATH`, the plugin-bundled `bin/freeinference`,
@@ -72,7 +72,7 @@ surfaces the user already has:
 - **Provider detection gates all warnings** — no FreeInference warning or health symbol ever appears in a non-FreeInference session
 - **Background refreshes are detached and coalesced across processes** — file-lock single-flight, per-endpoint circuit breakers (2→30min backoff), `Retry-After` honored
 - **No inference probes for monitoring** — `freeinference doctor --probe --model <name>` is manual only, marked `X-Probe: synthetic`
-- **Advisory warnings, never blocking** — context pressure, projection overflow, cache-low with root-cause attribution, cache TTL expiry; all labeled with confidence, all advisory
+- **Advisory warnings, never blocking** — context pressure, projection overflow, cache-low with pattern classification and likely diagnosis, cache TTL expiry; all labeled with confidence, all advisory
 - **Schema validation + quarantine** — corrupt or unsupported state files are renamed aside so subsequent writes start fresh; hooks never block on bad state
 - **Sanitized structured event log** — per-session `events.jsonl` records only event types and short categories; never prompt text, responses, transcripts, paths, keys, or raw error bodies
 
@@ -86,10 +86,10 @@ surfaces the user already has:
 | `freeinference render --mode line\|standard\|expanded [--session <id>]` | Stable summary, standard, or detailed render for panels |
 | `freeinference models [--model <name>] [--refresh]` | List FreeInference models |
 | `freeinference doctor [--probe --model <name>]` | Diagnose connectivity and configuration |
-| `freeinference report [--client <type>] [--session <id>] [--format markdown\|json]` | Generate a sanitized support report (includes budget projection) |
+| `freeinference report [--client <type>] [--session <id>] [--format markdown\|json]` | Generate a sanitized support report (includes budget projection when the provider capability is available) |
 | `freeinference dashboard [--status] [--print-url]` | Open FreeInference account dashboard (`--status` for service health page) |
 | `freeinference context [--session <id>]` | Show context pressure information |
-| `freeinference cache [--session <id>]` | Show cache efficiency analysis with root-cause attribution |
+| `freeinference cache [--session <id>]` | Show cache efficiency pattern classification and likely diagnoses |
 | `freeinference refresh [--force] [--if-stale --detach] [--worker models\|health\|account-usage]` | Refresh cached provider metadata |
 | `freeinference hook <client> <event>` | Process a lifecycle hook event (internal) |
 | `freeinference status-line install\|uninstall` | Manage the Claude Code status line |
@@ -157,7 +157,7 @@ The plugin uses three separate concepts for metrics:
 |--------|:---:|-------------|
 | `live_context` | ✓ | Latest status-line snapshot from the coding client (session totals kept separate from latest-request usage) |
 | `usage_observations` | ✗ | Rolling window of up to 20 unique request samples (fingerprint-deduplicated); feeds the 5-sample cache analysis |
-| `account_usage` | ✓ | FreeInference account data (null until an endpoint exists) |
+| `account_usage` | ✓ when capability is supported | Provider quota data, omitted unless a validated account-usage capability response is available |
 
 Missing fields are `null` — never converted to zero. A zero-token field remains zero; a missing field remains null.
 
@@ -199,7 +199,14 @@ the likely cause at the moment it fires.
 ### Token budget projection
 
 `freeinference status` and `freeinference report` show account quota status with a projected
-exhaustion timeline based on the session's observed token burn rate:
+exhaustion timeline only after the provider has returned a schema-valid,
+authoritative account-usage response. The capability is recorded as
+`supported`, `unsupported`, `forbidden`, or `unknown`; known unsupported and
+forbidden endpoints are not retried automatically. When unavailable, no quota
+or budget projection is rendered.
+
+When the capability is supported, projection uses the session's observed token
+burn rate:
 
 ```
 Account Usage:
@@ -288,7 +295,7 @@ FreeInference/
 ├── pkg/schema/                # State structs, telemetry contract types
 ├── plugins/
 │   ├── claude-code/           # .claude-plugin/, hooks/, scripts/, skills/
-│   └── codex/                 # .codex-plugin/, hooks/, scripts/, skills/
+│   └── codex/                 # .codex-plugin/, skills/ (no lifecycle hooks)
 └── Makefile
 ```
 

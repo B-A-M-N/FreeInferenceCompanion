@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"os"
 	"testing"
 )
 
@@ -9,12 +10,48 @@ import (
 func clearActivationEnv(t *testing.T) {
 	t.Helper()
 	for _, env := range []string{
-		"FI_PROVIDER", "FI_DISABLED", "FI_UNSAFE_FORCE_ACTIVATION",
+		"FI_PROVIDER", "FI_DISABLED", "FI_RUNTIME_INACTIVE", "FI_UNSAFE_FORCE_ACTIVATION",
 		"FREEINFERENCE_BASE_URL", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL",
 		"FREEINFERENCE_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
 		"FI_ALLOW_CUSTOM_API_ENDPOINT", "FI_ALLOW_INSECURE_LOCALHOST",
 	} {
 		t.Setenv(env, "")
+	}
+}
+
+func TestActivation_PersistentDisablePreventsActivation(t *testing.T) {
+	clearActivationEnv(t)
+	t.Setenv("FI_CONFIG_DIR", t.TempDir())
+	t.Setenv("FREEINFERENCE_BASE_URL", "https://freeinference.org/v1")
+	t.Setenv("FREEINFERENCE_API_KEY", "hyi-test-key-12345")
+
+	if err := DisablePersistently(); err != nil {
+		t.Fatal(err)
+	}
+	if disabled, err := PersistentDisableState(); err != nil || !disabled {
+		t.Fatalf("persistent disable = %t, err = %v", disabled, err)
+	}
+	a := Evaluate()
+	if a.Active || !a.Disabled || !a.DisabledByMarker || a.DisabledByEnv {
+		t.Fatalf("persistent marker must short-circuit activation: %+v", a)
+	}
+
+	dir, err := CompanionConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(dir); err != nil || info.Mode().Perm() != 0700 {
+		t.Fatalf("config dir permissions = %v, err = %v; want 0700", info.Mode().Perm(), err)
+	}
+	if info, err := os.Stat(dir + "/.companion-disabled"); err != nil || info.Mode().Perm() != 0600 {
+		t.Fatalf("marker permissions = %v, err = %v; want 0600", info.Mode().Perm(), err)
+	}
+
+	if err := EnablePersistently(); err != nil {
+		t.Fatal(err)
+	}
+	if a := Evaluate(); !a.Active {
+		t.Fatalf("activation should resume after enable: %+v", a)
 	}
 }
 

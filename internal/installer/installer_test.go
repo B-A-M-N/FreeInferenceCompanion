@@ -354,6 +354,8 @@ func TestDefaultPaths(t *testing.T) {
 }
 
 func TestInstallDryRun(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
 	manifestURL, _, server := testServer(t, "v0.2.0", "linux-amd64")
 	defer server.Close()
 
@@ -366,8 +368,6 @@ func TestInstallDryRun(t *testing.T) {
 		ExistingVersion: "",
 		DryRun:          true,
 		NoBrowser:       true,
-		NoBin:           true,
-		NoPlugin:        false,
 	}, stdout, stderr)
 	if err != nil {
 		t.Fatalf("dry-run install: %v", err)
@@ -378,6 +378,58 @@ func TestInstallDryRun(t *testing.T) {
 	// Dry run should not set BinaryPath.
 	if result.BinaryPath != "" {
 		t.Error("dry run should not set BinaryPath")
+	}
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatalf("DefaultPaths: %v", err)
+	}
+	if _, err := os.Stat(filepath.Dir(paths.BinaryPath)); !os.IsNotExist(err) {
+		t.Errorf("dry-run created binary directory: %v", err)
+	}
+	if _, err := os.Stat(paths.ClaudePluginDir); !os.IsNotExist(err) {
+		t.Errorf("dry-run created plugin directory: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "Dry run: no files will be downloaded or changed.") {
+		t.Errorf("dry-run output missing no-change confirmation:\n%s", stdout.String())
+	}
+}
+
+func TestUpdateDryRunDoesNotMutate(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatalf("DefaultPaths: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.BinaryPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.BinaryPath, []byte("old-binary"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	manifestURL, _, server := testServer(t, "v0.2.0", "linux-amd64")
+	defer server.Close()
+	stdout := &strings.Builder{}
+	result, err := Update(Options{
+		ManifestURL:     manifestURL,
+		Platform:        "linux-amd64",
+		ExistingVersion: "v0.1.0",
+		DryRun:          true,
+		NoBrowser:       true,
+	}, stdout, &strings.Builder{})
+	if err != nil {
+		t.Fatalf("dry-run update: %v", err)
+	}
+	if result.Updated || result.BinaryPath != "" || len(result.Plugins) != 0 {
+		t.Errorf("dry-run reported mutations: %#v", result)
+	}
+	data, err := os.ReadFile(paths.BinaryPath)
+	if err != nil || string(data) != "old-binary" {
+		t.Errorf("dry-run changed binary: %q, %v", data, err)
+	}
+	if _, err := os.Stat(paths.BinaryPath + ".backup-v0.1.0"); !os.IsNotExist(err) {
+		t.Errorf("dry-run created backup: %v", err)
 	}
 }
 

@@ -4,30 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"strings"
 
+	"github.com/b-a-m-n/freeinference-companion/internal/runtime"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
 )
-
-const companionDisabledMarker = ".companion-disabled"
-
-// companionConfigDir returns the companion configuration directory.
-func companionConfigDir() (string, error) {
-	if d := os.Getenv("FI_CONFIG_DIR"); d != "" {
-		return d, nil
-	}
-	xdg := os.Getenv("XDG_CONFIG_HOME")
-	if xdg != "" {
-		return filepath.Join(xdg, "freeinference-companion"), nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("home dir: %w", err)
-	}
-	return filepath.Join(home, ".config", "freeinference-companion"), nil
-}
 
 // cmdCompanion implements `freeinference companion status|enable|disable`.
 func cmdCompanion(paths state.Paths, args []string, stdout, stderr io.Writer) int {
@@ -49,23 +30,38 @@ func cmdCompanion(paths state.Paths, args []string, stdout, stderr io.Writer) in
 
 	switch subcommand {
 	case "status":
-		disabled := isCompanionDisabled()
+		activation := runtime.Evaluate()
 		if jsonOut {
 			enc := json.NewEncoder(stdout)
 			enc.SetIndent("", "  ")
-			enc.Encode(map[string]bool{"disabled": disabled, "active": !disabled && os.Getenv("FI_DISABLED") != "1"})
+			enc.Encode(map[string]any{
+				"enabled":            !activation.Disabled,
+				"configured":         activation.EndpointPresent && activation.KeyPresent,
+				"runtime_active":     activation.Active,
+				"disabled_by_env":    activation.DisabledByEnv,
+				"disabled_by_marker": activation.DisabledByMarker,
+			})
 			return 0
 		}
-		if disabled {
-			fmt.Fprintln(stdout, "Companion: disabled")
-		} else {
-			fmt.Fprintln(stdout, "Companion: active")
+		switch {
+		case activation.DisabledByEnv:
+			fmt.Fprintln(stdout, "Companion: disabled by environment")
+		case activation.DisabledByMarker:
+			fmt.Fprintln(stdout, "Companion: disabled persistently")
+		case activation.Active:
+			fmt.Fprintln(stdout, "Companion: runtime active")
+		case activation.EndpointPresent || activation.KeyPresent:
+			fmt.Fprintln(stdout, "Companion: enabled, configuration incomplete")
+		default:
+			fmt.Fprintln(stdout, "Companion: enabled, not configured")
 		}
 		return 0
 
 	case "enable":
-		removeCompanionMarker()
-		os.Unsetenv("FI_DISABLED")
+		if err := runtime.EnablePersistently(); err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
+		}
 		if jsonOut {
 			fmt.Fprintln(stdout, `{"enabled":true}`)
 			return 0
@@ -74,7 +70,7 @@ func cmdCompanion(paths state.Paths, args []string, stdout, stderr io.Writer) in
 		return 0
 
 	case "disable":
-		if err := createCompanionMarker(); err != nil {
+		if err := runtime.DisablePersistently(); err != nil {
 			fmt.Fprintf(stderr, "error: %v\n", err)
 			return 1
 		}
@@ -82,48 +78,11 @@ func cmdCompanion(paths state.Paths, args []string, stdout, stderr io.Writer) in
 			fmt.Fprintln(stdout, `{"disabled":true}`)
 			return 0
 		}
-		fmt.Fprintln(stdout, "Companion disabled (marker file created; set FI_DISABLED=1 in your shell for immediate effect)")
+		fmt.Fprintln(stdout, "Companion disabled persistently")
 		return 0
 
 	default:
 		fmt.Fprintf(stderr, "unknown companion subcommand: %s\n", subcommand)
 		return 2
-	}
-}
-
-// markerPath returns the path to the companion disabled marker file.
-func markerPath() (string, error) {
-	dir, err := companionConfigDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, companionDisabledMarker), nil
-}
-
-// isCompanionDisabled checks both the marker file and the env var.
-func isCompanionDisabled() bool {
-	if p, err := markerPath(); err == nil {
-		if _, err := os.Stat(p); err == nil {
-			return true
-		}
-	}
-	return os.Getenv("FI_DISABLED") == "1"
-}
-
-func createCompanionMarker() error {
-	dir, err := companionConfigDir()
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-	p := filepath.Join(dir, companionDisabledMarker)
-	return os.WriteFile(p, []byte("disabled"), 0644)
-}
-
-func removeCompanionMarker() {
-	if p, err := markerPath(); err == nil {
-		os.Remove(p)
 	}
 }

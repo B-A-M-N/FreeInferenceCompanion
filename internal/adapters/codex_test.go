@@ -1,6 +1,7 @@
 package adapters
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
@@ -14,6 +15,18 @@ func loadCodex(t *testing.T, paths state.Paths, sessionID string) *schema.Snapsh
 		t.Fatalf("load snapshot: err=%v snap=%v", err, snap)
 	}
 	return snap
+}
+
+func TestCodexModelIsSanitizedBeforePersistence(t *testing.T) {
+	confirmFreeInference(t)
+	paths := testPaths(t)
+	a := NewCodexAdapter(paths)
+	if err := a.HandleSessionStart(&schema.CodexHookInput{SessionID: "c1", Model: "glm\x1b[31m-5.1"}); err != nil {
+		t.Fatalf("session start: %v", err)
+	}
+	if model := loadCodex(t, paths, "c1").Model.ID; strings.ContainsRune(model, '\x1b') {
+		t.Errorf("persisted model contains terminal control byte: %q", model)
+	}
 }
 
 func TestCodexSessionLifecycle(t *testing.T) {

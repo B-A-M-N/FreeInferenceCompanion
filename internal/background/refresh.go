@@ -37,13 +37,14 @@ var backoffIntervals = []time.Duration{
 
 // RefreshResult summarizes what a refresh pass did.
 type RefreshResult struct {
-	Worker                string `json:"worker,omitempty"`
-	ModelsRefreshed       bool   `json:"models_refreshed"`
-	HealthRefreshed       bool   `json:"health_refreshed"`
-	AccountUsageRefreshed bool   `json:"account_usage_refreshed"`
-	Skipped               bool   `json:"skipped"`
-	SkipReason            string `json:"skip_reason,omitempty"`
-	Error                 string `json:"error,omitempty"`
+	Worker                 string `json:"worker,omitempty"`
+	ModelsRefreshed        bool   `json:"models_refreshed"`
+	HealthRefreshed        bool   `json:"health_refreshed"`
+	AccountUsageRefreshed  bool   `json:"account_usage_refreshed"`
+	AccountUsageCapability string `json:"account_usage_capability,omitempty"`
+	Skipped                bool   `json:"skipped"`
+	SkipReason             string `json:"skip_reason,omitempty"`
+	Error                  string `json:"error,omitempty"`
 }
 
 // Refresher performs provider metadata refreshes. Cross-process coalescing
@@ -131,6 +132,12 @@ func (r *Refresher) WorkerRefresh(worker string) *RefreshResult {
 			result.SkipReason = "no API key configured"
 			return result
 		}
+		if !accountUsageCapabilityRefreshable(gs) {
+			result.Skipped = true
+			result.SkipReason = "account usage capability unavailable"
+			result.AccountUsageCapability = string(gs.AccountUsageCapability.State)
+			return result
+		}
 		if !accountUsageStale(gs, now) {
 			result.Skipped = true
 			result.SkipReason = "cache fresh"
@@ -166,11 +173,12 @@ func (r *Refresher) RefreshIfStale() *RefreshResult {
 			result.Error = res.Error
 		}
 	}
-	if r.Client != nil && r.Client.APIKey() != "" &&
+	if r.Client != nil && r.Client.APIKey() != "" && accountUsageCapabilityRefreshable(gs) &&
 		!breakerOpen(gs, WorkerAccountUsage, now) {
 		if accountUsageStale(gs, now) {
 			res := r.WorkerRefresh(WorkerAccountUsage)
 			result.AccountUsageRefreshed = res.AccountUsageRefreshed
+			result.AccountUsageCapability = res.AccountUsageCapability
 			if res.Error != "" && result.Error == "" {
 				result.Error = res.Error
 			}
@@ -185,11 +193,12 @@ func (r *Refresher) RefreshIfStale() *RefreshResult {
 func (r *Refresher) ForceRefresh() *RefreshResult {
 	result := &RefreshResult{}
 	now := time.Now()
+	gs, _ := state.LoadGlobal(r.Paths)
 	r.forceRefreshModels(result, now)
 	if r.HealthURL != "" {
 		r.forceRefreshHealth(result, now)
 	}
-	if r.Client != nil && r.Client.APIKey() != "" {
+	if r.Client != nil && r.Client.APIKey() != "" && accountUsageCapabilityRefreshable(gs) {
 		r.forceRefreshAccountUsage(result, now)
 	}
 	return result
@@ -217,7 +226,7 @@ func StaleWorkersWithClient(paths state.Paths, healthURL string, apiKey string) 
 	if healthURL != "" && healthStale(gs, now) && !breakerOpen(gs, WorkerHealth, now) {
 		stale = append(stale, WorkerHealth)
 	}
-	if apiKey != "" && !breakerOpen(gs, WorkerAccountUsage, now) {
+	if apiKey != "" && accountUsageCapabilityRefreshable(gs) && !breakerOpen(gs, WorkerAccountUsage, now) {
 		if accountUsageStale(gs, now) {
 			stale = append(stale, WorkerAccountUsage)
 		}
@@ -485,11 +494,29 @@ func accountUsageStale(gs *schema.GlobalState, now time.Time) bool {
 	return now.Sub(fetched) > AccountUSageTTL
 }
 
+func accountUsageCapabilityRefreshable(gs *schema.GlobalState) bool {
+	if gs == nil || gs.AccountUsageCapability == nil {
+		return true
+	}
+	return gs.AccountUsageCapability.State != schema.CapabilityUnsupported &&
+		gs.AccountUsageCapability.State != schema.CapabilityForbidden
+}
+
 func (r *Refresher) refreshAccountUsage(result *RefreshResult, now time.Time) {
-	usage, err := r.Client.GetAccountUsage()
+	usage, capability, err := r.Client.GetAccountUsage()
+	result.AccountUsageCapability = string(capability)
+	capabilityRecord := &schema.AccountUsageCapability{State: capability, CheckedAt: now.UTC()}
+	if err := state.SaveAccountUsageCapability(r.Paths, capabilityRecord); err != nil {
+		result.Error = "save account usage capability"
+		return
+	}
 	if err != nil {
 		r.recordFailure(WorkerAccountUsage, err, now)
 		result.Error = "account usage fetch failed"
+		return
+	}
+	if capability != schema.CapabilitySupported || usage == nil {
+		r.resetCircuitBreaker(WorkerAccountUsage)
 		return
 	}
 	if err := state.SaveAccountUsage(r.Paths, usage); err != nil {

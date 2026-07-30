@@ -182,7 +182,7 @@ func TestClaudeCodeReferencedHooksExist(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 2. Codex integration installation
+// 2. Codex skill package
 // ---------------------------------------------------------------------------
 
 func TestCodexPluginJSONRequiredFields(t *testing.T) {
@@ -208,100 +208,12 @@ func TestCodexPluginJSONRequiredFields(t *testing.T) {
 	}
 }
 
-func TestCodexHookEventStructure(t *testing.T) {
-	plug := pluginDir("codex")
-	hj := filepath.Join(plug, "hooks", "hooks.json")
-
-	data, err := os.ReadFile(hj)
-	if err != nil {
-		t.Fatalf("read hooks.json: %v", err)
-	}
-	var parsed map[string]any
-	if err := json.Unmarshal(data, &parsed); err != nil {
-		t.Fatalf("parse hooks.json: %v", err)
-	}
-	hooksMap, ok := parsed["hooks"].(map[string]any)
-	if !ok {
-		t.Fatal("hooks must be an object")
-	}
-	for event, evVal := range hooksMap {
-		arr := evVal.([]any)
-		for _, elem := range arr {
-			obj := elem.(map[string]any)
-			if _, ok := obj["matcher"]; !ok {
-				t.Errorf("event %s missing matcher", event)
-			}
-			subHooks, ok := obj["hooks"].([]any)
-			if !ok {
-				t.Errorf("event %s missing hooks array", event)
-				continue
-			}
-			for _, sh := range subHooks {
-				shObj := sh.(map[string]any)
-				if _, ok := shObj["type"]; !ok {
-					t.Errorf("event %s sub-hook missing type", event)
-				}
-				if _, ok := shObj["command"]; !ok {
-					t.Errorf("event %s sub-hook missing command", event)
-				}
-			}
-		}
-	}
-}
-
-func TestCodexHookScriptExecutable(t *testing.T) {
-	script := filepath.Join(pluginDir("codex"), "scripts", "run-hook.sh")
-	info, err := os.Stat(script)
-	if err != nil {
-		t.Fatalf("stat run-hook.sh: %v", err)
-	}
-	if info.Mode().Perm()&0111 == 0 {
-		t.Error("run-hook.sh must be executable")
-	}
-}
-
-func TestCodexReferencedHooksExist(t *testing.T) {
-	plug := pluginDir("codex")
-	hj := filepath.Join(plug, "hooks", "hooks.json")
-	data, _ := os.ReadFile(hj)
-	var hooksObj map[string]any
-	json.Unmarshal(data, &hooksObj)
-	hooksMap := hooksObj["hooks"].(map[string]any)
-	for event, evVal := range hooksMap {
-		arr := evVal.([]any)
-		for _, elem := range arr {
-			obj := elem.(map[string]any)
-			subHooks := obj["hooks"].([]any)
-			for _, sh := range subHooks {
-				shObj := sh.(map[string]any)
-				cmd := shObj["command"].(string)
-				if !strings.Contains(cmd, "run-hook.sh") {
-					continue
-				}
-				script := filepath.Join(plug, "scripts", "run-hook.sh")
-				if _, err := os.Stat(script); err != nil {
-					t.Errorf("hook event %s references script missing: %v", event, err)
-				}
-			}
-		}
-	}
-}
-
 // ---------------------------------------------------------------------------
 // 3. Hook script behaviour via subprocess
 // ---------------------------------------------------------------------------
 
 func TestClaudeCodeHookSyntax(t *testing.T) {
 	script := filepath.Join(pluginDir("claude-code"), "scripts", "run-hook.sh")
-	cmd := exec.Command("bash", "-n", script)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("bash -n failed: %v\noutput: %s", err, string(out))
-	}
-}
-
-func TestCodexHookSyntax(t *testing.T) {
-	script := filepath.Join(pluginDir("codex"), "scripts", "run-hook.sh")
 	cmd := exec.Command("bash", "-n", script)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -333,28 +245,6 @@ func TestClaudeCodeHookExitZeroWhenMissingBinary(t *testing.T) {
 	}
 }
 
-func TestCodexHookExitZeroWhenMissingBinary(t *testing.T) {
-	script := filepath.Join(pluginDir("codex"), "scripts", "run-hook.sh")
-	cmd := exec.Command("bash", script, "SessionStart")
-	cmd.Env = append(os.Environ(),
-		"FI_DISABLED=",
-		"PLUGIN_ROOT=/nonexistent/path/noexist",
-		"CLAUDE_PLUGIN_ROOT=/nonexistent/path/noexist",
-		"CODEX_PLUGIN_ROOT=/nonexistent/path/noexist",
-	)
-	out, err := cmd.CombinedOutput()
-	if err == nil {
-		return
-	}
-	if exitErr, ok := err.(*exec.ExitError); ok {
-		if exitErr.ExitCode() != 0 {
-			t.Errorf("expected exit 0 (fail open), got %d; output: %s", exitErr.ExitCode(), string(out))
-		}
-	} else {
-		t.Fatalf("unexpected error: %v; output: %s", err, string(out))
-	}
-}
-
 func TestClaudeCodeHookResolvesPluginRoot(t *testing.T) {
 	script := filepath.Join(pluginDir("claude-code"), "scripts", "run-hook.sh")
 	cmd := exec.Command("bash", script, "TestEvent")
@@ -364,26 +254,6 @@ func TestClaudeCodeHookResolvesPluginRoot(t *testing.T) {
 	)
 	// The script should find PLUGIN_ROOT set and attempt resolution; with no
 	// bundled binary it falls through to exit 0.
-	out, err := cmd.CombinedOutput()
-	if err == nil {
-		return
-	}
-	if exitErr, ok := err.(*exec.ExitError); ok {
-		if exitErr.ExitCode() != 0 {
-			t.Errorf("expected exit 0, got %d; output: %s", exitErr.ExitCode(), string(out))
-		}
-	} else {
-		t.Fatalf("unexpected error: %v; output: %s", err, string(out))
-	}
-}
-
-func TestCodexHookResolvesPluginRoot(t *testing.T) {
-	script := filepath.Join(pluginDir("codex"), "scripts", "run-hook.sh")
-	cmd := exec.Command("bash", script, "TestEvent")
-	cmd.Env = append(os.Environ(),
-		"FI_DISABLED=",
-		"PLUGIN_ROOT="+pluginDir("codex"),
-	)
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		return
@@ -449,30 +319,6 @@ func TestClaudeCodeHookEventsMatchExpected(t *testing.T) {
 	hooksMap := parsed["hooks"].(map[string]any)
 
 	// These are the events the Claude Code plugin declares.
-	expectedEvents := map[string]bool{
-		"SessionStart":     true,
-		"SessionEnd":       true,
-		"UserPromptSubmit": true,
-		"PreCompact":       true,
-		"PostCompact":      true,
-		"Stop":             true,
-		"StopFailure":      true,
-	}
-	for event := range hooksMap {
-		if !expectedEvents[event] {
-			t.Errorf("unexpected hook event: %s", event)
-		}
-	}
-}
-
-func TestCodexHookEventsMatchExpected(t *testing.T) {
-	hj := filepath.Join(pluginDir("codex"), "hooks", "hooks.json")
-	data, _ := os.ReadFile(hj)
-	var parsed map[string]any
-	json.Unmarshal(data, &parsed)
-	hooksMap := parsed["hooks"].(map[string]any)
-
-	// These are the events the Codex plugin declares.
 	expectedEvents := map[string]bool{
 		"SessionStart":     true,
 		"SessionEnd":       true,
@@ -594,38 +440,8 @@ func TestClaudeCodeDisabledProduceZeroOutput(t *testing.T) {
 	}
 }
 
-func TestCodexDisabledProduceZeroOutput(t *testing.T) {
-	script := filepath.Join(pluginDir("codex"), "scripts", "run-hook.sh")
-	cmd := exec.Command("bash", script, "SessionStart")
-	cmd.Env = append(os.Environ(), "FI_DISABLED=1")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("unexpected error: %v; output: %s", err, string(out))
-	}
-	if len(out) != 0 {
-		t.Errorf("FI_DISABLED=1 should produce zero output, got: %q", string(out))
-	}
-}
-
 func TestClaudeCodeHookExitZeroWhenDisabled(t *testing.T) {
 	script := filepath.Join(pluginDir("claude-code"), "scripts", "run-hook.sh")
-	cmd := exec.Command("bash", script, "SessionStart")
-	cmd.Env = append(os.Environ(), "FI_DISABLED=1")
-	out, err := cmd.CombinedOutput()
-	if err == nil {
-		return
-	}
-	if exitErr, ok := err.(*exec.ExitError); ok {
-		if exitErr.ExitCode() != 0 {
-			t.Errorf("expected exit 0 when disabled, got %d; output: %s", exitErr.ExitCode(), string(out))
-		}
-	} else {
-		t.Fatalf("unexpected error: %v; output: %s", err, string(out))
-	}
-}
-
-func TestCodexHookExitZeroWhenDisabled(t *testing.T) {
-	script := filepath.Join(pluginDir("codex"), "scripts", "run-hook.sh")
 	cmd := exec.Command("bash", script, "SessionStart")
 	cmd.Env = append(os.Environ(), "FI_DISABLED=1")
 	out, err := cmd.CombinedOutput()
@@ -668,28 +484,6 @@ func TestClaudeCodeHookNoCrashOnGarbageInput(t *testing.T) {
 	}
 }
 
-func TestCodexHookNoCrashOnGarbageInput(t *testing.T) {
-	script := filepath.Join(pluginDir("codex"), "scripts", "run-hook.sh")
-	cmd := exec.Command("bash", script)
-	cmd.Env = append(os.Environ(),
-		"FI_DISABLED=",
-		"PLUGIN_ROOT=",
-		"CLAUDE_PLUGIN_ROOT=",
-		"CODEX_PLUGIN_ROOT=",
-	)
-	out, err := cmd.CombinedOutput()
-	if err == nil {
-		return
-	}
-	if exitErr, ok := err.(*exec.ExitError); ok {
-		if exitErr.ExitCode() != 0 {
-			t.Errorf("expected exit 0 on empty input, got %d; output: %s", exitErr.ExitCode(), string(out))
-		}
-	} else {
-		t.Fatalf("unexpected error: %v; output: %s", err, string(out))
-	}
-}
-
 func TestClaudeCodeHookNoCrashOnArbitraryStdin(t *testing.T) {
 	script := filepath.Join(pluginDir("claude-code"), "scripts", "run-hook.sh")
 	cmd := exec.Command("bash", script, "SessionStart")
@@ -698,27 +492,6 @@ func TestClaudeCodeHookNoCrashOnArbitraryStdin(t *testing.T) {
 		"PLUGIN_ROOT=/nonexistent",
 	)
 	// Feed arbitrary bytes on stdin.
-	cmd.Stdin = strings.NewReader("GARBAGE\x00BINARY\x01DATA")
-	out, err := cmd.CombinedOutput()
-	if err == nil {
-		return
-	}
-	if exitErr, ok := err.(*exec.ExitError); ok {
-		if exitErr.ExitCode() != 0 {
-			t.Errorf("expected exit 0 with garbage stdin, got %d; output: %s", exitErr.ExitCode(), string(out))
-		}
-	} else {
-		t.Fatalf("unexpected error: %v; output: %s", err, string(out))
-	}
-}
-
-func TestCodexHookNoCrashOnArbitraryStdin(t *testing.T) {
-	script := filepath.Join(pluginDir("codex"), "scripts", "run-hook.sh")
-	cmd := exec.Command("bash", script, "SessionStart")
-	cmd.Env = append(os.Environ(),
-		"FI_DISABLED=",
-		"PLUGIN_ROOT=/nonexistent",
-	)
 	cmd.Stdin = strings.NewReader("GARBAGE\x00BINARY\x01DATA")
 	out, err := cmd.CombinedOutput()
 	if err == nil {
@@ -838,40 +611,6 @@ func runFI(t *testing.T, binary, home, cacheDir string, args ...string) (stdout,
 	return "", "", -1
 }
 
-func TestClaudeCodeBundledBinaryRuns(t *testing.T) {
-	// Verify that the plugin-bundled binaries are present for all platforms.
-	binDir := filepath.Join(pluginDir("claude-code"), "bin")
-	entries, err := os.ReadDir(binDir)
-	if err != nil {
-		t.Fatalf("read bundled binary dir: %v", err)
-	}
-	if len(entries) == 0 {
-		t.Fatal("no platform binary directories under plugins/claude-code/bin/")
-	}
-	// At minimum, the current platform should have a binary.
-	osName := runtimeGOOS()
-	archName := runtimeArch()
-	platBin := filepath.Join(binDir, osName+"-"+archName, "freeinference")
-	if _, err := os.Stat(platBin); err == nil {
-		cmd := exec.Command(platBin, "version", "--json")
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("bundled binary %s failed: %v; output: %s", platBin, err, string(out))
-		}
-		var ver struct {
-			Version string `json:"version"`
-		}
-		if err := json.Unmarshal(out, &ver); err != nil {
-			t.Fatalf("bundled binary version output not JSON: %s", string(out))
-		}
-		if ver.Version == "" {
-			t.Error("bundled binary version is empty")
-		}
-	} else {
-		t.Logf("no binary for current platform %s-%s (may not be built yet)", osName, archName)
-	}
-}
-
 func TestClaudeCodeSkillsInventory(t *testing.T) {
 	skillsDir := filepath.Join(pluginDir("claude-code"), "skills")
 	entries, err := os.ReadDir(skillsDir)
@@ -976,25 +715,4 @@ func TestClaudeCodeBundledBinaryNotAReservedWord(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bash command substitution failed: %v; output: %s", err, string(out))
 	}
-}
-
-// runtimeGOOS returns the OS name for platform detection.
-func runtimeGOOS() string {
-	// Respect GOOS if set (for cross-platform testing).
-	if v := os.Getenv("GOOS"); v != "" {
-		return v
-	}
-	cmd := exec.Command("go", "env", "GOOS")
-	out, _ := cmd.Output()
-	return strings.TrimSpace(string(out))
-}
-
-// runtimeArch returns the architecture name for platform detection.
-func runtimeArch() string {
-	if v := os.Getenv("GOARCH"); v != "" {
-		return v
-	}
-	cmd := exec.Command("go", "env", "GOARCH")
-	out, _ := cmd.Output()
-	return strings.TrimSpace(string(out))
 }

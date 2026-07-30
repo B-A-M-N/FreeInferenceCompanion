@@ -33,7 +33,8 @@ const (
 	algorithmVersion = "v2.0.0"
 )
 
-// CacheAttribution is the root-cause diagnosis for poor cache performance.
+// CacheAttribution is a deprecated cache-pattern classification and likely
+// diagnosis for poor cache performance.
 // Deprecated: Use BuildCacheDiagnosis instead, which returns the structured
 // schema.CacheDiagnosis type with proper attribution kind, evidence, and
 // confidence.
@@ -166,7 +167,7 @@ func classifyCacheStatus(readShare, creationShare, freshShare float64) schema.Ca
 
 // buildCandidateCauses ranks possible causes for poor cache performance.
 // Returns causes sorted by likelihood (highest first). Each cause is explicitly
-// labeled as a hypothesis — never a definitive root cause.
+// labeled as a hypothesis — never a definitive causal claim.
 func buildCandidateCauses(readShare, creationShare, freshShare float64, analysis *schema.CacheAnalysis, snap *schema.Snapshot) []schema.RankedCause {
 	var causes []schema.RankedCause
 

@@ -305,10 +305,11 @@ type CompactionResult struct {
 
 // GlobalState is the shared provider-level cache, not tied to any session.
 type GlobalState struct {
-	Health          *HealthCache     `json:"health"`
-	Models          *ModelsCache     `json:"models"`
-	AccountUsage    *AccountUsage    `json:"account_usage"`
-	CircuitBreakers []CircuitBreaker `json:"circuit_breakers"`
+	Health                 *HealthCache            `json:"health"`
+	Models                 *ModelsCache            `json:"models"`
+	AccountUsage           *AccountUsage           `json:"account_usage"`
+	AccountUsageCapability *AccountUsageCapability `json:"account_usage_capability"`
+	CircuitBreakers        []CircuitBreaker        `json:"circuit_breakers"`
 }
 
 // HealthCache caches provider health information.
@@ -337,7 +338,26 @@ type CatalogModel struct {
 	Features        []string          `json:"features,omitempty"`
 }
 
-// AccountUsage stores FreeInference account-level usage when available.
+// AccountUsageCapabilityState records the provider-negotiated availability of
+// the account-usage contract. Usage is authoritative only when this is
+// CapabilitySupported and the response passes client-side schema validation.
+type AccountUsageCapabilityState string
+
+const (
+	CapabilityUnknown     AccountUsageCapabilityState = "unknown"
+	CapabilitySupported   AccountUsageCapabilityState = "supported"
+	CapabilityUnsupported AccountUsageCapabilityState = "unsupported"
+	CapabilityForbidden   AccountUsageCapabilityState = "forbidden"
+)
+
+// AccountUsageCapability is persisted separately from quota data so a known
+// unsupported or forbidden endpoint is not retried on every refresh.
+type AccountUsageCapability struct {
+	State     AccountUsageCapabilityState `json:"state"`
+	CheckedAt time.Time                   `json:"checked_at"`
+}
+
+// AccountUsage stores provider-confirmed account-level usage when available.
 type AccountUsage struct {
 	Authoritative bool      `json:"authoritative"`
 	FetchedAt     time.Time `json:"fetched_at"`
@@ -345,6 +365,15 @@ type AccountUsage struct {
 	RequestsLimit *int64    `json:"requests_limit"`
 	TokensUsed    *int64    `json:"tokens_used"`
 	TokensLimit   *int64    `json:"tokens_limit"`
+}
+
+// HasAuthoritativeAccountUsage reports whether this provider state contains
+// quota data backed by an explicitly supported capability and a validated,
+// authoritative response.
+func (g *GlobalState) HasAuthoritativeAccountUsage() bool {
+	return g != nil && g.AccountUsage != nil && g.AccountUsage.Authoritative &&
+		g.AccountUsageCapability != nil &&
+		g.AccountUsageCapability.State == CapabilitySupported
 }
 
 // CircuitBreaker tracks per-endpoint circuit breaker state.

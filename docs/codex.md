@@ -82,13 +82,9 @@ Claude Code configuration, not a Codex profile.
 ## 4. Optional: FreeInference Companion plugin
 
 The companion plugin is separate from the model-provider configuration above.
-It records local session lifecycle state and exposes provider diagnostics; it
-does not proxy prompts or select models for you.
-
-The Codex plugin includes native plugin metadata, skills, and lifecycle hooks.
-On installations that support plugin-local hooks, Codex asks you to review and
-approve them before they run. The supported hook events are `SessionStart`,
-`SessionEnd`, `UserPromptSubmit`, `PreCompact`, `PostCompact`, and `Stop`.
+It is a **skill-only** package: it exposes user-requested provider diagnostics
+and model discovery, but does not install lifecycle hooks or record automatic
+Codex session telemetry. It does not proxy prompts or select models for you.
 
 After installation, these skills are available:
 
@@ -100,10 +96,10 @@ After installation, these skills are available:
 - `$freeinference-cache`
 
 Codex does not expose a script-backed status line, live context-window counts,
-or cache-token metrics to plugins. Accordingly, the companion reports those
-values as `unknown` rather than inventing measurements. Use
-`freeinference status --client codex` or `freeinference snapshot --json --client codex`
-for the available local state.
+or cache-token metrics through this package. Accordingly, unavailable values
+are reported as `unknown` rather than invented. Use `freeinference models`,
+`freeinference doctor`, or `freeinference status --client codex` when you
+explicitly want the available local/provider state.
 
 For interactive reports, choose the amount of detail explicitly:
 

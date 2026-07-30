@@ -395,7 +395,7 @@ func printFullStatus(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalS
 		fmt.Fprintln(stdout)
 	}
 
-	if gs != nil && gs.AccountUsage != nil && adapters.IsConfirmedFreeInference(snap.Provider) {
+	if gs.HasAuthoritativeAccountUsage() && adapters.IsConfirmedFreeInference(snap.Provider) {
 		au := gs.AccountUsage
 		fmt.Fprintf(stdout, "Account Usage:\n")
 		fmt.Fprintf(stdout, "  Updated: %s\n", au.FetchedAt.Format(time.RFC3339))

@@ -611,8 +611,8 @@ func (a *ClaudeAdapter) HandleUserPromptSubmitWith(input *schema.ClaudeHookInput
 				if cacheDecision.Share != nil {
 					share = *cacheDecision.Share
 				}
-				// Include root-cause attribution so the warning is actionable,
-				// not just diagnostic.
+				// Include pattern classification and a likely diagnosis so the
+				// warning is actionable without claiming a confirmed cause.
 				diag := engine.BuildCacheDiagnosis(snap, now)
 				var hypothesis string
 				if len(diag.CandidateCauses) > 0 {

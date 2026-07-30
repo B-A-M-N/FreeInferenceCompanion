@@ -1,11 +1,11 @@
 ---
 name: freeinference
-description: FreeInference Companion — session monitoring, cache analysis, diagnostics, and provider management (Codex edition). Context and cache metrics are Codex-unavailable and reported as unknown.
+description: FreeInference Companion — manual provider diagnostics, model discovery, and configuration guidance for Codex. This skill package does not install automatic lifecycle telemetry; Codex-unavailable context and cache metrics are reported as unknown.
 ---
 
 # FreeInference Companion (Codex)
 
-Community-built and unofficial observability layer for FreeInference-powered Codex sessions. Surfaces live model health, session lifecycle metrics, and provider status. **Codex has no status-line system** — the `status-line` subcommand is not applicable. Not affiliated with or endorsed by FreeInference.
+Community-built and unofficial skill package for FreeInference-powered Codex sessions. It runs user-requested provider diagnostics and model discovery; it does **not** install automatic lifecycle telemetry. **Codex has no status-line system** — the `status-line` subcommand is not applicable. Not affiliated with or endorsed by FreeInference.
 
 ## Overview
 
@@ -23,7 +23,7 @@ freeinference status --client codex
 freeinference status --level standard --client codex
 ```
 
-Note: Codex does not expose live context metrics; values may report as `unknown`.
+Note: this skill does not receive lifecycle events, and Codex does not expose live context metrics; values may report as `unknown`.
 
 Flags: `--client <type>`, `--compact`, `--level summary|standard|detailed`, `--session <id>`, `--json`
 
@@ -111,7 +111,7 @@ freeinference cache --json
 
 ### `freeinference refresh`
 
-Refresh cached data (models, health, account usage).
+Refresh cached data (models, health, and account usage when the provider capability is available).
 
 ```bash
 freeinference refresh --force --json
@@ -231,7 +231,7 @@ models are endpoint-exclusive and belong in Claude Code's Anthropic setup.
 1. **No status-line system** — Codex does not support status-line wrappers. `freeinference status-line` is not applicable.
 2. **Context metrics** — Codex does not expose live context window usage to plugins. Context values may report as `unknown`.
 3. **Cache metrics** — Codex does not expose cache metrics. Cache analysis may show limited or no data.
-4. **Hook events** — Codex supports fewer hook events: SessionStart, SessionEnd, UserPromptSubmit, PreCompact, PostCompact, Stop (no StopFailure).
+4. **Automatic telemetry** — this package intentionally installs no Codex lifecycle hooks. Session metrics are available only when another supported integration records them.
 
 ## Example Workflows
 

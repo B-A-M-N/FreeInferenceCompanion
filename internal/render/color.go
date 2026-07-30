@@ -652,7 +652,7 @@ func BuildViewModel(version string, snap *schema.Snapshot, gs *schema.GlobalStat
 	// Account usage is authoritative account-level quota data. Like health
 	// and circuit breakers, gate it by activation identity match so switching
 	// endpoints or keys does not surface quotas from another runtime.
-	if activationMatches && gs != nil && gs.AccountUsage != nil {
+	if activationMatches && gs.HasAuthoritativeAccountUsage() {
 		au := gs.AccountUsage
 		vm.AccountUsageFetchedAt = &au.FetchedAt
 		vm.AccountUsageRequestsUsed = au.RequestsUsed

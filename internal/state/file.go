@@ -151,6 +151,13 @@ func (p Paths) GlobalAccountUsage() string {
 	return filepath.Join(p.GlobalDir(), "account-usage.json")
 }
 
+// GlobalAccountUsageCapability returns the path to the persisted provider
+// capability result for account usage. It is intentionally separate from
+// quota data so unsupported endpoints are not polled indefinitely.
+func (p Paths) GlobalAccountUsageCapability() string {
+	return filepath.Join(p.GlobalDir(), "account-usage-capability.json")
+}
+
 // GlobalCircuitBreakersLock returns the path to the circuit breaker state lock.
 func (p Paths) GlobalCircuitBreakersLock() string {
 	return filepath.Join(p.GlobalDir(), "circuit-breakers.lock")
@@ -599,6 +606,9 @@ func LoadGlobal(paths Paths) (*schema.GlobalState, error) {
 	if err := readJSONQuarantine(paths.GlobalAccountUsage(), &gs.AccountUsage, "account-usage"); err != nil {
 		loadErr = err
 	}
+	if err := readJSONQuarantine(paths.GlobalAccountUsageCapability(), &gs.AccountUsageCapability, "account-usage-capability"); err != nil {
+		loadErr = err
+	}
 	if err := readJSONQuarantine(paths.GlobalCircuitBreakers(), &gs.CircuitBreakers, "circuit-breakers"); err != nil {
 		loadErr = err
 	}
@@ -653,6 +663,15 @@ func SaveAccountUsage(paths Paths, a *schema.AccountUsage) error {
 		return err
 	}
 	return WriteJSONAtomically(paths.GlobalAccountUsage(), a)
+}
+
+// SaveAccountUsageCapability writes the negotiated account-usage capability
+// cache atomically.
+func SaveAccountUsageCapability(paths Paths, c *schema.AccountUsageCapability) error {
+	if err := paths.EnsureDirs(); err != nil {
+		return err
+	}
+	return WriteJSONAtomically(paths.GlobalAccountUsageCapability(), c)
 }
 
 // SaveCircuitBreakers writes the circuit breaker state atomically.

@@ -822,13 +822,12 @@ type AccountUsageResponse struct {
 	TokensLimit   *int64 `json:"tokens_limit"`
 }
 
-// GetAccountUsage fetches account-level usage from GET /v1/account/usage.
-// Returns nil with no error when the endpoint is not available or the account
-// has not been provisioned yet. The caller is responsible for populating
-// FetchedAt and Authoritative at the call site.
-func (c *Client) GetAccountUsage() (*schema.AccountUsage, error) {
+// GetAccountUsage fetches account-level usage from GET /v1/account/usage and
+// returns the observed provider capability separately from the quota data.
+// The endpoint is treated as optional until the provider proves otherwise.
+func (c *Client) GetAccountUsage() (*schema.AccountUsage, schema.AccountUsageCapabilityState, error) {
 	if c.apiKey == "" {
-		return nil, fmt.Errorf("no API key configured")
+		return nil, schema.CapabilityUnknown, fmt.Errorf("no API key configured")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), HealthTimeout)
@@ -836,23 +835,24 @@ func (c *Client) GetAccountUsage() (*schema.AccountUsage, error) {
 
 	resp, err := c.doRequest(ctx, "GET", "/account/usage", nil)
 	if err != nil {
-		return nil, fmt.Errorf("account usage request: %w", err)
+		return nil, schema.CapabilityUnknown, fmt.Errorf("account usage request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusForbidden {
-		// Not provisioned yet or endpoint not available — not an error we
-		// want to trip a circuit breaker for.
-		return nil, nil
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
+		return nil, schema.CapabilityUnsupported, nil
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return nil, schema.CapabilityForbidden, nil
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, readErrorBody(resp)
+		return nil, schema.CapabilityUnknown, readErrorBody(resp)
 	}
 
 	var bodyBytes []byte
 	bodyBytes, err = io.ReadAll(io.LimitReader(resp.Body, MaxHealthBody))
 	if err != nil {
-		return nil, fmt.Errorf("read account usage response: %w", err)
+		return nil, schema.CapabilityUnknown, fmt.Errorf("read account usage response: %w", err)
 	}
 
 	var usageResp AccountUsageResponse
@@ -865,7 +865,7 @@ func (c *Client) GetAccountUsage() (*schema.AccountUsage, error) {
 			TokensLimit   *int64 `json:"tokens_limit"`
 		}
 		if err2 := json.Unmarshal(bodyBytes, &flat); err2 != nil {
-			return nil, fmt.Errorf("parse account usage: %w", err)
+			return nil, schema.CapabilityUnknown, fmt.Errorf("parse account usage: %w", err)
 		}
 		usageResp = AccountUsageResponse{
 			RequestsUsed:  flat.RequestsUsed,
@@ -873,6 +873,9 @@ func (c *Client) GetAccountUsage() (*schema.AccountUsage, error) {
 			TokensUsed:    flat.TokensUsed,
 			TokensLimit:   flat.TokensLimit,
 		}
+	}
+	if usageResp.RequestsUsed == nil && usageResp.RequestsLimit == nil && usageResp.TokensUsed == nil && usageResp.TokensLimit == nil {
+		return nil, schema.CapabilityUnknown, errors.New("parse account usage: response contains no quota fields")
 	}
 
 	au := &schema.AccountUsage{
@@ -883,7 +886,7 @@ func (c *Client) GetAccountUsage() (*schema.AccountUsage, error) {
 		TokensUsed:    usageResp.TokensUsed,
 		TokensLimit:   usageResp.TokensLimit,
 	}
-	return au, nil
+	return au, schema.CapabilitySupported, nil
 }
 
 // ============================================================

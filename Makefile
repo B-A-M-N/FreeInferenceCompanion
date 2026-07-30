@@ -53,8 +53,9 @@ release-check: clean-tree-check fmt-check vet mod-verify tidy-check test test-ra
 	fi
 	@echo "release gate passed"
 
-# release runs the full quality gate, then packages distributable artifacts.
-release: release-check package
+# release runs the full quality gate, packages distributable artifacts, and
+# validates those exact archives from a clean extraction before succeeding.
+release: release-check package-smoke plugin-clean-install
 	@echo ""
 	@echo "release $(VERSION) packaged in $(RELEASE_DIR)/"
 	@ls -la $(RELEASE_DIR)/
@@ -86,7 +87,7 @@ checksums:
 #
 # Plugin bundles (zip) preserve the vendor's expected layout:
 #   .claude-plugin/plugin.json, hooks/, scripts/, skills/, bin/<plat>/freeinference
-#   .codex-plugin/plugin.json, hooks/, scripts/, skills/, bin/<plat>/fi
+#   .codex-plugin/plugin.json, skills/
 # The version is patched only on the staged copy; source manifests are
 # never mutated.
 package: build-all plugin-bin
@@ -119,12 +120,11 @@ package: build-all plugin-bin
 	\
 	for p in $(PLATFORMS); do \
 		bundle_dir="$$staging/installer-$$p"; \
-		mkdir -p "$$bundle_dir/plugins/claude-code/bin/$$p" "$$bundle_dir/plugins/codex/bin/$$p"; \
+		mkdir -p "$$bundle_dir/plugins/claude-code/bin/$$p" "$$bundle_dir/plugins/codex"; \
 		install -m 0755 $(BUILD_DIR)/$(BINARY)-$$p "$$bundle_dir/$(BINARY)"; \
 		cp -R plugins/claude-code/.claude-plugin plugins/claude-code/hooks plugins/claude-code/scripts plugins/claude-code/skills "$$bundle_dir/plugins/claude-code/"; \
-		cp -R plugins/codex/.codex-plugin plugins/codex/hooks plugins/codex/scripts plugins/codex/skills "$$bundle_dir/plugins/codex/"; \
+		cp -R plugins/codex/.codex-plugin plugins/codex/skills "$$bundle_dir/plugins/codex/"; \
 		install -m 0755 $(BUILD_DIR)/$(BINARY)-$$p "$$bundle_dir/plugins/claude-code/bin/$$p/$(BINARY)"; \
-		install -m 0755 $(BUILD_DIR)/$(BINARY)-$$p "$$bundle_dir/plugins/codex/bin/$$p/$(BINARY)"; \
 		(cd "$$bundle_dir" && zip -q -r "$(CURDIR)/$(RELEASE_DIR)/freeinference-companion-$$REL_VERSION-$$p.zip" .); \
 		echo "packaged installer archive for $$p"; \
 	done; \
@@ -147,10 +147,7 @@ package: build-all plugin-bin
 	sed "s/\"version\": \".*\"/\"version\": \"$$REL_VERSION\"/" \
 		plugins/codex/.codex-plugin/plugin.json \
 		> "$$stage_codex/.codex-plugin/plugin.json"; \
-	cp -R plugins/codex/hooks \
-		plugins/codex/scripts \
-		plugins/codex/skills \
-		plugins/codex/bin \
+	cp -R plugins/codex/skills \
 		"$$stage_codex/"; \
 	(cd "$$stage_codex" && zip -q -r "$(CURDIR)/$(RELEASE_DIR)/freeinference-companion-codex_$$REL_VERSION.zip" .) && \
 	echo "packaged Codex plugin bundle"; \
@@ -192,19 +189,16 @@ marketplace:
 	} > "$$out"; \
 	python3 -c "import json; json.load(open('$$out')); print('marketplace manifest written to $$out')"
 
-# plugin-bin builds all platform binaries into each plugin's bin/ directory
+# plugin-bin builds all platform binaries into the Claude plugin's bin/ directory
 # so that the installed hook wrappers can find a working freeinference binary without
 # relying on the user having freeinference on PATH or pre-installed.
 plugin-bin: build-all
-	@mkdir -p plugins/claude-code/bin plugins/codex/bin
+	@mkdir -p plugins/claude-code/bin
 	@for p in $(PLATFORMS); do \
 		os=$$(echo "$$p" | cut -d- -f1); \
 		arch=$$(echo "$$p" | cut -d- -f2); \
 		case "$$arch" in x86_64) arch="amd64" ;; esac; \
 		bin_dir="plugins/claude-code/bin/$$os-$$arch"; \
-		mkdir -p "$$bin_dir"; \
-		cp $(BUILD_DIR)/$(BINARY)-$$p "$$bin_dir/$(BINARY)"; \
-		bin_dir="plugins/codex/bin/$$os-$$arch"; \
 		mkdir -p "$$bin_dir"; \
 		cp $(BUILD_DIR)/$(BINARY)-$$p "$$bin_dir/$(BINARY)"; \
 		echo "copied $$p into plugin bin/$$os-$$arch/"; \
@@ -278,14 +272,12 @@ package-smoke:
 		mkdir -p "$$edir"; \
 		unzip -q "$$z" -d "$$edir"; \
 		test -f "$$edir/.codex-plugin/plugin.json" || { echo "FAIL: $$(basename $$z) missing .codex-plugin/plugin.json"; exit 1; }; \
-		test -d "$$edir/hooks" || { echo "FAIL: $$(basename $$z) missing hooks/"; exit 1; }; \
-		test -d "$$edir/scripts" || { echo "FAIL: $$(basename $$z) missing scripts/"; exit 1; }; \
 		test -d "$$edir/skills" || { echo "FAIL: $$(basename $$z) missing skills/"; exit 1; }; \
 		echo "archive OK: $$(basename $$z)"; \
 	done; \
 	echo "package smoke tests passed"
 
-# plugin-clean-install extracts each plugin ZIP into a temp directory with an
+# plugin-clean-install extracts the Claude plugin ZIP into a temp directory with an
 # empty HOME, removes `freeinference` from PATH, and exercises the hook wrapper. The
 # wrapper must locate the bundled platform binary and exit zero. This proves
 # that a fresh install with no preinstalled freeinference binary still works.
@@ -315,27 +307,6 @@ plugin-clean-install: package
 			bash "$$edir/scripts/run-hook.sh" SessionStart >/dev/null 2>&1; \
 		rc=$$?; \
 		test "$$rc" -eq 0 || { echo "FAIL: Claude run-hook.sh exited $$rc"; exit 1; }; \
-		echo "clean-install OK: $$(basename $$z) ($$plat)"; \
-	done; \
-	for z in $(RELEASE_DIR)/freeinference-companion-codex*.zip; do \
-		edir="$$tmpdir/extract-codex"; \
-		rm -rf "$$edir"; \
-		mkdir -p "$$edir"; \
-		unzip -q "$$z" -d "$$edir"; \
-		test -f "$$edir/.codex-plugin/plugin.json" || { echo "FAIL: $$(basename $$z) missing .codex-plugin/plugin.json"; exit 1; }; \
-		test -x "$$edir/scripts/run-hook.sh" || { echo "FAIL: $$(basename $$z) run-hook.sh not executable"; exit 1; }; \
-		hooks_file="$$edir/hooks/hooks.json"; \
-		test -f "$$hooks_file" || { echo "FAIL: $$(basename $$z) missing hooks/hooks.json"; exit 1; }; \
-		plat="$$(uname -s | tr '[:upper:]' '[:lower:]')-$$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"; \
-		bin="$$edir/bin/$$plat/$(BINARY)"; \
-		test -x "$$bin" || { echo "FAIL: $$(basename $$z) missing bundled binary $$plat"; exit 1; }; \
-		PLUGIN_ROOT="$$edir" \
-			HOME="$$empty_home" \
-			PATH="/usr/bin:/bin" \
-			FI_DISABLED=0 \
-			bash "$$edir/scripts/run-hook.sh" SessionStart >/dev/null 2>&1; \
-		rc=$$?; \
-		test "$$rc" -eq 0 || { echo "FAIL: Codex run-hook.sh exited $$rc"; exit 1; }; \
 		echo "clean-install OK: $$(basename $$z) ($$plat)"; \
 	done; \
 	echo "plugin clean-install smoke tests passed"
@@ -377,9 +348,8 @@ fmt-check:
 # plugin-syntax-check verifies that the plugin manifests parse as JSON and the
 # hook wrapper scripts parse as bash. This is a SYNTAX check only — it does
 # NOT validate against either vendor's plugin schema, and it does NOT verify
-# that the Codex runtime will load plugin-local hooks. Use the official
-# `claude` plugin validator and a real Codex install for runtime validation
-# (tracked separately under P0-1).
+# that a plugin runtime will load plugin-local hooks. Codex support is
+# intentionally skill-only; it has no bundled lifecycle hook integration.
 #
 # Remaining gaps requiring real runtime validation:
 # - Salt race detection: only exercised when test binaries are built with
@@ -387,12 +357,11 @@ fmt-check:
 # - Full activation flow: end-to-end activation across hook, status-line, and
 #   background refresh requires real FreeInference credentials and a live
 #   endpoint. No unit test can exercise this without network access.
-# - Plugin-SDK compatibility: the exact hook contract with Claude Code and
-#   Codex versions 0.145+ should be verified on a real installation from time
-#   to time, especially after platform updates.
+# - Plugin-SDK compatibility: verify the Claude Code hook contract on a real
+#   installation after vendor platform updates.
 plugin-syntax-check:
-	@python3 -c "import json; json.load(open('plugins/claude-code/.claude-plugin/plugin.json')); json.load(open('plugins/claude-code/hooks/hooks.json')); json.load(open('plugins/codex/.codex-plugin/plugin.json')); json.load(open('plugins/codex/hooks/hooks.json')); print('plugin manifests are syntactically valid JSON')"
-	@bash -n plugins/claude-code/scripts/run-hook.sh && bash -n plugins/codex/scripts/run-hook.sh && echo "hook wrappers are syntactically valid bash"
+	@python3 -c "import json; json.load(open('plugins/claude-code/.claude-plugin/plugin.json')); json.load(open('plugins/claude-code/hooks/hooks.json')); json.load(open('plugins/codex/.codex-plugin/plugin.json')); print('plugin manifests are syntactically valid JSON')"
+	@bash -n plugins/claude-code/scripts/run-hook.sh && echo "hook wrapper is syntactically valid bash"
 
 # plugin-validate is the legacy name for plugin-syntax-check. It is preserved
 # for compatibility with existing CI jobs and scripts, but it does NOT perform

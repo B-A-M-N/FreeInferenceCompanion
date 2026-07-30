@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/install"
 )
@@ -93,48 +92,24 @@ func cmdStatusLine(args []string, stdout, stderr io.Writer) int {
 				jsonOut = true
 			}
 		}
-		wrapper := filepath.Join(home, ".claude", "statusline-freeinference.sh")
-		wrapperExists := false
-		wrapperExecutable := false
-		if info, err := os.Stat(wrapper); err == nil {
-			wrapperExists = true
-			wrapperExecutable = info.Mode()&0111 != 0
-		}
-		wrapperReferenced := false
-		if data, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json")); err == nil {
-			wrapperReferenced = strings.Contains(string(data), "statusline-freeinference")
-		}
-		status := "installed"
-		if !wrapperExists {
-			status = "not_installed"
-		} else if !wrapperExecutable {
-			status = "installed_not_executable"
+		s, err := install.InspectClaudeStatusLine(home, scope, projectRoot)
+		if err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
 		}
 		if jsonOut {
-			type statusLineStatus struct {
-				Wrapper    string `json:"wrapper"`
-				Installed  bool   `json:"installed"`
-				Executable bool   `json:"executable"`
-				Referenced bool   `json:"referenced"`
-				Status     string `json:"status"`
-			}
-			s := statusLineStatus{
-				Wrapper:    wrapper,
-				Installed:  wrapperExists,
-				Executable: wrapperExecutable,
-				Referenced: wrapperReferenced,
-				Status:     status,
-			}
 			enc := json.NewEncoder(stdout)
 			enc.SetIndent("", "  ")
 			enc.Encode(s)
 			return 0
 		}
-		fmt.Fprintf(stdout, "Wrapper:   %s\n", wrapper)
-		fmt.Fprintf(stdout, "Installed: %t\n", wrapperExists)
-		fmt.Fprintf(stdout, "Executable: %t\n", wrapperExecutable)
-		fmt.Fprintf(stdout, "Referenced: %t\n", wrapperReferenced)
-		fmt.Fprintf(stdout, "Status: %s\n", status)
+		fmt.Fprintf(stdout, "Scope:      %s\n", s.Scope)
+		fmt.Fprintf(stdout, "Config:     %s\n", s.SettingsPath)
+		fmt.Fprintf(stdout, "Wrapper:    %s\n", s.Wrapper)
+		fmt.Fprintf(stdout, "Installed:  %t\n", s.Installed)
+		fmt.Fprintf(stdout, "Executable: %t\n", s.Executable)
+		fmt.Fprintf(stdout, "Referenced: %t\n", s.Referenced)
+		fmt.Fprintf(stdout, "Status: %s\n", s.Status)
 		return 0
 	default:
 		fmt.Fprintf(stderr, "unknown subcommand: %s\n", subcommand)

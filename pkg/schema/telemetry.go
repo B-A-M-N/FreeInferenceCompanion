@@ -148,8 +148,8 @@ type CodexWarningOutput struct {
 //   - No hook provides cumulative session totals
 //
 // Unavailable fields:
-//   - FreeInference does not expose /v1/usage, /v1/account, or rate limit headers
-//   - account_usage remains null in v1 unless FreeInference adds an endpoint
+//   - Account usage is optional and capability-negotiated; it remains absent
+//     unless a schema-valid, provider-authoritative response is received
 //   - observed_session_usage fields are null until sufficient samples collected
 //   - Codex does not expose any live token/context snapshot
 //

@@ -110,7 +110,7 @@ freeinference cache --json
 
 ### `freeinference refresh`
 
-Refresh cached data (models, health, account usage).
+Refresh cached data (models, health, and account usage when the provider capability is available).
 
 ```bash
 freeinference refresh --force --json

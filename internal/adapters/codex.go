@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/runtime"
+	"github.com/b-a-m-n/freeinference-companion/internal/secure"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
@@ -33,6 +34,7 @@ func (a *CodexAdapter) ParseHookInput(r io.Reader) (*schema.CodexHookInput, erro
 
 // newCodexSnapshot builds a fresh snapshot for a newly seen Codex session.
 func newCodexSnapshot(sessionID, modelID string, now time.Time) *schema.Snapshot {
+	modelID = secure.SanitizeField(modelID)
 	if modelID == "" {
 		modelID = "unknown"
 	}
@@ -81,9 +83,10 @@ func (a *CodexAdapter) HandleSessionStartWith(input *schema.CodexHookInput, acti
 	}
 	now := time.Now().UTC()
 	provider := activation.ProviderInfo()
+	modelID := secure.SanitizeField(input.Model)
 	err := state.UpdateSnapshot(a.Paths, schema.ClientCodex, sessionID,
 		func() *schema.Snapshot {
-			return newCodexSnapshot(sessionID, input.Model, now)
+			return newCodexSnapshot(sessionID, modelID, now)
 		},
 		func(snap *schema.Snapshot) error {
 			snap.Session.Status = schema.SessionActive
@@ -91,15 +94,15 @@ func (a *CodexAdapter) HandleSessionStartWith(input *schema.CodexHookInput, acti
 			snap.Session.EndedAt = nil
 			snap.Provider = provider
 			snap.ActivationID = a.Paths.ActivationID
-			if input.Model != "" && (snap.Model.ID == "" || snap.Model.ID == "unknown") {
-				snap.Model.ID = input.Model
+			if modelID != "" && (snap.Model.ID == "" || snap.Model.ID == "unknown") {
+				snap.Model.ID = modelID
 				snap.Model.MetadataSource = "client_hook"
 			}
 			return nil
 		})
 	if err == nil {
 		appendCodexEvent(a.Paths, sessionID,
-			state.Event{Type: state.EventSessionStarted, Model: input.Model, Provider: provider.Name})
+			state.Event{Type: state.EventSessionStarted, Model: modelID, Provider: provider.Name})
 	}
 	return err
 }

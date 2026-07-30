@@ -63,6 +63,11 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int
 	if cmd == "update" {
 		return cmdUpdate(state.Paths{}, rest, stdout, stderr)
 	}
+	// Persistent companion controls are intentionally stateless: disabling the
+	// companion must not create cache, salt, session, or provider directories.
+	if cmd == "companion" {
+		return cmdCompanion(state.Paths{}, rest, stdout, stderr)
+	}
 
 	paths, err := state.NewPaths()
 	if err != nil {
@@ -79,18 +84,21 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int
 	// Session-only commands (sessions, snapshot, context, render) may use
 	// unnamespaced paths because session state is independent of the provider.
 	requiresActiveProvider := map[string]bool{
-		"status":    true,
-		"models":    true,
-		"report":    true,
-		"dashboard": true,
-		"refresh":   true,
-		"cache":     true,
+		"status":  true,
+		"models":  true,
+		"report":  true,
+		"refresh": true,
+		"cache":   true,
 	}
 	needsProviderState := requiresActiveProvider[cmd]
 
 	if !activation.Active {
 		if activation.Disabled {
-			fmt.Fprintf(stderr, "WARNING: FreeInference companion is DISABLED (FI_DISABLED=1)\n")
+			if activation.DisabledByMarker {
+				fmt.Fprintln(stderr, "WARNING: FreeInference companion is DISABLED persistently")
+			} else {
+				fmt.Fprintln(stderr, "WARNING: FreeInference companion is DISABLED (FI_DISABLED=1)")
+			}
 			fmt.Fprintf(stderr, "         All hooks and automatic features are suppressed.\n")
 			fmt.Fprintf(stderr, "         Run \"freeinference companion enable\" to re-enable.\n")
 		}
@@ -157,11 +165,6 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int
 			return 0
 		}
 		return cmdReport(paths, rest, stdout, stderr)
-	case "dashboard":
-		if printCmdHelp(stdout, stderr, "dashboard", rest) {
-			return 0
-		}
-		return cmdDashboard(rest, stdout, stderr)
 	case "context":
 		if printCmdHelp(stdout, stderr, "context", rest) {
 			return 0
@@ -184,8 +187,6 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int
 		return cmdStatusLine(rest, stdout, stderr)
 	case "config":
 		return cmdConfig(rest, stdout, stderr)
-	case "companion":
-		return cmdCompanion(paths, rest, stdout, stderr)
 	case "version", "--version", "-v":
 		return cmdVersion(rest, stdout, stderr)
 	case "help", "--help", "-h":
@@ -249,7 +250,7 @@ Usage:
     [--worker models|health|account-usage] [--help]
   freeinference status-line install|uninstall
   freeinference config show|set|reset|path [--json]
-  freeinference companion status
+  freeinference companion status|enable|disable
   freeinference version [--json]
   freeinference hook <client> <event>
 
@@ -296,9 +297,14 @@ Flags:
   --help                 Show this help message
 `
 
-	helpCompanion = `Usage: freeinference companion status [--json] [--help]
+	helpCompanion = `Usage: freeinference companion status|enable|disable [--json] [--help]
 
-Show the companion enable/disable status.
+Inspect or change the persistent companion enabled state.
+
+Subcommands:
+  status   Show enabled, configured, runtime-active, and disable-source state
+  enable   Remove the persistent disable marker
+  disable  Create the persistent disable marker
 
 Flags:
   --json    Output machine-readable JSON
