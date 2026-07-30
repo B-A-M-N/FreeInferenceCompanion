@@ -164,7 +164,9 @@ plugin-clean-install: package
 	for z in $(RELEASE_DIR)/freeinference-companion-*.zip; do \
 		edir="$$(mktemp -d "${TMPDIR:-/tmp}/fi-plugin-extract.XXXXXX")"; \
 		unzip -q "$$z" -d "$$edir" && echo "extracted $$(basename $$z)"; \
-		base="."; \
+		# Find the plugin root directory (single top-level entry) \
+		base=$$(ls -1 "$$edir" | head -1); \
+		test -n "$$base" && test -d "$$edir/$$base" || { echo "FAIL: cannot determine plugin root in $$(basename $$z)"; exit 1; }; \
 		test -d "$$edir/$$base/bin" || { echo "FAIL: bin/ missing in $$(basename $$z)"; exit 1; }; \
 		for bin in "$$edir/$$base/bin"/*; do \
 			while [ -d "$$bin" ]; do \
