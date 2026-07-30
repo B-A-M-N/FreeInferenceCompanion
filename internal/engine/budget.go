@@ -47,7 +47,19 @@ const (
 // This is a conservative projection — it assumes the current burn rate
 // continues unchanged. Real usage fluctuates, so the estimate is labeled
 // as approximate.
-func ProjectBudget(au *schema.AccountUsage, snap *schema.Snapshot, now time.Time) BudgetProjection {
+//
+// If the account-usage circuit breaker is open, the account usage data
+// may be stale (not refreshed due to endpoint failures), and we return
+// BudgetUnknown with a degraded confidence indication.
+func ProjectBudget(au *schema.AccountUsage, snap *schema.Snapshot, now time.Time, circuitBreakers []schema.CircuitBreaker) BudgetProjection {
+	// Check if account-usage circuit breaker is open — data may be stale.
+	if isCircuitBreakerOpen(circuitBreakers, "account-usage", now) {
+		return BudgetProjection{
+			Status: BudgetUnknown,
+			Detail: "Account usage data may be stale (circuit breaker open for account-usage endpoint). Run `fi refresh` to fetch fresh data.",
+		}
+	}
+
 	if au == nil {
 		return BudgetProjection{
 			Status: BudgetUnknown,
@@ -205,4 +217,16 @@ func buildBudgetDetail(status BudgetStatus, reqRem, tokRem *int64,
 		return detail
 	}
 	return ""
+}
+
+// isCircuitBreakerOpen checks if a specific endpoint's circuit breaker is open.
+func isCircuitBreakerOpen(cbs []schema.CircuitBreaker, endpoint string, now time.Time) bool {
+	for _, cb := range cbs {
+		if cb.Endpoint == endpoint && cb.State == schema.CircuitOpen {
+			if cb.NextRetryAt != nil && now.Before(*cb.NextRetryAt) {
+				return true
+			}
+		}
+	}
+	return false
 }

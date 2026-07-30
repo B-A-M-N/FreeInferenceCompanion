@@ -49,14 +49,45 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
+
 	// Derive an activation identity so global state is namespaced under
 	// providers/<id>/ and different endpoints/keys don't share data.
 	activation := runtime.Evaluate()
-	if id, err := activation.Identity(runtime.DefaultSaltLoader()); err == nil {
-		dirName := id.DirName()
-		if dirName != "" {
-			paths = paths.NewNamespacedPaths(dirName)
+
+	// Commands that read/write provider-level state (models, health, circuit
+	// breakers, account usage) require an active FreeInference runtime.
+	// Session-only commands (sessions, snapshot, context, render) may use
+	// unnamespaced paths because session state is independent of the provider.
+	providerStateCommands := map[string]bool{
+		"status":      true,
+		"models":      true,
+		"doctor":      true,
+		"report":      true,
+		"dashboard":   true,
+		"refresh":     true,
+		"cache":       true,
+		"status-line": true, // renders provider state
+	}
+	needsProviderState := providerStateCommands[cmd]
+
+	if !activation.Active {
+		if needsProviderState {
+			fmt.Fprintf(stderr, "error: FreeInference not active — cannot read/write provider state\n")
+			return 1
 		}
+		// Session-only commands may use unnamespaced paths.
+	} else {
+		id, err := activation.Identity(runtime.DefaultSaltLoader())
+		if err != nil {
+			fmt.Fprintf(stderr, "error: failed to initialize activation identity: %v\n", err)
+			return 1
+		}
+		dirName := id.DirName()
+		if dirName == "" {
+			fmt.Fprintf(stderr, "error: activation identity is empty\n")
+			return 1
+		}
+		paths = paths.NewNamespacedPaths(dirName)
 	}
 	if err := paths.EnsureDirs(); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
@@ -156,6 +187,5 @@ Environment:
   FI_NO_BACKGROUND         Disable background refresh
   FI_DISABLED              Disable all companion features
   FI_ALLOW_INSECURE_LOCALHOST  Allow http:// loopback (development only)
-  FI_ALLOW_CUSTOM_API_ENDPOINT Allow sending FI key to a custom host (opt-in)
 `)
 }

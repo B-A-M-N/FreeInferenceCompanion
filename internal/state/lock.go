@@ -29,10 +29,17 @@ func NewFileLock(path string) *FileLock {
 
 // Acquire opens the lock file and acquires an exclusive non-blocking flock.
 // Returns ErrLockBusy if the lock is already held by another process.
+// Validates the lock file is a regular file (not a symlink) after opening.
+// Uses O_NOFOLLOW to prevent symlink-following attacks on the lock file itself.
 func (l *FileLock) Acquire() error {
-	f, err := os.OpenFile(l.path, os.O_RDWR|os.O_CREATE, 0600)
+	f, err := os.OpenFile(l.path, os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0600)
 	if err != nil {
 		return fmt.Errorf("open lock file: %w", err)
+	}
+	// Validate the lock file is a regular file with correct permissions
+	if err := validateLockFile(f); err != nil {
+		f.Close()
+		return err
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		f.Close()
@@ -48,16 +55,40 @@ func (l *FileLock) Acquire() error {
 // AcquireBlocking opens the lock file and acquires an exclusive blocking flock.
 // Unlike Acquire, this blocks until the lock is available. Use this for
 // background workers (not hooks) where a brief wait is acceptable.
+// Validates the lock file is a regular file (not a symlink) after opening.
+// Uses O_NOFOLLOW to prevent symlink-following attacks on the lock file itself.
 func (l *FileLock) AcquireBlocking() error {
-	f, err := os.OpenFile(l.path, os.O_RDWR|os.O_CREATE, 0600)
+	f, err := os.OpenFile(l.path, os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0600)
 	if err != nil {
 		return fmt.Errorf("open lock file: %w", err)
+	}
+	// Validate the lock file is a regular file with correct permissions
+	if err := validateLockFile(f); err != nil {
+		f.Close()
+		return err
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
 		f.Close()
 		return fmt.Errorf("acquire blocking lock: %w", err)
 	}
 	l.f = f
+	return nil
+}
+
+// validateLockFile ensures the lock file is a regular file with 0600 permissions.
+func validateLockFile(f *os.File) error {
+	info, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("stat lock file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("lock file is not a regular file")
+	}
+	// Check permissions (allow 0600 or 0644 for backward compat with existing locks)
+	mode := info.Mode().Perm()
+	if mode != 0600 && mode != 0644 {
+		return fmt.Errorf("lock file has unsafe permissions: %o", mode)
+	}
 	return nil
 }
 

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/adapters"
+	"github.com/b-a-m-n/freeinference-companion/internal/runtime"
 	"github.com/b-a-m-n/freeinference-companion/internal/secure"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
@@ -64,16 +65,41 @@ func cmdSnapshot(paths state.Paths, args []string, stdin io.Reader, stdout, stde
 			flagArgs = append(flagArgs, a)
 		}
 	}
-	clientType, sessionID, _, _, err := parseClientSessionFlags(flagArgs)
+	clientType, sessionID, _, reveal, err := parseClientSessionFlags(flagArgs)
 	if err != nil {
 		fmt.Fprintf(stderr, "usage error: %v\n", err)
 		return 2
 	}
 
+	// Derive activation ID to check for identity errors.
+	// Identity failures are reported before any state access.
+	activation := runtime.Evaluate()
+	aid, aidErr := activationID(activation)
+
+	// Status-line mode (stdin input): zero output on identity failure.
+	if aidErr != nil && stdinHasData(stdin) {
+		return 0
+	}
+
 	// Accept a Claude status payload on stdin (updates state first).
-	if sessionID == "" {
-		if snap := updateFromStdinStatus(paths, stdin); snap != nil {
-			return printSnapshot(stdout, snap, loadGlobal(paths), jsonOut)
+	// This path is taken when no --session is specified and stdin has a status payload.
+	if sessionID == "" && stdinHasData(stdin) {
+		var statusInput schema.ClaudeStatusLineInput
+		if json.NewDecoder(stdin).Decode(&statusInput) == nil && statusInput.SessionID != "" {
+			// Status-line mode with valid payload: update state and render.
+			// Identity failure in status-line mode → zero output (fail-closed).
+			if aidErr != nil {
+				return 0
+			}
+			// Default to Claude Code client type for status-line input.
+			if clientType == "" {
+				clientType = schema.ClientClaudeCode
+			}
+			_ = adapters.NewClaudeAdapter(paths).HandleStatusLineUpdateWith(&statusInput, statusInput.SessionID, runtime.Evaluate())
+			snap, _ := state.LoadSnapshot(paths, schema.ClientClaudeCode, statusInput.SessionID)
+			if snap != nil {
+				return printSnapshot(stdout, stderr, snap, loadGlobal(paths), jsonOut, aid, aidErr, reveal)
+			}
 		}
 	}
 
@@ -92,14 +118,25 @@ func cmdSnapshot(paths state.Paths, args []string, stdin io.Reader, stdout, stde
 		fmt.Fprintln(stdout, "FI: no session")
 		return 0
 	}
-	return printSnapshot(stdout, resolved.Snap, loadGlobal(paths), jsonOut)
+	return printSnapshot(stdout, stderr, resolved.Snap, loadGlobal(paths), jsonOut, aid, aidErr, reveal)
 }
 
-func printSnapshot(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalState, jsonOut bool) int {
-	// Interactive diagnostic mode: show data regardless of activation state.
-	// The strict gate only applies to the embedded footer, not to explicit
-	// human-initiated CLI queries like `fi snapshot --json`.
-	vm := buildView(snap, gs, "", true, snap.Client.Type, snap.Session.ID)
+func printSnapshot(stdout, stderr io.Writer, snap *schema.Snapshot, gs *schema.GlobalState, jsonOut bool, aid string, aidErr error, reveal bool) int {
+	// Handle identity error: report sanitized error for interactive mode.
+	// For status-line mode (jsonOut with no snapshot), fail-closed with zero output.
+	if aidErr != nil {
+		if jsonOut {
+			// Status-line mode: zero output on identity failure
+			return 0
+		}
+		// Interactive mode: report sanitized identity error
+		fmt.Fprintf(stderr, "error: %s\n", secure.SanitizeField(aidErr.Error()))
+		return 1
+	}
+
+	// Interactive diagnostic mode: show data.
+	// The strict gate applies via buildView which receives the current activation ID.
+	vm := buildView(snap, gs, aid, true, snap.Client.Type, snap.Session.ID)
 	rc := renderConfig()
 	if jsonOut {
 		data, err := vm.JSON()
@@ -126,7 +163,7 @@ func cmdRender(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 			flagArgs = append(flagArgs, args[i])
 		}
 	}
-	clientType, sessionID, _, _, err := parseClientSessionFlags(flagArgs)
+	clientType, sessionID, _, reveal, err := parseClientSessionFlags(flagArgs)
 	if err != nil {
 		fmt.Fprintf(stderr, "usage error: %v\n", err)
 		return 2
@@ -139,10 +176,19 @@ func cmdRender(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 		return 2
 	}
 
+	// Derive activation ID to check for identity errors.
+	activation := runtime.Evaluate()
+	aid, aidErr := activationID(activation)
+
+	// Status-line mode (stdin input): zero output on identity failure.
+	if aidErr != nil && stdinHasData(stdin) {
+		return 0
+	}
+
 	// Status payload on stdin takes priority (same path as status line).
 	if sessionID == "" {
 		if snap := updateFromStdinStatus(paths, stdin); snap != nil {
-			return printRendered(stdout, snap, loadGlobal(paths), mode)
+			return printRendered(stdout, stderr, snap, loadGlobal(paths), mode, aid, aidErr, reveal)
 		}
 	}
 
@@ -155,17 +201,27 @@ func cmdRender(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 		fmt.Fprintln(stdout, "FI: no session")
 		return 0
 	}
-	return printRendered(stdout, resolved.Snap, loadGlobal(paths), mode)
+	return printRendered(stdout, stderr, resolved.Snap, loadGlobal(paths), mode, aid, aidErr, reveal)
 }
 
-func printRendered(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalState, mode string) int {
+func printRendered(stdout, stderr io.Writer, snap *schema.Snapshot, gs *schema.GlobalState, mode string, aid string, aidErr error, reveal bool) int {
+	// Handle identity error: report sanitized error for interactive mode.
+	if aidErr != nil {
+		fmt.Fprintf(stderr, "error: %s\n", secure.SanitizeField(aidErr.Error()))
+		return 1
+	}
+
 	// Interactive diagnostic mode: show data regardless of activation state.
-	vm := buildView(snap, gs, "", true, snap.Client.Type, snap.Session.ID)
+	// Note: For render, we use the activation ID (aid) to gate visibility via SurfaceEligibility.
+	vm := buildView(snap, gs, aid, true, snap.Client.Type, snap.Session.ID)
 	rc := renderConfig()
 	if mode == "expanded" {
 		fmt.Fprintln(stdout, vm.Expanded(rc))
 	} else {
-		fmt.Fprintln(stdout, vm.Line(rc))
+		line := vm.Line(rc)
+		if line != "" {
+			fmt.Fprintln(stdout, line)
+		}
 	}
 	return 0
 }

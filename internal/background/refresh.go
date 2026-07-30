@@ -126,7 +126,7 @@ func (r *Refresher) WorkerRefresh(worker string) *RefreshResult {
 		}
 		r.refreshHealth(result, now)
 	case WorkerAccountUsage:
-		if r.Client == nil || r.Client.APIKey == "" {
+		if r.Client == nil || r.Client.APIKey() == "" {
 			result.Skipped = true
 			result.SkipReason = "no API key configured"
 			return result
@@ -166,7 +166,7 @@ func (r *Refresher) RefreshIfStale() *RefreshResult {
 			result.Error = res.Error
 		}
 	}
-	if r.Client != nil && r.Client.APIKey != "" &&
+	if r.Client != nil && r.Client.APIKey() != "" &&
 		!breakerOpen(gs, WorkerAccountUsage, now) {
 		if accountUsageStale(gs, now) {
 			res := r.WorkerRefresh(WorkerAccountUsage)
@@ -188,7 +188,7 @@ func (r *Refresher) ForceRefresh() *RefreshResult {
 	if r.HealthURL != "" {
 		r.forceRefreshHealth(result, now)
 	}
-	if r.Client != nil && r.Client.APIKey != "" {
+	if r.Client != nil && r.Client.APIKey() != "" {
 		r.forceRefreshAccountUsage(result, now)
 	}
 	return result

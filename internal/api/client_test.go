@@ -225,7 +225,7 @@ func TestGetHealthNeverSendsAPIKey(t *testing.T) {
 	// key must not be sent". The simplest faithful test: use NormalizeHealthURL
 	// to confirm https URLs validate, then assert on the constructed request
 	// that Authorization is unset. Do that via a request-observing transport.
-	c.HTTPClient = &http.Client{Transport: roundTripRecorder(func(req *http.Request) (*http.Response, error) {
+	c.httpClient = &http.Client{Transport: roundTripRecorder(func(req *http.Request) (*http.Response, error) {
 		authSeen <- req.Header.Get("Authorization")
 		return &http.Response{
 			StatusCode: 200,
@@ -322,7 +322,7 @@ func TestIsAllowedHealthOrigin(t *testing.T) {
 func TestGetHealthFromTrustedRejectsUnknownHost(t *testing.T) {
 	c := newClientLegacy("https://freeinference.org/v1", "hyi-test-key-12345", 5*time.Second)
 	called := false
-	c.HTTPClient = &http.Client{Transport: roundTripRecorder(func(req *http.Request) (*http.Response, error) {
+	c.httpClient = &http.Client{Transport: roundTripRecorder(func(req *http.Request) (*http.Response, error) {
 		called = true
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("{}")), Header: make(http.Header)}, nil
 	})}
@@ -459,6 +459,7 @@ func TestNewClient_CustomEndpointWithSeparateKey(t *testing.T) {
 // even when FI_CUSTOM_ENDPOINT is set.
 func TestNewClient_FreeInferenceKeyNeverAllowedOnCustomHost(t *testing.T) {
 	t.Setenv("FI_CUSTOM_ENDPOINT", "https://api.anthropic.com/v1")
+	t.Setenv("FI_CUSTOM_API_KEY", "sk-ant-test-key")
 	_, err := NewClient(ClientConfig{BaseURL: "https://api.anthropic.com/v1", APIKey: "hyi-test-key-12345", Timeout: time.Second})
 	if err == nil {
 		t.Fatal("production FI key must never be sent to a custom endpoint")
@@ -482,13 +483,13 @@ func TestDoRequest_NeverSendsKeyToUnapprovedHost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.BaseURL = "https://evil.example.com/v1"
+	c.baseURL = "https://evil.example.com/v1"
 
 	// The transport must never see an Authorization header. We use a
 	// non-blocking channel so the test hangs neither if the credential check
 	// fires before the transport nor if a request somehow slips through.
 	authSeen := make(chan string, 1)
-	c.HTTPClient = &http.Client{Transport: roundTripRecorder(func(req *http.Request) (*http.Response, error) {
+	c.httpClient = &http.Client{Transport: roundTripRecorder(func(req *http.Request) (*http.Response, error) {
 		authSeen <- req.Header.Get("Authorization")
 		return &http.Response{
 			StatusCode: 200,
@@ -534,10 +535,10 @@ func TestNewClient_NoKeyAllowsAnyHTTPS(t *testing.T) {
 // rejects cross-origin redirects (credential leakage prevention).
 func TestHTTPClientRejectsCrossOriginRedirects(t *testing.T) {
 	client := newClientLegacy("https://freeinference.org/v1", "test-key", 5*time.Second)
-	if client.HTTPClient == nil {
+	if client.httpClient == nil {
 		t.Fatal("nil HTTP client")
 	}
-	if client.HTTPClient.CheckRedirect == nil {
+	if client.httpClient.CheckRedirect == nil {
 		t.Fatal("CheckRedirect not set — cross-origin redirect protection missing")
 	}
 }

@@ -40,6 +40,37 @@ const (
 	SyntheticProbeValue  = "synthetic"
 )
 
+// CustomEndpointConfig holds the validated custom endpoint configuration.
+// Both FI_CUSTOM_ENDPOINT and FI_CUSTOM_API_KEY must be present together.
+type CustomEndpointConfig struct {
+	EndpointIdentity *EndpointIdentity // validated endpoint identity
+	APIKey           string            // custom API key
+}
+
+// LoadCustomEndpointConfig loads and validates the custom endpoint configuration.
+// Returns (nil, nil) if not configured. Returns error if partially configured.
+func LoadCustomEndpointConfig() (*CustomEndpointConfig, error) {
+	customEndpoint := os.Getenv("FI_CUSTOM_ENDPOINT")
+	customAPIKey := os.Getenv("FI_CUSTOM_API_KEY")
+
+	if customEndpoint == "" && customAPIKey == "" {
+		return nil, nil // not configured
+	}
+	if customEndpoint == "" || customAPIKey == "" {
+		return nil, errors.New("FI_CUSTOM_ENDPOINT and FI_CUSTOM_API_KEY must be set together")
+	}
+
+	id, err := NormalizeEndpoint(customEndpoint)
+	if err != nil {
+		return nil, fmt.Errorf("invalid FI_CUSTOM_ENDPOINT: %w", err)
+	}
+
+	return &CustomEndpointConfig{
+		EndpointIdentity: id,
+		APIKey:           customAPIKey,
+	}, nil
+}
+
 // ValidateBaseURL validates a base URL for credentialed API requests.
 // Rules:
 //   - Must be absolute (scheme + host).
@@ -127,70 +158,6 @@ func isLoopbackHost(host string) bool {
 	return false
 }
 
-// approvedBaseURL validates a base URL and, when an API key is present,
-// requires the host to be an approved FreeInference hostname unless the user
-// has explicitly configured a custom endpoint via FI_CUSTOM_ENDPOINT.
-//
-// This is the authoritative credential-safety gate: it prevents
-// FREEINFERENCE_API_KEY from being silently transported to an arbitrary host
-// when an attacker controls FREEINFERENCE_BASE_URL.
-//
-// Custom endpoint contract:
-//   - FI_CUSTOM_ENDPOINT must be a valid HTTPS URL with a trusted origin
-//   - FI_CUSTOM_API_KEY is the only credential allowed for custom endpoints
-//   - FREEINFERENCE_API_KEY is NEVER sent to a custom endpoint
-func approvedBaseURL(rawURL string, apiKey string) (string, error) {
-	normalized, err := ValidateBaseURL(rawURL)
-	if err != nil {
-		return "", err
-	}
-	if apiKey == "" {
-		// No credential is at stake; the URL only needs to pass basic validation.
-		return normalized, nil
-	}
-	// A credential is present. If this is the production FreeInference key,
-	// require an approved host. The custom endpoint key is checked separately.
-	if strings.HasPrefix(apiKey, "hyi-") || strings.HasPrefix(apiKey, "sk-fi") {
-		// Production FreeInference key: must go to approved host only.
-		u, err := url.Parse(normalized)
-		if err != nil {
-			return "", fmt.Errorf("invalid base URL: %w", err)
-		}
-		if !isApprovedCredentialHost(u.Hostname()) {
-			return "", &CredentialError{
-				Host: u.Hostname(),
-			}
-		}
-		return normalized, nil
-	}
-	// Non-FI key: allow custom endpoints if FI_CUSTOM_ENDPOINT is set and
-	// matches the configured host. This prevents FREEINFERENCE_API_KEY from
-	// being sent to a custom endpoint while allowing a user to configure
-	// their own endpoint + key pair.
-	customEndpoint := os.Getenv("FI_CUSTOM_ENDPOINT")
-	if customEndpoint == "" {
-		// Not a custom endpoint and not a FreeInference-hosted key — could be
-		// an Anthropic-compatible or OpenAI-compatible key on an approved host.
-		u, err := url.Parse(normalized)
-		if err != nil {
-			return "", fmt.Errorf("invalid base URL: %w", err)
-		}
-		if !isApprovedCredentialHost(u.Hostname()) {
-			return "", &CredentialError{
-				Host: u.Hostname(),
-			}
-		}
-		return normalized, nil
-	}
-	// Custom endpoint: verify the normalized URL matches the configured origin.
-	if !strings.EqualFold(normalized, customEndpoint) {
-		return "", &CredentialError{
-			Host: normalized,
-		}
-	}
-	return normalized, nil
-}
-
 // isApprovedCredentialHost reports whether host is one of the approved
 // FreeInference hostnames that may receive the configured API key.
 func isApprovedCredentialHost(host string) bool {
@@ -230,16 +197,42 @@ func SanitizeEndpointError(err error) string {
 }
 
 // Client communicates with the FreeInference API.
+// Security-sensitive fields are private. Use accessors for read-only access.
 type Client struct {
-	BaseURL    string
-	APIKey     string
-	Version    string
-	HTTPClient *http.Client
+	baseURL          string
+	endpointIdentity *EndpointIdentity
+	apiKey           string
+	version          string
+	httpClient       *http.Client
+
+	// customEndpoint holds the validated custom endpoint config (if any).
+	// When set, only the custom API key is used for requests to this origin.
+	customEndpoint *CustomEndpointConfig
 
 	// _testMode is set by NewClientForTest to bypass per-request credential
 	// validation. It prevents doRequest from re-checking the host, which is
 	// necessary for httptest server usage in tests.
 	_testMode bool
+}
+
+// BaseURL returns the client's base URL (read-only accessor).
+func (c *Client) BaseURL() string {
+	return c.baseURL
+}
+
+// EndpointIdentity returns the client's endpoint identity (read-only accessor).
+func (c *Client) EndpointIdentity() *EndpointIdentity {
+	return c.endpointIdentity
+}
+
+// Version returns the client version (read-only accessor).
+func (c *Client) Version() string {
+	return c.version
+}
+
+// APIKey returns the client's API key (read-only accessor).
+func (c *Client) APIKey() string {
+	return c.apiKey
 }
 
 // ClientConfig is the authoritative, credential-safe configuration for an API
@@ -257,8 +250,9 @@ type ClientConfig struct {
 // Validation performed before any network capability exists:
 //   - Base URL is absolute, HTTPS (except loopback with opt-in), no userinfo/fragment.
 //   - When APIKey != "", the host MUST be an approved FreeInference host unless
-//     FI_ALLOW_CUSTOM_API_ENDPOINT=1 is set. This prevents the API key from being
-//     silently transported to an arbitrary attacker-controlled HTTPS endpoint.
+//     FI_CUSTOM_ENDPOINT and FI_CUSTOM_API_KEY are configured. This prevents the
+//     API key from being silently transported to an arbitrary attacker-controlled
+//     HTTPS endpoint.
 //
 // Returns a CredentialError (without the URL) when a credential would be sent
 // to an unapproved host.
@@ -269,16 +263,26 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 30 * time.Second
 	}
-	normalized, err := approvedBaseURL(cfg.BaseURL, cfg.APIKey)
+
+	// Load custom endpoint config if configured
+	customCfg, err := LoadCustomEndpointConfig()
 	if err != nil {
 		return nil, err
 	}
+
+	normalized, err := approvedBaseURL(cfg.BaseURL, cfg.APIKey, customCfg)
+	if err != nil {
+		return nil, err
+	}
+
 	dialer := &net.Dialer{Timeout: DialTimeout}
 	return &Client{
-		BaseURL: normalized,
-		APIKey:  cfg.APIKey,
-		Version: "dev",
-		HTTPClient: &http.Client{
+		baseURL:          normalized,
+		endpointIdentity: &EndpointIdentity{Host: extractHost(normalized), Origin: extractOrigin(normalized), RequestURL: normalized, IsFI: isApprovedCredentialHost(extractHost(normalized))},
+		apiKey:           cfg.APIKey,
+		version:          "dev",
+		customEndpoint:   customCfg,
+		httpClient: &http.Client{
 			Timeout: cfg.Timeout,
 			Transport: &http.Transport{
 				DialContext:           dialer.DialContext,
@@ -295,6 +299,87 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	}, nil
 }
 
+// extractHost extracts the host from a normalized URL string.
+func extractHost(u string) string {
+	parsed, err := url.Parse(u)
+	if err != nil {
+		return ""
+	}
+	return parsed.Hostname()
+}
+
+// extractOrigin extracts the origin (scheme://host) from a normalized URL string.
+func extractOrigin(u string) string {
+	parsed, err := url.Parse(u)
+	if err != nil {
+		return ""
+	}
+	return parsed.Scheme + "://" + parsed.Host
+}
+
+// approvedBaseURL validates a base URL and, when an API key is present,
+// requires the host to be an approved FreeInference hostname unless the user
+// has explicitly configured a custom endpoint via FI_CUSTOM_ENDPOINT.
+//
+// This is the authoritative credential-safety gate: it prevents
+// FREEINFERENCE_API_KEY from being silently transported to an arbitrary host
+// when an attacker controls FREEINFERENCE_BASE_URL.
+//
+// Custom endpoint contract:
+//   - FI_CUSTOM_ENDPOINT must be a valid HTTPS URL with a trusted origin
+//   - FI_CUSTOM_API_KEY is the only credential allowed for custom endpoints
+//   - FREEINFERENCE_API_KEY is NEVER sent to a custom endpoint
+func approvedBaseURL(rawURL string, apiKey string, customCfg *CustomEndpointConfig) (string, error) {
+	normalized, err := ValidateBaseURL(rawURL)
+	if err != nil {
+		return "", err
+	}
+	if apiKey == "" {
+		// No credential is at stake; the URL only needs to pass basic validation.
+		return normalized, nil
+	}
+	// A credential is present. If this is the production FreeInference key,
+	// require an approved host. The custom endpoint key is checked separately.
+	if strings.HasPrefix(apiKey, "hyi-") || strings.HasPrefix(apiKey, "sk-fi") {
+		// Production FreeInference key: must go to approved host only.
+		u, err := url.Parse(normalized)
+		if err != nil {
+			return "", fmt.Errorf("invalid base URL: %w", err)
+		}
+		if !isApprovedCredentialHost(u.Hostname()) {
+			return "", &CredentialError{
+				Host: u.Hostname(),
+			}
+		}
+		return normalized, nil
+	}
+	// Non-FI key: if custom endpoint is configured, verify the normalized URL
+	// matches the configured origin. This prevents FREEINFERENCE_API_KEY from
+	// being sent to a custom endpoint while allowing a user to configure
+	// their own endpoint + key pair.
+	if customCfg != nil {
+		// Verify the configured endpoint matches the requested one
+		if !strings.EqualFold(normalized, customCfg.EndpointIdentity.RequestURL) {
+			return "", &CredentialError{
+				Host: normalized,
+			}
+		}
+		return normalized, nil
+	}
+	// Not a custom endpoint and not a FreeInference-hosted key — could be
+	// an Anthropic-compatible or OpenAI-compatible key on an approved host.
+	u, err := url.Parse(normalized)
+	if err != nil {
+		return "", fmt.Errorf("invalid base URL: %w", err)
+	}
+	if !isApprovedCredentialHost(u.Hostname()) {
+		return "", &CredentialError{
+			Host: u.Hostname(),
+		}
+	}
+	return normalized, nil
+}
+
 // newClientLegacy creates a client WITHOUT credential-safety host validation.
 // It is unexported for test scaffolding only. Production callers must use
 // NewClient, which always validates the host.
@@ -309,10 +394,10 @@ func newClientLegacyWithMode(baseURL, apiKey string, timeout time.Duration, test
 	}
 	dialer := &net.Dialer{Timeout: DialTimeout}
 	return &Client{
-		BaseURL: baseURL,
-		APIKey:  apiKey,
-		Version: "dev",
-		HTTPClient: &http.Client{
+		baseURL: baseURL,
+		apiKey:  apiKey,
+		version: "dev",
+		httpClient: &http.Client{
 			Timeout: timeout,
 			Transport: &http.Transport{
 				DialContext:           dialer.DialContext,
@@ -331,7 +416,7 @@ func newClientLegacyWithMode(baseURL, apiKey string, timeout time.Duration, test
 
 // endpoint resolves path against the base URL using proper URL parsing.
 func (c *Client) endpoint(path string) (string, error) {
-	base, err := url.Parse(c.BaseURL)
+	base, err := url.Parse(c.baseURL)
 	if err != nil {
 		return "", fmt.Errorf("parse base URL: %w", err)
 	}
@@ -370,24 +455,40 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body io.Rea
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "FreeInference-Companion/"+c.Version)
-	if c.APIKey != "" {
+	req.Header.Set("User-Agent", "FreeInference-Companion/"+c.version)
+	// Add synthetic probe header for inference probes
+	if path == "/chat/completions" {
+		req.Header.Set(SyntheticProbeHeader, SyntheticProbeValue)
+	}
+	if c.apiKey != "" {
 		// Defense in depth: never attach the credential unless the request is
 		// destined for an approved FreeInference host or a configured custom
 		// endpoint. This is the last line of defense against credential
 		// exfiltration to an arbitrary host.
 		// _testMode bypasses this check for httptest server usage in tests.
 		if !c._testMode {
-			customEndpoint := os.Getenv("FI_CUSTOM_ENDPOINT")
-			if !isApprovedCredentialHost(req.URL.Hostname()) {
-				if customEndpoint == "" || !strings.EqualFold(req.URL.Hostname(), customEndpoint) {
-					return nil, &CredentialError{Host: req.URL.Hostname()}
-				}
+			if !c.shouldAttachCredential(req.URL.Hostname()) {
+				return nil, &CredentialError{Host: req.URL.Hostname()}
 			}
 		}
-		req.Header.Set("Authorization", "Bearer "+c.APIKey)
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
-	return c.HTTPClient.Do(req)
+	return c.httpClient.Do(req)
+}
+
+// shouldAttachCredential determines if the credential should be attached to a request
+// for the given hostname. It checks both the endpoint identity and any custom endpoint.
+func (c *Client) shouldAttachCredential(hostname string) bool {
+	hostname = strings.ToLower(strings.TrimSpace(hostname))
+	if hostname == "" {
+		return false
+	}
+	// If custom endpoint is configured, only attach credential to that exact origin
+	if c.customEndpoint != nil {
+		return strings.EqualFold(hostname, c.customEndpoint.EndpointIdentity.Host)
+	}
+	// Otherwise, attach credential only to approved FreeInference hosts
+	return isApprovedCredentialHost(hostname)
 }
 
 // HTTPError is a sanitized non-2xx API response. RetryAfter is honored when
@@ -564,12 +665,12 @@ func (c *Client) GetHealth(healthURL string) (*HealthResponse, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create health request: %w", err)
 	}
-	req.Header.Set("User-Agent", "FreeInference-Companion/"+c.Version)
+	req.Header.Set("User-Agent", "FreeInference-Companion/"+c.version)
 	// Intentionally no Authorization header. The API key is scoped to the
 	// configured FreeInference endpoint; sending it to a separately configured
 	// health URL would risk exfiltration to an unrelated host.
 
-	resp, err := c.HTTPClient.Do(req)
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("health request: %w", err)
 	}
@@ -726,7 +827,7 @@ type AccountUsageResponse struct {
 // has not been provisioned yet. The caller is responsible for populating
 // FetchedAt and Authoritative at the call site.
 func (c *Client) GetAccountUsage() (*schema.AccountUsage, error) {
-	if c.APIKey == "" {
+	if c.apiKey == "" {
 		return nil, fmt.Errorf("no API key configured")
 	}
 
@@ -851,6 +952,7 @@ type InferenceProbeResult struct {
 // ProbeInference sends a synthetic minimal inference request for the given
 // model. The model must be explicitly chosen by the caller. Marked with the
 // X-Probe: synthetic header. Only run on explicit user request.
+// Uses doRequest to ensure credential-safety path is always followed.
 func (c *Client) ProbeInference(model string) InferenceProbeResult {
 	result := InferenceProbeResult{
 		Endpoint:       CheckResult{State: CheckUnknown},
@@ -877,25 +979,15 @@ func (c *Client) ProbeInference(model string) InferenceProbeResult {
 	ctx, cancel := context.WithTimeout(context.Background(), ProbeTimeout)
 	defer cancel()
 
-	reqURL, err := c.endpoint("/chat/completions")
+	// Use doRequest to ensure credential-safety path is followed
+	resp, err := c.doRequest(ctx, "POST", "/chat/completions", bytes.NewReader(payload))
 	if err != nil {
-		result.Endpoint = CheckResult{State: CheckFail, Detail: err.Error()}
-		return result
-	}
-	req, err := http.NewRequestWithContext(ctx, "POST", reqURL, bytes.NewReader(payload))
-	if err != nil {
-		result.Endpoint = CheckResult{State: CheckFail, Detail: "create probe request"}
-		return result
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "FreeInference-Companion/"+c.Version)
-	req.Header.Set(SyntheticProbeHeader, SyntheticProbeValue)
-	if c.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.APIKey)
-	}
-
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
+		// Check if it's a credential error (credential not attached due to host check)
+		if _, ok := err.(*CredentialError); ok {
+			result.Endpoint = CheckResult{State: CheckPass}
+			result.Authentication = CheckResult{State: CheckFail, Detail: "credential not attached: host not approved"}
+			return result
+		}
 		result.Endpoint = CheckResult{State: CheckFail, Detail: sanitizeDetail(err.Error())}
 		return result
 	}

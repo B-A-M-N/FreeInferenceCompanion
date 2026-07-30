@@ -244,12 +244,11 @@ func TestCodexHookNeverEmitsSuppressOutput(t *testing.T) {
 
 func TestStatusResolvesLatestSession(t *testing.T) {
 	dir := t.TempDir()
+	env := []string{"FREEINFERENCE_BASE_URL=https://freeinference.org/v1", "FREEINFERENCE_API_KEY=hyi-test-12345"}
 
-	runFI(t, dir, hookInput("sess-resolve"),
-		[]string{"FREEINFERENCE_BASE_URL=https://freeinference.org/v1", "FREEINFERENCE_API_KEY=hyi-test-12345"},
-		"hook", "claude-code", "SessionStart")
+	runFI(t, dir, hookInput("sess-resolve"), env, "hook", "claude-code", "SessionStart")
 
-	stdout, _, code := runFI(t, dir, "", nil, "status", "--include-identifiers")
+	stdout, _, code := runFI(t, dir, "", env, "status", "--include-identifiers")
 	if code != 0 {
 		t.Errorf("exit = %d", code)
 	}
@@ -260,7 +259,8 @@ func TestStatusResolvesLatestSession(t *testing.T) {
 
 func TestStatusWithNoSessionIsHonest(t *testing.T) {
 	dir := t.TempDir()
-	stdout, _, code := runFI(t, dir, "", nil, "status")
+	env := []string{"FREEINFERENCE_BASE_URL=https://freeinference.org/v1", "FREEINFERENCE_API_KEY=hyi-test-12345"}
+	stdout, _, code := runFI(t, dir, "", env, "status")
 	if code != 0 {
 		t.Errorf("exit = %d", code)
 	}
@@ -271,13 +271,12 @@ func TestStatusWithNoSessionIsHonest(t *testing.T) {
 
 func TestReportReadsCodexState(t *testing.T) {
 	dir := t.TempDir()
+	env := []string{"FREEINFERENCE_BASE_URL=https://freeinference.org/v1", "FREEINFERENCE_API_KEY=hyi-test-12345"}
 	input := `{"session_id":"codex-report","hook_event_name":"SessionStart","model":"glm-5.1"}`
-	runFI(t, dir, input,
-		[]string{"FREEINFERENCE_BASE_URL=https://freeinference.org/v1", "FREEINFERENCE_API_KEY=hyi-test-12345"},
-		"hook", "codex", "SessionStart")
+	runFI(t, dir, input, env, "hook", "codex", "SessionStart")
 
 	// Default report masks the session ID — the raw value must NOT appear.
-	stdout, _, code := runFI(t, dir, "", nil, "report", "--client", "codex")
+	stdout, _, code := runFI(t, dir, "", env, "report", "--client", "codex")
 	if code != 0 {
 		t.Errorf("exit = %d", code)
 	}
@@ -295,7 +294,7 @@ func TestReportReadsCodexState(t *testing.T) {
 	}
 
 	// --include-identifiers reveals the raw session ID for local debugging.
-	stdout2, _, code2 := runFI(t, dir, "", nil, "report", "--client", "codex", "--include-identifiers")
+	stdout2, _, code2 := runFI(t, dir, "", env, "report", "--client", "codex", "--include-identifiers")
 	if code2 != 0 {
 		t.Errorf("exit = %d", code2)
 	}
@@ -306,11 +305,10 @@ func TestReportReadsCodexState(t *testing.T) {
 
 func TestContextMissingMetricsPrintsUnknown(t *testing.T) {
 	dir := t.TempDir()
-	runFI(t, dir, hookInput("ctx-unknown"),
-		[]string{"FREEINFERENCE_BASE_URL=https://freeinference.org/v1", "FREEINFERENCE_API_KEY=hyi-test-12345"},
-		"hook", "claude-code", "SessionStart")
+	env := []string{"FREEINFERENCE_BASE_URL=https://freeinference.org/v1", "FREEINFERENCE_API_KEY=hyi-test-12345"}
+	runFI(t, dir, hookInput("ctx-unknown"), env, "hook", "claude-code", "SessionStart")
 
-	stdout, _, code := runFI(t, dir, "", nil, "context")
+	stdout, _, code := runFI(t, dir, "", env, "context")
 	if code != 0 {
 		t.Errorf("exit = %d", code)
 	}
@@ -324,11 +322,10 @@ func TestContextMissingMetricsPrintsUnknown(t *testing.T) {
 
 func TestSessionsCommand(t *testing.T) {
 	dir := t.TempDir()
-	runFI(t, dir, hookInput("sess-list"),
-		[]string{"FREEINFERENCE_BASE_URL=https://freeinference.org/v1", "FREEINFERENCE_API_KEY=hyi-test-12345"},
-		"hook", "claude-code", "SessionStart")
+	env := []string{"FREEINFERENCE_BASE_URL=https://freeinference.org/v1", "FREEINFERENCE_API_KEY=hyi-test-12345"}
+	runFI(t, dir, hookInput("sess-list"), env, "hook", "claude-code", "SessionStart")
 
-	stdout, _, code := runFI(t, dir, "", nil, "sessions", "--include-identifiers")
+	stdout, _, code := runFI(t, dir, "", env, "sessions", "--include-identifiers")
 	if code != 0 {
 		t.Errorf("exit = %d", code)
 	}
@@ -339,11 +336,10 @@ func TestSessionsCommand(t *testing.T) {
 
 func TestSnapshotJSON(t *testing.T) {
 	dir := t.TempDir()
-	runFI(t, dir, statusPayload("snap-json", 42, 84000),
-		[]string{"FREEINFERENCE_BASE_URL=https://freeinference.org/v1", "FREEINFERENCE_API_KEY=hyi-test-12345"},
-		"status", "--compact", "--client", "claude-code")
+	env := []string{"FREEINFERENCE_BASE_URL=https://freeinference.org/v1", "FREEINFERENCE_API_KEY=hyi-test-12345"}
+	runFI(t, dir, statusPayload("snap-json", 42, 84000), env, "status", "--compact", "--client", "claude-code")
 
-	stdout, _, code := runFI(t, dir, "", nil, "snapshot", "--json", "--session", "snap-json")
+	stdout, _, code := runFI(t, dir, "", env, "snapshot", "--json", "--session", "snap-json")
 	if code != 0 {
 		t.Errorf("exit = %d", code)
 	}
@@ -358,12 +354,11 @@ func TestSnapshotJSON(t *testing.T) {
 
 func TestRenderModes(t *testing.T) {
 	dir := t.TempDir()
-	runFI(t, dir, statusPayload("render-test", 42, 84000),
-		[]string{"FREEINFERENCE_BASE_URL=https://freeinference.org/v1", "FREEINFERENCE_API_KEY=hyi-test-12345"},
-		"status", "--compact", "--client", "claude-code")
+	env := []string{"FREEINFERENCE_BASE_URL=https://freeinference.org/v1", "FREEINFERENCE_API_KEY=hyi-test-12345"}
+	runFI(t, dir, statusPayload("render-test", 42, 84000), env, "status", "--compact", "--client", "claude-code")
 
 	// Disable colors for stable test assertions
-	line, _, code := runFI(t, dir, "", []string{"FREEINFERENCE_BASE_URL=https://freeinference.org/v1", "FREEINFERENCE_API_KEY=hyi-test-12345", "NO_COLOR=1"}, "render", "--mode", "line", "--session", "render-test")
+	line, _, code := runFI(t, dir, "", append(env, "NO_COLOR=1"), "render", "--mode", "line", "--session", "render-test")
 	if code != 0 {
 		t.Errorf("exit = %d", code)
 	}
@@ -371,7 +366,7 @@ func TestRenderModes(t *testing.T) {
 		t.Errorf("line render = %q", line)
 	}
 
-	expanded, _, _ := runFI(t, dir, "", []string{"FREEINFERENCE_BASE_URL=https://freeinference.org/v1", "FREEINFERENCE_API_KEY=hyi-test-12345", "NO_COLOR=1"}, "render", "--mode", "expanded", "--session", "render-test")
+	expanded, _, _ := runFI(t, dir, "", append(env, "NO_COLOR=1"), "render", "--mode", "expanded", "--session", "render-test")
 	if !strings.Contains(expanded, "FREEINFERENCE") || !strings.Contains(expanded, "Pressure") {
 		t.Errorf("expanded render = %q", expanded)
 	}

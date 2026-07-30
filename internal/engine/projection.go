@@ -7,12 +7,11 @@ import (
 )
 
 // Projection is the advisory estimate of the next request's context usage.
-// It is advisory only — confidence is "low" unless authoritative full-request
-// accounting is available, and "medium" at best when a tokenizer approximation
-// is in play.
+// It is advisory only — confidence is always "low" in MVP because the companion
+// does not have authoritative full-request accounting or tokenizer access.
 //
-// MVP rule: never claim high confidence. The companion does not see the full
-// request body that the client sends, so authoritative accounting is not
+// MVP rule: never claim medium or high confidence. The companion does not see the
+// full request body that the client sends, so authoritative accounting is not
 // possible in v0.1.0.
 type Projection struct {
 	// CurrentActiveTokens is the best local estimate of the active context.
@@ -32,7 +31,8 @@ type Projection struct {
 	// RemainingForOutput is ContextWindowSize - ProjectedTotal - SafetyMargin.
 	// nil when ContextWindowSize is unknown.
 	RemainingForOutput *int64
-	// Confidence is "low" or "medium". Never "high" in MVP.
+	// Confidence is "low". Never "medium" or "high" in MVP — the companion
+	// does not have authoritative full-request accounting or tokenizer access.
 	Confidence string
 	// Overflow is true when ProjectedTotal exceeds ContextWindowSize - Reserve.
 	Overflow bool
@@ -81,16 +81,10 @@ func ProjectNextRequest(currentActiveTokens int64, promptBytes int, contextWindo
 	}
 	p.ProjectedTotal = p.CurrentActiveTokens + p.EstimatedPromptTokens + p.ToolOverheadTokens
 
-	// Confidence: only "medium" when we have authoritative current totals AND
-	// a known context window. Without both we fall back to "low". Never claim
-	// "high" without authoritative full-request accounting, which the
-	// companion does not have in MVP.
-	switch {
-	case currentActiveTokens > 0 && contextWindowSize != nil && *contextWindowSize > 0:
-		p.Confidence = "medium"
-	default:
-		p.Confidence = "low"
-	}
+	// MVP: only "low" confidence. The companion does not have authoritative
+	// full-request accounting or tokenizer access, so we never claim higher
+	// confidence. Presence of local data does not imply precision.
+	p.Confidence = "low"
 
 	if contextWindowSize != nil && *contextWindowSize > 0 {
 		remaining := *contextWindowSize - p.ProjectedTotal - p.SafetyMarginTokens

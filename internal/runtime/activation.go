@@ -104,6 +104,9 @@ type Activation struct {
 	InactiveReason ActivationReason `json:"inactive_reason,omitempty"`
 	// ModelID: observed model (record-only — never affects activation).
 	ModelID string `json:"model_id,omitempty"`
+	// capturedCredential stores the credential value at evaluation time.
+	// This ensures Identity() never re-reads environment variables.
+	capturedCredential string `json:"-"`
 }
 
 // Identity is a stable, non-secret fingerprint of the active runtime. Two
@@ -121,12 +124,27 @@ type Identity struct {
 // DirName returns a filesystem-safe identifier for this identity. It is
 // derived from the endpoint origin, runtime kind, and credential fingerprint
 // so that different endpoints or keys produce different state directories.
+// Uses length-prefixed encoding to avoid ambiguity in concatenation.
 func (id Identity) DirName() string {
 	if id.EndpointOrigin == "" && id.RuntimeKind == "" && id.CredentialFP == "" {
 		return ""
 	}
-	h := sha256.Sum256([]byte(id.EndpointOrigin + string(id.RuntimeKind) + id.CredentialFP))
+	// Length-prefix each field to avoid concatenation ambiguity.
+	// Format: <len1><field1><len2><field2><len3><field3>
+	var buf []byte
+	buf = appendLenPrefixed(buf, id.EndpointOrigin)
+	buf = appendLenPrefixed(buf, string(id.RuntimeKind))
+	buf = appendLenPrefixed(buf, id.CredentialFP)
+	h := sha256.Sum256(buf)
 	return hex.EncodeToString(h[:])[:16]
+}
+
+func appendLenPrefixed(buf []byte, s string) []byte {
+	// 4-byte big-endian length prefix
+	l := uint32(len(s))
+	buf = append(buf, byte(l>>24), byte(l>>16), byte(l>>8), byte(l))
+	buf = append(buf, s...)
+	return buf
 }
 
 // EndpointCandidate is one runtime endpoint env var and its parsed identity.
@@ -222,6 +240,8 @@ func EvaluateWithModel(modelID string) Activation {
 
 	// Both present and endpoint valid → active.
 	a.Active = true
+	// Capture credential at evaluation time so Identity() never re-reads env.
+	a.capturedCredential = a.rawCredential()
 	return a
 }
 
@@ -256,55 +276,79 @@ func collectEndpointCandidates() []EndpointCandidate {
 // candidate set, or returns (nil, true) if there is a conflict.
 //
 // A conflict is any of:
-//   - two or more candidates are non-empty, regardless of host (the agent
-//     cannot honor two runtime endpoints simultaneously)
-//   - one candidate is non-FI (it would route the credential off FreeInference)
+//   - two or more candidates have different normalized origins (scheme://host)
+//   - any candidate points at a non-FreeInference host
+//
+// When ALL candidates have the SAME normalized FreeInference origin, pick by
+// priority: FREEINFERENCE_BASE_URL > ANTHROPIC_BASE_URL > OPENAI_BASE_URL.
 func selectFIEndpoint(cands []EndpointCandidate) (*EndpointCandidate, bool) {
 	if len(cands) == 0 {
 		return nil, false
 	}
 
-	// Multiple candidates: only a genuine conflict if any points at a
-	// non-FreeInference host. When ALL candidates are FreeInference-approved,
-	// pick FREEINFERENCE_BASE_URL (the canonical companion name) with
-	// ANTHROPIC_BASE_URL and OPENAI_BASE_URL as fallbacks. This is the
-	// common Claude Code setup where the user has both
-	// FREEINFERENCE_BASE_URL and ANTHROPIC_BASE_URL set to FreeInference hosts.
-	if len(cands) > 1 {
-		// Check if ALL candidates are FreeInference-approved.
-		allFI := true
-		for _, c := range cands {
-			if c.Identity == nil || !c.Identity.IsFI {
-				allFI = false
+	// Normalize all candidates and collect their origins.
+	type normalizedCandidate struct {
+		Candidate EndpointCandidate
+		Origin    string
+		IsFI      bool
+	}
+	var normalized []normalizedCandidate
+	for _, c := range cands {
+		nc := normalizedCandidate{Candidate: c}
+		if c.Identity != nil {
+			nc.Origin = c.Identity.Origin
+			nc.IsFI = c.Identity.IsFI
+		}
+		normalized = append(normalized, nc)
+	}
+
+	// If multiple candidates exist, check for origin agreement.
+	if len(normalized) > 1 {
+		firstOrigin := normalized[0].Origin
+		firstIsFI := normalized[0].IsFI
+		allAgree := true
+		for _, nc := range normalized[1:] {
+			if nc.Origin != firstOrigin || nc.IsFI != firstIsFI {
+				allAgree = false
 				break
 			}
 		}
-		if !allFI {
-			// At least one non-FI host → genuine conflict.
+		if !allAgree {
+			// Multiple candidates with different origins or FI status → conflict.
 			return nil, true
 		}
-		// All FI-approved: prefer FREEINFERENCE_BASE_URL, then ANTHROPIC, then OPENAI.
+		// All agree on the same origin: pick by priority, but only if it's an FI host.
+		// Multiple non-FI candidates with the same origin is still a conflict —
+		// we must not route FREEINFERENCE_API_KEY to a non-FI host.
 		priority := []string{"FREEINFERENCE_BASE_URL", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL"}
 		for _, src := range priority {
-			for i, c := range cands {
-				if c.Source == src {
-					return &cands[i], false
+			for i, nc := range normalized {
+				if nc.Candidate.Source == src {
+					if nc.Candidate.Identity != nil && nc.Candidate.Identity.IsFI {
+						return &normalized[i].Candidate, false
+					}
+					// Candidate exists but is not an FI host → conflict.
+					return &normalized[i].Candidate, true
 				}
 			}
 		}
-		// Fallback: first candidate (all are FI-approved).
-		return &cands[0], false
+		// Fallback: first candidate (all have same origin).
+		if normalized[0].Candidate.Identity != nil && normalized[0].Candidate.Identity.IsFI {
+			return &normalized[0].Candidate, false
+		}
+		return &normalized[0].Candidate, true
 	}
 
-	c := &cands[0]
+	// Single candidate.
+	c := &normalized[0].Candidate
 	if c.Identity == nil {
 		// Malformed single endpoint — not a conflict, just invalid.
 		return c, false
 	}
 	if !c.Identity.IsFI {
-		// Non-FreeInference host. This is a conflict in the sense that the
-		// credential would leak off-host; treat as inactive rather than risk
-		// routing the FREEINFERENCE_API_KEY elsewhere.
+		// Non-FreeInference host. This is a conflict because the credential
+		// would leak off-host; treat as inactive rather than risk routing
+		// the FREEINFERENCE_API_KEY elsewhere.
 		return c, true
 	}
 	return c, false
@@ -377,11 +421,15 @@ var ErrSaltUnavailable = errors.New("installation salt unavailable")
 // is HMAC-SHA256(credential, installation-salt) truncated to 16 bytes — never
 // the raw key, never a plain unsalted hash. The salt is loaded (or created)
 // lazily from disk with 0600 permissions.
+//
+// The credential fingerprint is derived from the credential captured during
+// evaluation (not re-read from environment), ensuring the "evaluate once"
+// contract is maintained.
 func (a Activation) Identity(saltLoader SaltLoader) (Identity, error) {
 	if !a.Active {
 		return Identity{}, errors.New("identity unavailable: runtime not active")
 	}
-	cred := a.rawCredential()
+	cred := a.capturedCredential
 	if cred == "" {
 		return Identity{}, errors.New("identity unavailable: no credential")
 	}

@@ -49,12 +49,18 @@ func runHook(args []string, stdin io.Reader, stdout io.Writer, _ io.Writer) {
 	// the unnamespaced path because sessions are independent of which
 	// provider runtime is active.
 	loader := runtime.DefaultSaltLoader()
-	if id, err := activation.Identity(loader); err == nil {
-		dirName := id.DirName()
-		if dirName != "" {
-			paths = paths.NewNamespacedPaths(dirName)
-		}
+	id, err := activation.Identity(loader)
+	if err != nil {
+		// Identity derivation failed. For an active runtime, this is a hard failure:
+		// no provider-state read, no provider-state write, no FreeInference output.
+		// Hook commands still exit 0 but silently perform no mutation.
+		return
 	}
+	dirName := id.DirName()
+	if dirName == "" {
+		return
+	}
+	paths = paths.NewNamespacedPaths(dirName)
 	if err := paths.EnsureDirs(); err != nil {
 		return
 	}

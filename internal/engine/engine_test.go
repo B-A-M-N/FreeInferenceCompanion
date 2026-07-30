@@ -130,3 +130,117 @@ func TestClassifyPressure(t *testing.T) {
 		t.Error("expected nil reason for healthy state")
 	}
 }
+
+func TestValidateThresholds_ValidDefaults(t *testing.T) {
+	// Default thresholds should be valid
+	if err := ValidateThresholds(); err != nil {
+		t.Errorf("default thresholds should be valid: %v", err)
+	}
+}
+
+func TestValidateThresholds_InvalidWatchGapTooSmall(t *testing.T) {
+	// Watch leave must be < watch enter with at least some gap
+	// This tests the hysteresis gap enforcement
+	cfg := ThresholdConfig{
+		WatchEnter:    60.0,
+		WarnEnter:     70.0,
+		CriticalEnter: 80.0,
+		WatchLeave:    59.9, // Only 0.1% gap - should fail
+		WarnLeave:     65.0,
+		CriticalLeave: 75.0,
+		OutputReserve: 16000,
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Error("watch leave 59.9 with enter 60.0 (0.1% gap) should fail validation")
+	}
+}
+
+func TestValidateThresholds_InvalidWarnGapTooSmall(t *testing.T) {
+	cfg := ThresholdConfig{
+		WatchEnter:    60.0,
+		WarnEnter:     70.0,
+		CriticalEnter: 80.0,
+		WatchLeave:    55.0,
+		WarnLeave:     69.9, // Only 0.1% gap - should fail
+		CriticalLeave: 75.0,
+		OutputReserve: 16000,
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Error("warn leave 69.9 with enter 70.0 (0.1% gap) should fail validation")
+	}
+}
+
+func TestValidateThresholds_InvalidCriticalGapTooSmall(t *testing.T) {
+	cfg := ThresholdConfig{
+		WatchEnter:    60.0,
+		WarnEnter:     70.0,
+		CriticalEnter: 80.0,
+		WatchLeave:    55.0,
+		WarnLeave:     65.0,
+		CriticalLeave: 79.9, // Only 0.1% gap - should fail
+		OutputReserve: 16000,
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Error("critical leave 79.9 with enter 80.0 (0.1% gap) should fail validation")
+	}
+}
+
+func TestValidateThresholds_ValidReasonableGap(t *testing.T) {
+	cfg := ThresholdConfig{
+		WatchEnter:    70.0,
+		WarnEnter:     80.0,
+		CriticalEnter: 90.0,
+		WatchLeave:    60.0, // 10% gap - OK
+		WarnLeave:     70.0, // 10% gap - OK
+		CriticalLeave: 80.0, // 10% gap - OK
+		OutputReserve: 16000,
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("reasonable gaps should be valid: %v", err)
+	}
+}
+
+func TestValidateThresholds_WatchLeaveEqualsWatchEnter_Fails(t *testing.T) {
+	cfg := ThresholdConfig{
+		WatchEnter:    70.0,
+		WarnEnter:     80.0,
+		CriticalEnter: 90.0,
+		WatchLeave:    70.0, // Equal - should fail (leave < enter required)
+		WarnLeave:     70.0,
+		CriticalLeave: 80.0,
+		OutputReserve: 16000,
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Error("watch leave == watch enter should fail")
+	}
+}
+
+func TestValidateThresholds_OrderedEnterThresholds(t *testing.T) {
+	cfg := ThresholdConfig{
+		WatchEnter:    80.0, // Wrong order: watch > warn
+		WarnEnter:     70.0,
+		CriticalEnter: 90.0,
+		WatchLeave:    60.0,
+		WarnLeave:     65.0,
+		CriticalLeave: 75.0,
+		OutputReserve: 16000,
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Error("enter thresholds must be ordered watch < warn < critical")
+	}
+}
+
+func TestValidateThresholds_OrderedLeaveThresholds(t *testing.T) {
+	cfg := ThresholdConfig{
+		WatchEnter:    60.0,
+		WarnEnter:     70.0,
+		CriticalEnter: 80.0,
+		WatchLeave:    70.0, // Wrong order: watch leave > warn leave
+		WarnLeave:     60.0,
+		CriticalLeave: 75.0,
+		OutputReserve: 16000,
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Error("leave thresholds must be ordered watch < warn < critical")
+	}
+}

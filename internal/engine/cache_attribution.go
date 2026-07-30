@@ -86,10 +86,7 @@ func AttributeCacheMisses(snap *schema.Snapshot) CacheAttribution {
 		}
 	}
 
-	confidence := "medium"
-	if len(snap.UsageObservations) >= 8 {
-		confidence = "high"
-	}
+	confidence := "low"
 
 	creationShare := 0.0
 	if analysis.CacheCreationShare != nil {

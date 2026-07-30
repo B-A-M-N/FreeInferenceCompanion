@@ -5,11 +5,12 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
+	"time"
 )
 
 // SaltLoader returns the installation salt, creating it on first call. The
@@ -23,6 +24,15 @@ type SaltLoader func() ([]byte, error)
 // ErrSaltIO is returned for salt-file I/O failures other than "not found".
 var ErrSaltIO = errors.New("salt I/O error")
 
+// Sentinel errors for validation failures.
+var (
+	errSaltNotRegular   = errors.New("salt is not a regular file")
+	errSaltIsSymlink    = errors.New("salt is a symlink")
+	errSaltBadPerms     = errors.New("salt has wrong permissions")
+	errSaltBadLength    = errors.New("salt has wrong length")
+	errSaltBadOwnership = errors.New("salt has wrong ownership")
+)
+
 var (
 	saltOnce  sync.Once
 	saltCache []byte
@@ -30,7 +40,7 @@ var (
 )
 
 // DefaultSaltLoader returns a SaltLoader that reads (or creates) the
-// installation salt at $FI_CACHE_DIR/../salt or ~/.cache/freeinference-companion/salt.
+// installation salt at $FI_CACHE_DIR/salt or ~/.cache/freeinference-companion/salt.
 // The result is cached for the process lifetime so repeated calls are cheap.
 // Tests clear the cache with ResetSaltCache.
 func DefaultSaltLoader() SaltLoader {
@@ -54,49 +64,153 @@ func loadOrCreateSalt() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Try to read first.
-	if b, err := os.ReadFile(path); err == nil {
-		if len(b) >= 16 {
-			return b, nil
+
+	// Try exclusive creation first - this is the fast path for first-run.
+	// If we win the race, we generate and write the salt atomically.
+	// If we lose (EEXIST), we read and validate the winner's file.
+	for {
+		salt, err := tryCreateSalt(path)
+		if err == nil {
+			return salt, nil
 		}
-		// Too short — treat as missing and recreate.
+		if !os.IsExist(err) {
+			// Some other error (permission denied, etc.)
+			return nil, ErrSaltIO
+		}
+
+		// Another process created the file. Read and validate it.
+		salt, err = readAndValidateSalt(path)
+		if err == nil {
+			return salt, nil
+		}
+
+		// If validation failed due to an invalid file (wrong perms, symlink, etc.),
+		// remove it and retry creation. Only retry on validation errors,
+		// not on genuine I/O errors. Note: errSaltBadLength is NOT a validation
+		// error - it could be a partial write in progress, so we retry reading
+		// with a small backoff instead of removing the file.
+		if isValidationErr(err) {
+			os.Remove(path)
+			continue
+		}
+
+		// For errSaltBadLength, the file may be a partial write in progress.
+		// Retry reading a few times with exponential backoff.
+		if errors.Is(err, errSaltBadLength) {
+			for i := 0; i < 10; i++ {
+				time.Sleep(time.Duration(1+i*2) * time.Millisecond)
+				salt, err = readAndValidateSalt(path)
+				if err == nil {
+					return salt, nil
+				}
+				if !errors.Is(err, errSaltBadLength) {
+					break
+				}
+			}
+			// Still wrong length after retries - treat as permanently invalid,
+			// remove the file and retry creation.
+			os.Remove(path)
+			continue
+		}
+
+		// Other errors (e.g., I/O error reading) - give up.
+		return nil, ErrSaltIO
 	}
-	// Create the directory with 0700 so the salt file is owned only by the user.
+}
+
+// tryCreateSalt attempts to create the salt file with O_EXCL.
+// Returns the salt on success, or os.ErrExist if another process won,
+// or another error for genuine failures.
+func tryCreateSalt(path string) ([]byte, error) {
+	// Ensure parent directory exists with 0700.
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return nil, err
 	}
+
 	salt := make([]byte, 32)
 	if _, err := rand.Read(salt); err != nil {
 		return nil, err
 	}
-	// Write atomically with 0600 so a concurrent reader never sees a partial
-	// file and no other user can read the salt.
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".salt-*")
+
+	// O_CREATE|O_EXCL is atomic - only one process succeeds.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		return nil, err
 	}
-	tmpName := tmp.Name()
-	cleanup := func() {
-		tmp.Close()
-		os.Remove(tmpName)
-	}
-	if _, err := tmp.Write(salt); err != nil {
-		cleanup()
+
+	if _, err := f.Write(salt); err != nil {
+		f.Close()
+		os.Remove(path)
 		return nil, err
 	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(path)
 		return nil, err
 	}
-	if err := os.Chmod(tmpName, 0600); err != nil {
-		os.Remove(tmpName)
+	if err := f.Close(); err != nil {
+		os.Remove(path)
 		return nil, err
 	}
-	if err := os.Rename(tmpName, path); err != nil {
-		os.Remove(tmpName)
+	// Double-check mode after creation (some filesystems don't set it atomically).
+	if err := os.Chmod(path, 0600); err != nil {
+		os.Remove(path)
 		return nil, err
 	}
 	return salt, nil
+}
+
+// readAndValidateSalt reads an existing salt file and validates it.
+// Returns the salt on success, or a validation error if the file is invalid.
+// Does not retry - the caller handles retry logic for race conditions.
+func readAndValidateSalt(path string) ([]byte, error) {
+	return validateAndReadSalt(path)
+}
+
+// isValidationErr returns true if err is one of our sentinel validation errors
+// that indicate a permanently invalid file (should be removed and recreated).
+// errSaltBadLength is excluded because a short read could be a partial write
+// in progress by another process - we should retry reading instead.
+func isValidationErr(err error) bool {
+	return errors.Is(err, errSaltNotRegular) ||
+		errors.Is(err, errSaltIsSymlink) ||
+		errors.Is(err, errSaltBadPerms) ||
+		errors.Is(err, errSaltBadOwnership)
+}
+
+// validateAndReadSalt validates the salt file exists and is valid, returning its contents.
+func validateAndReadSalt(path string) ([]byte, error) {
+	// Use Lstat to avoid following symlinks.
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	// Must be a regular file, not a symlink or directory.
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, errSaltIsSymlink
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errSaltNotRegular
+	}
+	// Must have mode 0600.
+	if info.Mode().Perm() != 0600 {
+		return nil, errSaltBadPerms
+	}
+	// Must be exactly 32 bytes.
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(b) != 32 {
+		return nil, errSaltBadLength
+	}
+	// Ownership check where supported (not available on Windows).
+	if unixFile, ok := info.Sys().(*syscall.Stat_t); ok {
+		if uint32(os.Getuid()) != unixFile.Uid || uint32(os.Getgid()) != unixFile.Gid {
+			return nil, errSaltBadOwnership
+		}
+	}
+	return b, nil
 }
 
 func saltPath() (string, error) {
@@ -124,13 +238,3 @@ func credentialFingerprint(cred string, salt []byte) string {
 func MarshalSalt(salt []byte) []byte {
 	return []byte(hex.EncodeToString(salt))
 }
-
-// SaltSummary is a JSON-serializable diagnostic view of the salt state.
-type SaltSummary struct {
-	Path      string `json:"path,omitempty"`
-	ByteLen   int    `json:"byte_len"`
-	Available bool   `json:"available"`
-}
-
-// _ sentinel keeps encoding/json imported for future diagnostic marshaling.
-var _ = json.Marshal

@@ -21,19 +21,29 @@ import (
 // rejects userinfo/fragments. Returns an error if the URL is invalid or
 // the endpoint is not an approved FreeInference host while an API key is set.
 func newAPIClient() (*api.Client, error) {
-	baseURL := os.Getenv("FREEINFERENCE_BASE_URL")
-	apiKey := os.Getenv("FREEINFERENCE_API_KEY")
-	if baseURL == "" {
-		baseURL = api.DefaultBaseURL
-	}
-	if _, err := api.ValidateBaseURL(baseURL); err != nil {
+	// Check for custom endpoint configuration first
+	customCfg, err := api.LoadCustomEndpointConfig()
+	if err != nil {
 		return nil, err
+	}
+
+	var baseURL, apiKey string
+	if customCfg != nil {
+		// Use custom endpoint configuration
+		baseURL = customCfg.EndpointIdentity.RequestURL
+		apiKey = customCfg.APIKey
+	} else {
+		// Use standard FreeInference environment variables
+		baseURL = os.Getenv("FREEINFERENCE_BASE_URL")
+		apiKey = os.Getenv("FREEINFERENCE_API_KEY")
+		if baseURL == "" {
+			baseURL = api.DefaultBaseURL
+		}
 	}
 	client, err := api.NewClient(api.ClientConfig{BaseURL: baseURL, APIKey: apiKey, Timeout: 30 * time.Second})
 	if err != nil {
 		return nil, err
 	}
-	client.Version = Version
 	return client, nil
 }
 

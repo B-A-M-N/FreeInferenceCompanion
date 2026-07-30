@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"github.com/b-a-m-n/freeinference-companion/internal/adapters"
 	"github.com/b-a-m-n/freeinference-companion/internal/engine"
 	"github.com/b-a-m-n/freeinference-companion/internal/runtime"
+	"github.com/b-a-m-n/freeinference-companion/internal/secure"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
@@ -41,11 +43,17 @@ func cmdStatus(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 	// the session ID from that payload — never fall through to
 	// resolveSession (which picks the most-recent active session and can show
 	// a stale session from a different context). When inactive, output nothing.
+	// Identity failure also means zero output (fail-closed).
 	if stdinHasData(stdin) {
 		var statusInput schema.ClaudeStatusLineInput
 		if err := json.NewDecoder(stdin).Decode(&statusInput); err == nil && statusInput.SessionID != "" {
 			// P0-3: inactive runtime → zero bytes in status-line mode
 			if !activation.Active {
+				return 0
+			}
+			// Identity failure → zero output (fail-closed for security)
+			aid, err := activationID(activation)
+			if err != nil {
 				return 0
 			}
 			sessionID = statusInput.SessionID
@@ -60,7 +68,6 @@ func cmdStatus(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 				return 0
 			}
 			gs := loadGlobal(paths)
-			aid := activationID(activation)
 			vm := buildView(snap, gs, aid, activation.Active, clientType, sessionID)
 			rc := renderConfig()
 			if compact {
@@ -96,7 +103,12 @@ func cmdStatus(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 	}
 
 	gs := loadGlobal(paths)
-	aid := activationID(activation)
+	aid, err := activationID(activation)
+	if err != nil {
+		// Identity failure in interactive mode: report sanitized error
+		fmt.Fprintf(stderr, "error: %s\n", secure.SanitizeField(err.Error()))
+		return 1
+	}
 	vm := buildView(resolved.Snap, gs, aid, activation.Active, clientType, resolved.Snap.Session.ID)
 	rc := renderConfig()
 
@@ -221,7 +233,7 @@ func printFullStatus(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalS
 		}
 
 		// Token budget projection — estimates quota exhaustion timeline.
-		proj := engine.ProjectBudget(au, snap, time.Now().UTC())
+		proj := engine.ProjectBudget(au, snap, time.Now().UTC(), gs.CircuitBreakers)
 		if proj.Status != engine.BudgetUnknown {
 			fmt.Fprintf(stdout, "  Budget:   %s %s\n",
 				budgetIcon(proj.Status), strings.ToLower(string(proj.Status)))
@@ -307,16 +319,20 @@ func stdinHasData(stdin io.Reader) bool {
 	return (stat.Mode() & os.ModeCharDevice) == 0
 }
 
-// activationID returns the filesystem-safe identity for the given activation,
-// or an empty string when the runtime is not active. This is used to gate
-// health and circuit-breaker data in BuildViewModel.
-func activationID(activation runtime.Activation) string {
+// activationID returns the filesystem-safe identity for the given activation.
+// Returns an error when the runtime is not active or when identity derivation fails.
+// This is used to gate health and circuit-breaker data in BuildViewModel.
+func activationID(activation runtime.Activation) (string, error) {
 	if !activation.Active {
-		return ""
+		return "", errors.New("runtime not active")
 	}
 	id, err := activation.Identity(runtime.DefaultSaltLoader())
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("failed to derive identity: %w", err)
 	}
-	return id.DirName()
+	dirName := id.DirName()
+	if dirName == "" {
+		return "", errors.New("identity dir name is empty")
+	}
+	return dirName, nil
 }

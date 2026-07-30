@@ -121,9 +121,9 @@ func cmdReport(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 
 		// Compute budget projection for the markdown report.
 		if gs.AccountUsage != nil {
-			proj := engineProjectBudget(gs.AccountUsage, resolved.Snap)
-			if proj != "" {
-				report.BudgetProjection = proj
+			proj := engine.ProjectBudget(gs.AccountUsage, resolved.Snap, time.Now().UTC(), gs.CircuitBreakers)
+			if proj.Status != engine.BudgetUnknown {
+				report.BudgetProjection = engineProjectBudgetFromProj(proj)
 			}
 		}
 	}
@@ -268,7 +268,19 @@ func printMarkdownReport(stdout io.Writer, report *reportData, reveal bool) {
 
 // engineProjectBudget computes a budget projection string for the report.
 func engineProjectBudget(au *schema.AccountUsage, snap *schema.Snapshot) string {
-	proj := engine.ProjectBudget(au, snap, time.Now().UTC())
+	proj := engine.ProjectBudget(au, snap, time.Now().UTC(), nil)
+	if proj.Status == engine.BudgetUnknown {
+		return ""
+	}
+	parts := []string{budgetIcon(proj.Status), strings.ToLower(string(proj.Status))}
+	if proj.Detail != "" {
+		parts = append(parts, "—", proj.Detail)
+	}
+	return strings.Join(parts, " ")
+}
+
+// engineProjectBudgetFromProj builds the projection string from an existing projection.
+func engineProjectBudgetFromProj(proj engine.BudgetProjection) string {
 	if proj.Status == engine.BudgetUnknown {
 		return ""
 	}

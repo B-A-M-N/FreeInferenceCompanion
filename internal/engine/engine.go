@@ -41,8 +41,13 @@ var (
 	DefaultOutputReserve = getEnvInt("FI_OUTPUT_RESERVE", 16000)
 )
 
+// Minimum hysteresis gap (percentage points) required between enter and leave
+// thresholds for each pressure level. Prevents flapping from floating-point
+// noise when the gap is too small (e.g., enter=60, leave=59.99).
+const MinHysteresisGap = 3.0
+
 // ValidateThresholds checks that thresholds are finite, in [0,100], ordered,
-// and have valid hysteresis. Returns a diagnostic string if invalid.
+// and have valid hysteresis with a minimum gap. Returns a diagnostic string if invalid.
 func ValidateThresholds() error {
 	cfg := ThresholdConfig{
 		WatchEnter:    WatchEnterThreshold,
@@ -85,7 +90,7 @@ func (c ThresholdConfig) Validate() error {
 		return fmt.Errorf("leave thresholds must be ordered: watch < warn < critical (got %.1f < %.1f < %.1f)",
 			c.WatchLeave, c.WarnLeave, c.CriticalLeave)
 	}
-	// Hysteresis: leave < enter for each level.
+	// Hysteresis: leave < enter for each level, with a minimum gap to prevent flapping.
 	if c.WatchLeave >= c.WatchEnter {
 		return fmt.Errorf("watch leave (%.1f) must be < watch enter (%.1f)", c.WatchLeave, c.WatchEnter)
 	}
@@ -94,6 +99,19 @@ func (c ThresholdConfig) Validate() error {
 	}
 	if c.CriticalLeave >= c.CriticalEnter {
 		return fmt.Errorf("critical leave (%.1f) must be < critical enter (%.1f)", c.CriticalLeave, c.CriticalEnter)
+	}
+	// Enforce minimum hysteresis gap (MinHysteresisGap percentage points).
+	if c.WatchEnter-c.WatchLeave < MinHysteresisGap {
+		return fmt.Errorf("watch hysteresis gap (%.1f) is below minimum required gap of %.1f (enter=%.1f, leave=%.1f)",
+			c.WatchEnter-c.WatchLeave, MinHysteresisGap, c.WatchEnter, c.WatchLeave)
+	}
+	if c.WarnEnter-c.WarnLeave < MinHysteresisGap {
+		return fmt.Errorf("warn hysteresis gap (%.1f) is below minimum required gap of %.1f (enter=%.1f, leave=%.1f)",
+			c.WarnEnter-c.WarnLeave, MinHysteresisGap, c.WarnEnter, c.WarnLeave)
+	}
+	if c.CriticalEnter-c.CriticalLeave < MinHysteresisGap {
+		return fmt.Errorf("critical hysteresis gap (%.1f) is below minimum required gap of %.1f (enter=%.1f, leave=%.1f)",
+			c.CriticalEnter-c.CriticalLeave, MinHysteresisGap, c.CriticalEnter, c.CriticalLeave)
 	}
 	// Output reserve must be positive and bounded.
 	if c.OutputReserve <= 0 {

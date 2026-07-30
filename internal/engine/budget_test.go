@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -8,7 +9,7 @@ import (
 )
 
 func TestProjectBudget_NoAccountUsage(t *testing.T) {
-	proj := ProjectBudget(nil, nil, time.Now())
+	proj := ProjectBudget(nil, nil, time.Now(), nil)
 	if proj.Status != BudgetUnknown {
 		t.Errorf("expected unknown, got %s", proj.Status)
 	}
@@ -20,7 +21,7 @@ func TestProjectBudget_HealthyQuota(t *testing.T) {
 		TokensLimit: ptrI64(1000000),
 	}
 	snap := &schema.Snapshot{}
-	proj := ProjectBudget(au, snap, time.Now())
+	proj := ProjectBudget(au, snap, time.Now(), nil)
 	if proj.Status != BudgetHealthy {
 		t.Errorf("expected healthy, got %s", proj.Status)
 	}
@@ -32,7 +33,7 @@ func TestProjectBudget_WatchQuota(t *testing.T) {
 		TokensLimit: ptrI64(1000000),
 	}
 	snap := &schema.Snapshot{}
-	proj := ProjectBudget(au, snap, time.Now())
+	proj := ProjectBudget(au, snap, time.Now(), nil)
 	if proj.Status != BudgetWatch {
 		t.Errorf("expected watch, got %s", proj.Status)
 	}
@@ -44,7 +45,7 @@ func TestProjectBudget_LowQuota(t *testing.T) {
 		TokensLimit: ptrI64(1000000),
 	}
 	snap := &schema.Snapshot{}
-	proj := ProjectBudget(au, snap, time.Now())
+	proj := ProjectBudget(au, snap, time.Now(), nil)
 	if proj.Status != BudgetLow {
 		t.Errorf("expected low, got %s", proj.Status)
 	}
@@ -56,7 +57,7 @@ func TestProjectBudget_CriticalQuota(t *testing.T) {
 		TokensLimit: ptrI64(1000000),
 	}
 	snap := &schema.Snapshot{}
-	proj := ProjectBudget(au, snap, time.Now())
+	proj := ProjectBudget(au, snap, time.Now(), nil)
 	if proj.Status != BudgetCritical {
 		t.Errorf("expected critical, got %s", proj.Status)
 	}
@@ -69,7 +70,7 @@ func TestProjectBudget_RequestBasedFallback(t *testing.T) {
 		RequestsLimit: ptrI64(10000),
 	}
 	snap := &schema.Snapshot{}
-	proj := ProjectBudget(au, snap, time.Now())
+	proj := ProjectBudget(au, snap, time.Now(), nil)
 	if proj.Status != BudgetLow {
 		t.Errorf("expected low via request fallback, got %s", proj.Status)
 	}
@@ -102,7 +103,7 @@ func TestProjectBudget_BurnRateExhaustion(t *testing.T) {
 	}
 	snap := &schema.Snapshot{UsageObservations: obs}
 
-	proj := ProjectBudget(au, snap, now)
+	proj := ProjectBudget(au, snap, now, nil)
 	if proj.EstimatedExhaustion == nil {
 		t.Fatal("expected an exhaustion estimate")
 	}
@@ -124,8 +125,82 @@ func TestProjectBudget_InsufficientBurnData(t *testing.T) {
 			{ObservedAt: time.Now()},
 		},
 	}
-	proj := ProjectBudget(au, snap, time.Now())
+	proj := ProjectBudget(au, snap, time.Now(), nil)
 	if proj.EstimatedExhaustion != nil {
 		t.Error("expected no exhaustion estimate with insufficient data")
+	}
+}
+
+func TestProjectBudget_CircuitBreakerOpen(t *testing.T) {
+	now := time.Now()
+	au := &schema.AccountUsage{
+		TokensUsed:  ptrI64(500000),
+		TokensLimit: ptrI64(1000000),
+	}
+	snap := &schema.Snapshot{}
+
+	// Circuit breaker open for account-usage
+	cbs := []schema.CircuitBreaker{
+		{
+			Endpoint:     "account-usage",
+			State:        schema.CircuitOpen,
+			FailureCount: 3,
+			NextRetryAt:  func() *time.Time { t := now.Add(time.Hour); return &t }(),
+		},
+	}
+
+	proj := ProjectBudget(au, snap, now, cbs)
+	if proj.Status != BudgetUnknown {
+		t.Errorf("expected unknown when circuit breaker open, got %s", proj.Status)
+	}
+	if !strings.Contains(proj.Detail, "circuit breaker") {
+		t.Errorf("expected detail mentioning circuit breaker, got: %s", proj.Detail)
+	}
+}
+
+func TestProjectBudget_CircuitBreakerClosed(t *testing.T) {
+	now := time.Now()
+	au := &schema.AccountUsage{
+		TokensUsed:  ptrI64(500000),
+		TokensLimit: ptrI64(1000000),
+	}
+	snap := &schema.Snapshot{}
+
+	// Circuit breaker closed (healthy)
+	cbs := []schema.CircuitBreaker{
+		{
+			Endpoint:     "account-usage",
+			State:        schema.CircuitClosed,
+			FailureCount: 0,
+		},
+	}
+
+	proj := ProjectBudget(au, snap, now, cbs)
+	if proj.Status != BudgetHealthy {
+		t.Errorf("expected healthy when circuit breaker closed, got %s", proj.Status)
+	}
+}
+
+func TestProjectBudget_CircuitBreakerExpired(t *testing.T) {
+	now := time.Now()
+	au := &schema.AccountUsage{
+		TokensUsed:  ptrI64(500000),
+		TokensLimit: ptrI64(1000000),
+	}
+	snap := &schema.Snapshot{}
+
+	// Circuit breaker was open but NextRetryAt has passed (should be treated as closed)
+	cbs := []schema.CircuitBreaker{
+		{
+			Endpoint:     "account-usage",
+			State:        schema.CircuitOpen,
+			FailureCount: 3,
+			NextRetryAt:  func() *time.Time { t := now.Add(-time.Hour); return &t }(),
+		},
+	}
+
+	proj := ProjectBudget(au, snap, now, cbs)
+	if proj.Status != BudgetHealthy {
+		t.Errorf("expected healthy when circuit breaker expired, got %s", proj.Status)
 	}
 }

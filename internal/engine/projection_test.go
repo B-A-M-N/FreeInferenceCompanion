@@ -23,11 +23,14 @@ func TestProjectionMissingModelLimitIsLowConfidence(t *testing.T) {
 	}
 }
 
-func TestProjectionAuthoritativeIsMediumNeverHigh(t *testing.T) {
+func TestProjectionNeverClaimsMediumOrHighConfidence(t *testing.T) {
+	// Even with authoritative current totals AND a known context window,
+	// confidence must remain "low" because the companion lacks authoritative
+	// full-request accounting and tokenizer access.
 	window := int64(200_000)
 	p := ProjectNextRequest(100_000, 100, &window, 0)
-	if p.Confidence != "medium" {
-		t.Errorf("confidence = %s, want medium", p.Confidence)
+	if p.Confidence != "low" {
+		t.Errorf("confidence = %s, want low (MVP never claims medium/high)", p.Confidence)
 	}
 }
 

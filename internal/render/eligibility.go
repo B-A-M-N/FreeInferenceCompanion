@@ -64,11 +64,17 @@ func EvaluateEligibility(
 	e.SessionActive = snap.Session.Status == schema.SessionActive
 
 	// Activation identity must match the snapshot's activation.
-	if currentActivationID != "" {
-		e.ActivationMatch = snap.ActivationID == currentActivationID
+	// Both must be non-empty and equal when currentActivationID is provided.
+	// When currentActivationID is empty (inactive runtime), fail-closed:
+	// only show data if the snapshot is also from an inactive/previous session.
+	if currentActivationID == "" {
+		// Fail-closed: no identity match when current is empty
+		e.ActivationMatch = snap.ActivationID == ""
+	} else if snap.ActivationID == "" {
+		// Current has identity but snapshot does not — fail-closed
+		e.ActivationMatch = false
 	} else {
-		// No activation identity available — allow it (backwards compat).
-		e.ActivationMatch = true
+		e.ActivationMatch = snap.ActivationID == currentActivationID
 	}
 
 	// Observation freshness: the last status observation must be recent.

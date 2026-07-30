@@ -23,7 +23,10 @@ func TestSecretNeverPersistsOrRenders(t *testing.T) {
 	const bearerKey = "Bearer hyi-secret-key-abcdef0123456789"
 
 	t.Setenv("FI_PROVIDER", "freeinference")
+	t.Setenv("FREEINFERENCE_BASE_URL", "https://freeinference.org/v1")
 	t.Setenv("FREEINFERENCE_API_KEY", apiKey)
+	t.Setenv("OPENAI_BASE_URL", "")
+	t.Setenv("ANTHROPIC_BASE_URL", "")
 	// Use a fresh nested subdir the companion creates itself, so the dir-perm
 	// assertion reflects the companion's contract (not t.TempDir's umask).
 	t.Setenv("FI_CACHE_DIR", filepath.Join(t.TempDir(), "fi-cache"))

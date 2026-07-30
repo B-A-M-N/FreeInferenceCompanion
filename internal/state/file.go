@@ -82,8 +82,24 @@ func sessionKey(sessionID string) string {
 	return hex.EncodeToString(h[:])
 }
 
+// validateClientType validates that the client type is one of the known schema
+// enum values. This prevents path traversal or arbitrary directory creation
+// via malicious clientType strings.
+func validateClientType(clientType string) error {
+	if clientType != schema.ClientClaudeCode && clientType != schema.ClientCodex {
+		return fmt.Errorf("invalid client type %q", clientType)
+	}
+	return nil
+}
+
 // SessionDir returns the directory for a given client type and session ID.
+// Validates clientType against the fixed schema enum to prevent path injection.
 func (p Paths) SessionDir(clientType, sessionID string) string {
+	if err := validateClientType(clientType); err != nil {
+		// Fail closed - return a path that will fail validation downstream
+		// rather than creating arbitrary directory paths.
+		return filepath.Join(p.CacheDir, "sessions", "invalid-client-type", sessionKey(sessionID))
+	}
 	return filepath.Join(p.CacheDir, "sessions", clientType, sessionKey(sessionID))
 }
 
