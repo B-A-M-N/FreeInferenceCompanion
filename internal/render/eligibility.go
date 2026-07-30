@@ -79,10 +79,12 @@ func EvaluateEligibility(
 
 	// Observation freshness: the last status observation must be recent.
 	if snap.LiveContext != nil && !snap.LiveContext.ObservedAt.IsZero() {
-		e.ObservationFresh = now.Sub(snap.LiveContext.ObservedAt) <= FreshnessCutoff
+		observed := schema.SanitizeTimestamp(snap.LiveContext.ObservedAt, now)
+		e.ObservationFresh = now.Sub(observed) <= FreshnessCutoff
 	} else if !snap.Session.LastEventAt.IsZero() {
 		// Fall back to last event time if no live context observation.
-		e.ObservationFresh = now.Sub(snap.Session.LastEventAt) <= FreshnessCutoff
+		lastEvent := schema.SanitizeTimestamp(snap.Session.LastEventAt, now)
+		e.ObservationFresh = now.Sub(lastEvent) <= FreshnessCutoff
 	} else {
 		// No timestamps at all — treat as fresh on first contact.
 		e.ObservationFresh = true

@@ -124,17 +124,11 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 		add("Model access", probeResult.ModelAccess)
 	}
 
-	// 9. Optional synthetic inference probe (explicit consent required).
+	// 9. Optional synthetic inference probe (explicit consent + model required).
 	if probe {
 		model := probeModel
 		if model == "" {
-			model = chooseProbeModel(paths)
-			if model != "" {
-				fmt.Fprintf(stdout, "(no --model given; selected %s from the cached catalog)\n", model)
-			}
-		}
-		if model == "" {
-			add("Inference probe", api.CheckResult{State: api.CheckUnknown, Detail: "no model available — pass --model or run fi models --refresh"})
+			add("Inference probe", api.CheckResult{State: api.CheckUnknown, Detail: "no model given -- pass --model to specify a model for the synthetic probe"})
 		} else if client == nil {
 			// Endpoint validation failed earlier; cannot probe inference against
 			// a misconfigured or unapproved host. Skip rather than panic.
@@ -335,14 +329,6 @@ func endpointFailDetail(err error) string {
 	}
 	return "FREEINFERENCE_BASE_URL is invalid: " + api.SanitizeEndpointError(err)
 }
-func chooseProbeModel(paths state.Paths) string {
-	gs, _ := state.LoadGlobal(paths)
-	if gs.Models == nil || len(gs.Models.Models) == 0 {
-		return ""
-	}
-	return gs.Models.Models[0].ID
-}
-
 func lookPathFI() (string, error) {
 	paths := os.Getenv("PATH")
 	for _, dir := range filepath.SplitList(paths) {

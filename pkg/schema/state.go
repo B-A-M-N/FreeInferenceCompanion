@@ -5,6 +5,24 @@ import "time"
 // StateVersion is the schema version for state files.
 const StateVersion = 2
 
+// MaxClockSkew is the maximum permitted clock skew for timestamp validation.
+// Timestamps more than this far in the future are treated as invalid.
+const MaxClockSkew = 5 * time.Minute
+
+// SanitizeTimestamp returns a clamped timestamp. If the timestamp is in the
+// future beyond MaxClockSkew, it is clamped to now (the source is marked
+// invalid). This prevents future timestamps from suppressing warnings, keeping
+// caches fresh indefinitely, or producing negative age calculations.
+func SanitizeTimestamp(ts time.Time, now time.Time) time.Time {
+	if ts.IsZero() {
+		return ts
+	}
+	if ts.After(now.Add(MaxClockSkew)) {
+		return now
+	}
+	return ts
+}
+
 // Snapshot is the per-session state persisted to disk.
 type Snapshot struct {
 	SchemaVersion     int                `json:"schema_version"`
@@ -85,12 +103,15 @@ type RequestUsage struct {
 
 // UsageObservation is one unique status-line usage sample.
 // Duplicate renders of the same response share a fingerprint and are not re-recorded.
+// Pointer fields are used for optional/missing values — nil means "unknown",
+// not zero. This distinguishes a genuine zero-token response from a missing
+// measurement.
 type UsageObservation struct {
 	Fingerprint              string    `json:"fingerprint"`
 	ObservedAt               time.Time `json:"observed_at"`
 	ModelID                  string    `json:"model_id"`
-	TotalInputTokens         int64     `json:"total_input_tokens"`
-	TotalOutputTokens        int64     `json:"total_output_tokens"`
+	TotalInputTokens         *int64    `json:"total_input_tokens"`
+	TotalOutputTokens        *int64    `json:"total_output_tokens"`
 	FreshInputTokens         *int64    `json:"fresh_input_tokens"`
 	CacheReadInputTokens     *int64    `json:"cache_read_input_tokens"`
 	CacheCreationInputTokens *int64    `json:"cache_creation_input_tokens"`

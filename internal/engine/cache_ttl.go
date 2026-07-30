@@ -90,15 +90,16 @@ func ShouldShowCacheTTLWarning(snap *schema.Snapshot, now time.Time) bool {
 }
 
 // CacheTTLWarningMessage builds the user-facing message for a cache TTL
-// expiry warning. It tells the user their cache likely evaporated and
-// gives a concrete cost-saving tip: send a trivial warm-up message first
-// to refill the cache cheaply before the real query.
+// expiry warning. Neutral guidance: the next request may need to rebuild
+// the cached prefix, so the user should consider whether preserving the
+// current context is worth that one-time processing cost.
 func CacheTTLWarningMessage(idleMinutes int, activeTokens int64) string {
 	tokens := formatTokenCountBrief(activeTokens)
 	return fmt.Sprintf(
 		"FreeInference: prompt cache likely expired (idle %dm). "+
 			"Your next request will re-read ~%s of context at full price. "+
-			"Consider sending a short message first to warm the cache before your real query.",
+			"The next request may rebuild the cached prefix. "+
+			"Consider whether preserving the current context is worth that one-time processing cost.",
 		idleMinutes, tokens)
 }
 

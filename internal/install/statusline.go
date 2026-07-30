@@ -100,10 +100,20 @@ func settingsPath(home string) string {
 func settingsLocalPath(home string) string {
 	return filepath.Join(claudeDir(home), "settings.local.json")
 }
-func wrapperPath(home string) string      { return filepath.Join(claudeDir(home), wrapperName) }
-func wrapperLocalPath(home string) string { return filepath.Join(home, ".claude", wrapperName) }
-func metadataPath(home string) string {
-	return filepath.Join(home, ".config", "freeinference-companion", "installations", "claude-statusline.json")
+func wrapperPath(home string) string { return filepath.Join(claudeDir(home), wrapperName) }
+
+// metadataPath returns the path to the installation metadata file for a given
+// scope and base directory. Each installation identity gets its own metadata
+// file so that installing into multiple scopes (user, project A, project B,
+// local) does not overwrite each other's ownership and rollback information.
+func metadataPath(scope InstallScope, base string) string {
+	name := fmt.Sprintf("claude-statusline-%s.json", scope)
+	switch scope {
+	case ScopeUser:
+		return filepath.Join(base, ".config", "freeinference-companion", "installations", name)
+	default:
+		return filepath.Join(base, ".claude", ".fi-install-"+name)
+	}
 }
 
 // settingsPathForScope returns the settings file path for the given scope and
@@ -145,14 +155,14 @@ func installerLockPath(home string) string {
 // already in progress.
 var ErrInstallerLocked = errors.New("another install/uninstall operation is in progress")
 
-// withInstallerLock runs fn while holding the exclusive installer lock. It
-// returns ErrInstallerLocked if the lock cannot be acquired.
-func withInstallerLock(home string, fn func() error) error {
-	lockDir := filepath.Dir(installerLockPath(home))
+// withInstallerLock runs fn while holding the exclusive installer lock at lockPath.
+// Returns ErrInstallerLocked if the lock cannot be acquired.
+func withInstallerLock(lockPath string, fn func() error) error {
+	lockDir := filepath.Dir(lockPath)
 	if err := os.MkdirAll(lockDir, 0700); err != nil {
 		return fmt.Errorf("create lock directory: %w", err)
 	}
-	lock := state.NewFileLock(installerLockPath(home))
+	lock := state.NewFileLock(lockPath)
 	if err := lock.Acquire(); err != nil {
 		if state.IsLockBusy(err) {
 			return ErrInstallerLocked
@@ -204,6 +214,15 @@ func installClaudeStatusLineLocked(home string, scope InstallScope, projectRoot,
 	settingsFile := settingsPathForScope(scope, projectRoot)
 	wrapper := wrapperPathForScope(scope, projectRoot)
 
+	// Determine the base directory for metadata storage. User-scope metadata
+	// lives under ~/.config/freeinference-companion/installations/; project/local
+	// metadata lives in .claude/ under the project root.
+	metaBase := home
+	if scope != ScopeUser {
+		metaBase = projectRoot
+	}
+	metaFile := metadataPath(scope, metaBase)
+
 	settings, originalBytes, originalMode, err := readSettingsAndMode(settingsFile)
 	if err != nil {
 		return fmt.Errorf("settings file is malformed; refusing to modify it: %w", err)
@@ -212,9 +231,9 @@ func installClaudeStatusLineLocked(home string, scope InstallScope, projectRoot,
 	// Load any existing metadata first. Reinstall must NOT collapse the prior
 	// history pointer — the pre-install value recorded on the first install is
 	// authoritative across all subsequent reinstalls.
-	existingMeta, haveExistingMeta, metaErr := loadMetadata(metadataPath(home))
+	existingMeta, haveExistingMeta, metaErr := loadMetadata(metaFile)
 	if metaErr != nil {
-		return fmt.Errorf("installation metadata is corrupted; refusing to modify. Repair: back up and delete %s, then reinstall: %w", metadataPath(home), metaErr)
+		return fmt.Errorf("installation metadata is corrupted; refusing to modify. Repair: back up and delete %s, then reinstall: %w", metaFile, metaErr)
 	}
 
 	// Determine the pre-install status line value. On a fresh install this is
@@ -265,12 +284,11 @@ func installClaudeStatusLineLocked(home string, scope InstallScope, projectRoot,
 	priorWrapper, priorWrapperMode, _ := readFileAndMode(wrapper)
 
 	// Capture prior metadata bytes for rollback too.
-	metaFile := metadataPath(home)
 	priorMeta, priorMetaMode, _ := readFileAndMode(metaFile)
 
 	// ---- Mutation phase begins. Anything that fails here must roll back. ----
 
-	if err := os.MkdirAll(claudeDir(home), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(wrapper), 0755); err != nil {
 		return err
 	}
 	// Atomic wrapper write: temp file + explicit mode + atomic rename. A
@@ -351,14 +369,14 @@ func UninstallClaudeStatusLine(home string, scope InstallScope, projectRoot stri
 func uninstallClaudeStatusLineLocked(home string, scope InstallScope, projectRoot string, stdout io.Writer) error {
 	settingsFile := settingsPathForScope(scope, projectRoot)
 	wrapper := wrapperPathForScope(scope, projectRoot)
-	metaFile := metadataPath(home) // metadata is always stored in user home
+	metaBase := home
+	if scope != ScopeUser {
+		metaBase = projectRoot
+	}
+	metaFile := metadataPath(scope, metaBase)
 
 	settings, _, mode, err := readSettingsAndMode(settingsFile)
 	if err != nil {
-		// Malformed settings: refuse every mutation. Removing the wrapper while
-		// settings still (malformed) point at it would convert a parseable-
-		// recovery problem into a broken command reference. Print manual repair
-		// instructions and leave wrapper plus metadata intact.
 		fmt.Fprintln(stdout, "Your Claude settings file is malformed; refusing to modify anything.")
 		fmt.Fprintf(stdout, "  - Repair %s (it could not be parsed as JSON).\n", settingsFile)
 		fmt.Fprintf(stdout, "  - Then re-run `fi status-line uninstall`.\n")
@@ -367,7 +385,7 @@ func uninstallClaudeStatusLineLocked(home string, scope InstallScope, projectRoo
 
 	meta, haveMeta, metaErr := loadMetadata(metaFile)
 	if metaErr != nil {
-		return fmt.Errorf("installation metadata is corrupted; refusing to modify. Repair: back up and delete %s, then reinstall: %w", metadataPath(home), metaErr)
+		return fmt.Errorf("installation metadata is corrupted; refusing to modify. Repair: back up and delete %s, then reinstall: %w", metaFile, metaErr)
 	}
 
 	// Decide what to do with settings["statusLine"] based on ownership.
@@ -515,7 +533,7 @@ func buildWrapper(binaryPath string, previous json.RawMessage) string {
 	// Previous status line side.
 	if prevCmd != "" {
 		b.WriteString("\nprev_out=\"\"\n")
-		fmt.Fprintf(&b, "prev_out=\"$(printf '%%s' \"$input\" | %s 2>/dev/null || true)\"\n", prevCmd)
+		fmt.Fprintf(&b, "prev_out=\"$(printf '%%s' \"$input\" | %s 2>/dev/null || true)\"\n", shellQuote(prevCmd))
 		b.WriteString("\nif [[ -n \"$fi_out\" && -n \"$prev_out\" ]]; then\n")
 		b.WriteString("  printf '%s | %s\\n' \"$prev_out\" \"$fi_out\"\n")
 		b.WriteString("elif [[ -n \"$fi_out\" ]]; then\n")

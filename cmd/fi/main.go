@@ -40,7 +40,7 @@ func main() {
 	if os.Getenv("FI_DISABLED") == "1" && len(os.Args) > 1 {
 		cmd := os.Args[1]
 		switch cmd {
-		case "version", "--version", "-v", "doctor", "help", "--help", "-h":
+		case "version", "--version", "-v", "doctor", "report", "help", "--help", "-h":
 			// Diagnostic commands pass through
 		default:
 			os.Exit(0)

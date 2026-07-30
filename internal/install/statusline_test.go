@@ -32,7 +32,7 @@ func loadSettingsMap(t *testing.T, home string) map[string]any {
 // does not silently destroy rollback history.
 func TestLoadMetadata_DistinguishesNotFoundFromOtherErrors(t *testing.T) {
 	home := t.TempDir()
-	metaFile := metadataPath(home)
+	metaFile := metadataPath(ScopeUser, home)
 
 	// Missing file → (zero, false, nil).
 	_, ok, err := loadMetadata(metaFile)
@@ -71,7 +71,7 @@ func TestUninstallRefusesOnMalformedSettings(t *testing.T) {
 		t.Errorf("wrapper was removed despite malformed settings: %v", statErr)
 	}
 	// Metadata must remain intact.
-	if _, statErr := os.Stat(metadataPath(home)); statErr != nil {
+	if _, statErr := os.Stat(metadataPath(ScopeUser, home)); statErr != nil {
 		t.Errorf("metadata was removed despite malformed settings: %v", statErr)
 	}
 }
@@ -97,7 +97,7 @@ func TestUninstallRetainsMetadataOnDrift(t *testing.T) {
 		t.Fatalf("expected ErrDriftedStatusLine, got: %v", err)
 	}
 	// Metadata must remain intact after a drifted uninstall.
-	if _, statErr := os.Stat(metadataPath(home)); statErr != nil {
+	if _, statErr := os.Stat(metadataPath(ScopeUser, home)); statErr != nil {
 		t.Errorf("metadata was deleted on drifted uninstall: %v", statErr)
 	}
 }
@@ -158,7 +158,7 @@ func TestInstallFresh(t *testing.T) {
 	}
 
 	// Metadata recorded.
-	if _, err := os.Stat(metadataPath(home)); err != nil {
+	if _, err := os.Stat(metadataPath(ScopeUser, home)); err != nil {
 		t.Error("installation metadata missing")
 	}
 }
@@ -191,7 +191,7 @@ func TestInstallComposesWithExisting(t *testing.T) {
 	}
 
 	// Metadata remembers the previous status line.
-	metaData, _ := os.ReadFile(metadataPath(home))
+	metaData, _ := os.ReadFile(metadataPath(ScopeUser, home))
 	var meta Metadata
 	json.Unmarshal(metaData, &meta)
 	if !meta.HadPrevious {
@@ -538,6 +538,6 @@ func TestReinstallAfterUserKeepsCustomOriginal(t *testing.T) {
 
 func loadMetadataForTest(t *testing.T, home string) (Metadata, bool) {
 	t.Helper()
-	m, ok, _ := loadMetadata(metadataPath(home))
+	m, ok, _ := loadMetadata(metadataPath(ScopeUser, home))
 	return m, ok
 }

@@ -14,6 +14,10 @@ import (
 // Event is one sanitized lifecycle event persisted to events.jsonl. It NEVER
 // contains prompt text, model responses, transcripts, repository paths,
 // environment values, API keys, headers, or raw error bodies.
+// SessionID is stored as a hashed identifier — the raw session ID is never
+// written to the event log. The directory path already identifies the session
+// internally; the hashed ID in the event record is sufficient for correlation
+// during incident response.
 type Event struct {
 	Type      string    `json:"type"`
 	At        time.Time `json:"at"`
@@ -99,15 +103,12 @@ func AppendEvent(paths Paths, clientType, sessionID string, ev Event) error {
 	// still appear in the JSON line — strip control sequences so it cannot
 	// break terminal output when the log is later tailed.
 	ev.Client = secure.SanitizeField(ev.Client)
-	ev.SessionID = secure.SanitizeField(ev.SessionID)
+	ev.SessionID = sessionKey(sessionID)
 	ev.Model = secure.SanitizeField(ev.Model)
 	ev.Provider = secure.SanitizeField(ev.Provider)
 	ev.At = time.Now().UTC()
 	if ev.Client == "" {
 		ev.Client = secure.SanitizeField(clientType)
-	}
-	if ev.SessionID == "" {
-		ev.SessionID = secure.SanitizeField(sessionID)
 	}
 
 	path := paths.SessionEvents(clientType, sessionID)

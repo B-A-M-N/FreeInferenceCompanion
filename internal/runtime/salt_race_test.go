@@ -2,14 +2,11 @@ package runtime
 
 import (
 	"crypto/rand"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
-	"time"
 )
 
 // TestSaltCreation_CrossProcessRace spawns multiple processes simultaneously
@@ -47,28 +44,8 @@ func TestSaltCreation_CrossProcessRace(t *testing.T) {
 		go func() {
 			cmd := exec.Command(testBin, "-salt-test", tmpDir)
 			cmd.Env = append(os.Environ(), "FI_CACHE_DIR="+tmpDir)
-			stdout, _ := cmd.StdoutPipe()
-			stderr, _ := cmd.StderrPipe()
-			if err := cmd.Start(); err != nil {
-				results <- result{err: err}
-				return
-			}
-			var outBuf, errBuf strings.Builder
-			var wg sync.WaitGroup
-			wg.Add(2)
-			go func() {
-				defer wg.Done()
-				_, _ = io.Copy(&outBuf, stdout)
-			}()
-			go func() {
-				defer wg.Done()
-				_, _ = io.Copy(&errBuf, stderr)
-			}()
-			// Give the pipes a moment to fill before waiting
-			time.Sleep(10 * time.Millisecond)
-			err := cmd.Wait()
-			wg.Wait()
-			results <- result{stdout: outBuf.String(), stderr: errBuf.String(), err: err}
+			out, err := cmd.CombinedOutput()
+			results <- result{stdout: string(out), err: err}
 		}()
 	}
 
@@ -78,22 +55,17 @@ func TestSaltCreation_CrossProcessRace(t *testing.T) {
 	for i := 0; i < numProcesses; i++ {
 		r := <-results
 		if r.err != nil {
-			errors = append(errors, r.err.Error()+" | stderr: "+strings.TrimSpace(r.stderr))
+			errors = append(errors, r.err.Error())
 			continue
 		}
 		salt := strings.TrimSpace(r.stdout)
-		t.Logf("process %d: stdout=%q stderr=%q err=%v", i, r.stdout, r.stderr, r.err)
-		// If stdout is empty but stderr has content, it might be an error message
+		t.Logf("process %d: stdout=%q err=%v", i, r.stdout, r.err)
 		if len(salt) == 0 {
-			if strings.TrimSpace(r.stderr) != "" {
-				errors = append(errors, "empty stdout, stderr: "+strings.TrimSpace(r.stderr))
-			} else {
-				errors = append(errors, "empty stdout and stderr")
-			}
+			errors = append(errors, "empty output")
 			continue
 		}
 		if len(salt) != 64 { // 32 bytes = 64 hex chars
-			errors = append(errors, "invalid salt length: '"+salt+"' | stdout: '"+r.stdout+"' | stderr: '"+strings.TrimSpace(r.stderr)+"'")
+			errors = append(errors, "invalid salt length: '"+salt+"'")
 			continue
 		}
 		salts[salt]++

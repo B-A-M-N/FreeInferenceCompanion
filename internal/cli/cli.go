@@ -44,6 +44,20 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int
 		return 0
 	}
 
+	// Stateless commands: dispatch before any state initialization so they
+	// succeed even when HOME or cache initialization fails, and never create
+	// state directories as a side effect of simply checking the version.
+	if cmd == "version" || cmd == "--version" || cmd == "-v" {
+		return cmdVersion(rest, stdout, stderr)
+	}
+	if cmd == "help" || cmd == "--help" || cmd == "-h" {
+		printUsage(stdout)
+		return 0
+	}
+	if cmd == "dashboard" {
+		return cmdDashboard(rest, stdout, stderr)
+	}
+
 	paths, err := state.NewPaths()
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
@@ -172,7 +186,7 @@ Usage:
   fi dashboard
   fi context [--client <type>] [--session <id>]
   fi cache [--client <type>] [--session <id>]
-  fi refresh [--force|--if-stale] [--detach] [--worker models|health]
+  fi refresh [--force|--if-stale] [--detach] [--worker models|health|account-usage]
   fi status-line install|uninstall
   fi version [--json]
   fi hook <client> <event>

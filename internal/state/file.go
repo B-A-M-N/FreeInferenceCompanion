@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -42,18 +43,25 @@ type Paths struct {
 }
 
 // NewPaths creates a Paths rooted at the default cache directory under HOME.
-// Respects FI_CACHE_DIR environment variable if set.
+// Respects FI_CACHE_DIR environment variable if set. FI_CACHE_DIR is checked
+// FIRST so an absolute explicit cache path works even when HOME is unavailable.
+// Only absolute paths are accepted for FI_CACHE_DIR.
 func NewPaths() (Paths, error) {
+	cacheDir := os.Getenv("FI_CACHE_DIR")
+	if cacheDir != "" {
+		if !filepath.IsAbs(cacheDir) {
+			return Paths{}, fmt.Errorf("FI_CACHE_DIR must be an absolute path, got %q", cacheDir)
+		}
+		return Paths{
+			CacheDir: cacheDir,
+		}, nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return Paths{}, fmt.Errorf("home dir: %w", err)
 	}
-	cacheDir := os.Getenv("FI_CACHE_DIR")
-	if cacheDir == "" {
-		cacheDir = filepath.Join(home, DefaultCacheDir)
-	}
 	return Paths{
-		CacheDir: cacheDir,
+		CacheDir: filepath.Join(home, DefaultCacheDir),
 	}, nil
 }
 
@@ -450,6 +458,9 @@ func ReadJSON(path string, v any) error {
 // LoadSnapshot reads the per-session snapshot. Returns nil without error if no snapshot exists.
 // On corrupt or unsupported state, the file is quarantined (renamed) and
 // (nil, nil) is returned so hooks continue with no state — they never block.
+// Future schema versions are NOT quarantined — they are left untouched and
+// return a clear incompatibility error so a downgrade does not destroy valid
+// newer state.
 func LoadSnapshot(paths Paths, clientType, sessionID string) (*schema.Snapshot, error) {
 	path := paths.SessionSnapshot(clientType, sessionID)
 	var s schema.Snapshot
@@ -457,13 +468,21 @@ func LoadSnapshot(paths Paths, clientType, sessionID string) (*schema.Snapshot, 
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
-		// JSON or checksum failure → quarantine so future writes succeed.
+		// JSON parse failure → quarantine so future writes succeed.
 		quarantineSnapshot(path, schema.QuarantineReason(err))
 		return nil, nil
 	}
 	if err := schema.MigrateSnapshot(&s); err != nil {
-		quarantineSnapshot(path, schema.QuarantineReason(err))
-		return nil, nil
+		if errors.Is(err, schema.ErrUnsupportedSchema) && s.SchemaVersion > schema.CurrentSchemaVersion {
+			// Future schema: leave untouched, return incompatibility error.
+			// A downgrade must not destructively hide valid newer state.
+			return nil, fmt.Errorf("snapshot has unsupported future schema v%d (supported ≤ v%d): %w",
+				s.SchemaVersion, schema.CurrentSchemaVersion, err)
+		}
+		// Migration failure for known schema: retain original file, write no
+		// partial replacement. Return error so the caller can decide how to
+		// handle it (hooks fail open, interactive commands report the error).
+		return nil, fmt.Errorf("snapshot migration failed: %w", err)
 	}
 	if err := schema.ValidateSnapshot(&s); err != nil {
 		quarantineSnapshot(path, schema.QuarantineReason(err))

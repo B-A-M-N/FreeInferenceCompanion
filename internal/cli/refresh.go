@@ -16,7 +16,7 @@ import (
 //	fi refresh                        synchronous if-stale refresh
 //	fi refresh --force                synchronous refresh ignoring staleness
 //	fi refresh --if-stale --detach    spawn detached workers for stale caches
-//	fi refresh --worker models|health single worker under a process lock
+//	fi refresh --worker models|health|account-usage single worker under a process lock
 func cmdRefresh(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 	force := false
 	ifStale := false

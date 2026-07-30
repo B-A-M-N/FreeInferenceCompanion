@@ -232,9 +232,10 @@ func TestUpdateSnapshotNoInitializeIsNoop(t *testing.T) {
 	}
 }
 
-// TestUnsupportedSchemaQuarantined writes a snapshot declaring a future schema
-// version and verifies LoadSnapshot quarantines it and fails open.
-func TestUnsupportedSchemaQuarantined(t *testing.T) {
+// TestUnsupportedFutureSchemaNotQuarantined writes a snapshot declaring a future
+// schema version and verifies LoadSnapshot returns an error without quarantining
+// the file. A downgrade must not destructively hide valid newer state.
+func TestUnsupportedFutureSchemaNotQuarantined(t *testing.T) {
 	paths := testPaths(t)
 	if err := paths.EnsureSessionDir(schema.ClientClaudeCode, "future"); err != nil {
 		t.Fatal(err)
@@ -246,28 +247,15 @@ func TestUnsupportedSchemaQuarantined(t *testing.T) {
 	}
 
 	snap, err := LoadSnapshot(paths, schema.ClientClaudeCode, "future")
-	if err != nil {
-		t.Errorf("unsupported schema must fail open, got: %v", err)
+	if err == nil {
+		t.Error("unsupported future schema must return an error")
 	}
 	if snap != nil {
 		t.Error("unsupported schema must not yield a snapshot")
 	}
-	if _, statErr := os.Stat(snapPath); statErr == nil {
-		t.Error("unsupported snapshot must be quarantined (renamed aside)")
-	}
-
-	// Subsequent writes must succeed (the quarantined file is gone).
-	err = UpdateSnapshot(paths, schema.ClientClaudeCode, "future",
-		func() *schema.Snapshot {
-			return &schema.Snapshot{
-				SchemaVersion: schema.StateVersion,
-				Client:        schema.ClientInfo{Type: schema.ClientClaudeCode},
-				Session:       schema.SessionInfo{ID: "future", Status: schema.SessionActive},
-			}
-		},
-		func(s *schema.Snapshot) error { return nil })
-	if err != nil {
-		t.Fatalf("re-write after quarantine failed: %v", err)
+	// Future schema must NOT be quarantined — the file must remain in place.
+	if _, statErr := os.Stat(snapPath); statErr != nil {
+		t.Error("unsupported future schema must NOT be quarantined (file should remain)")
 	}
 }
 
