@@ -125,7 +125,7 @@ plugin-bin: build-all
 # package-smoke validates the packaged archives: extracts each platform archive
 # into a temporary directory, runs the binary, and asserts it executes.
 package-smoke:
-	@tmp="$$(mktemp -d "${TMPDIR:-/tmp}/fi-pkg-smoke.XXXXXX")"; \
+	@tmp="$$(mktemp -d "$${TMPDIR:-/tmp}/fi-pkg-smoke.XXXXXX")"; \
 	trap 'rm -rf "$$tmp"' EXIT; \
 	cur="$$(go env GOOS)-$$(go env GOARCH)"; \
 	archive="$(RELEASE_DIR)/fi_$(VERSION)_$$cur.tar.gz"; \
