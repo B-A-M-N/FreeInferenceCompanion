@@ -239,7 +239,7 @@ plugin-bin: build-all
 # into a temporary directory, runs the binary, and asserts it executes.
 # Validates that source archives have a versioned top-level directory and that
 # plugin bundles preserve the vendor-expected manifest directory layout.
-package-smoke:
+package-smoke: package
 	@tmp="$$(mktemp -d "$${TMPDIR:-/tmp}/freeinference-pkg-smoke.XXXXXX")"; \
 	trap 'rm -rf "$$tmp"' EXIT; \
 	cur="$$(go env GOOS)-$$(go env GOARCH)"; \
