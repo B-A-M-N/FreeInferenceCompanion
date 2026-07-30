@@ -13,7 +13,7 @@ PLATFORMS=linux-amd64 linux-arm64 darwin-amd64 darwin-arm64
 
 build:
 	$(STATIC_FLAGS) go build -trimpath $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY) ./cmd/fi
-	@if ldd $(BUILD_DIR)/$(BINARY) 2>/dev/null | grep -q "=>"; then \
+	@if file $(BUILD_DIR)/$(BINARY) 2>/dev/null | grep -q "dynamically linked"; then \
 		echo "error: binary is dynamically linked"; exit 1; \
 	fi
 
@@ -35,9 +35,11 @@ build-all: build-linux-amd64 build-linux-arm64 build-darwin-amd64 build-darwin-a
 # releases. Every gate listed here MUST pass or the release stops. This is the
 # single source of truth — the tag workflow depends on this exact target.
 release-check: clean-tree-check fmt-check vet mod-verify tidy-check test test-race security-scan bench-ci plugin-syntax-check build-all build
-	@ldd $(BUILD_DIR)/$(BINARY) 2>&1 | grep -q "not a dynamic executable" \
-		&& echo "static binary verified" \
-		|| (echo "error: binary is dynamically linked"; exit 1)
+	@if file $(BUILD_DIR)/$(BINARY) 2>&1 | grep -q "not a dynamic executable"; then \
+		echo "static binary verified"; \
+	else \
+		echo "error: binary is dynamically linked"; exit 1; \
+	fi
 	@echo "release gate passed"
 
 # release runs the full quality gate, then packages distributable artifacts.
@@ -49,7 +51,15 @@ release: release-check package package-smoke
 # checksums writes sha256 checksums for every file in the release directory,
 # excluding the checksum file itself (which is generated last).
 checksums:
-	cd $(RELEASE_DIR) && sha256sum $$(ls | grep -v '^checksums.txt$$') > checksums.txt
+	@cd $(RELEASE_DIR) && for f in $$(ls | grep -v '^checksums.txt$$'); do \
+		if command -v sha256sum >/dev/null 2>&1; then \
+			sha256sum "$$f"; \
+		elif command -v shasum >/dev/null 2>&1; then \
+			shasum -a 256 "$$f"; \
+		else \
+			echo "error: neither sha256sum nor shasum found"; exit 1; \
+		fi; \
+	done > checksums.txt
 	@echo "checksums written to $(RELEASE_DIR)/checksums.txt"
 
 # package produces versioned distributable archives. Requires a clean tree
@@ -114,8 +124,8 @@ plugin-bin: build-all
 
 # package-smoke validates the packaged archives: extracts each platform archive
 # into a temporary directory, runs the binary, and asserts it executes.
-package-smoke: package
-	@tmp="$$(mktemp -d)"; \
+package-smoke:
+	@tmp="$$(mktemp -d "${TMPDIR:-/tmp}/fi-pkg-smoke.XXXXXX")"; \
 	trap 'rm -rf "$$tmp"' EXIT; \
 	cur="$$(go env GOOS)-$$(go env GOARCH)"; \
 	archive="$(RELEASE_DIR)/fi_$(VERSION)_$$cur.tar.gz"; \
@@ -149,10 +159,10 @@ package-smoke: package
 # resolution chain (bundled bin/ -> fallback paths). Confirms the plugin
 # archives contain all platform binaries.
 plugin-clean-install: package
-	@tmpdir="$$(mktemp -d 2>/dev/null || echo /tmp)"; \
+	@tmpdir="$$(mktemp -d "${TMPDIR:-/tmp}/fi-plugin.XXXXXX")"; \
 	trap 'rm -rf "$$tmpdir"' EXIT; \
 	for z in $(RELEASE_DIR)/freeinference-companion-*.zip; do \
-		edir="$$(mktemp -d -p "$$tmpdir" 2>/dev/null || mktemp -d)"; \
+		edir="$$(mktemp -d "${TMPDIR:-/tmp}/fi-plugin-extract.XXXXXX")"; \
 		unzip -q "$$z" -d "$$edir" && echo "extracted $$(basename $$z)"; \
 		base="."; \
 		test -d "$$edir/$$base/bin" || { echo "FAIL: bin/ missing in $$(basename $$z)"; exit 1; }; \
@@ -219,15 +229,13 @@ plugin-validate: plugin-syntax-check
 
 # tidy-check fails if `go mod tidy` would modify go.mod or go.sum.
 tidy-check:
-	@cp go.mod go.mod.check
-	@cp go.sum go.sum.check
-	@go mod tidy
-	@if ! diff -q go.mod go.mod.check >/dev/null || ! diff -q go.sum go.sum.check >/dev/null; then \
-		rm -f go.mod.check go.sum.check; \
+	@cp go.mod go.mod.check && cp go.sum go.sum.check && \
+	trap 'rm -f go.mod.check go.sum.check' EXIT && \
+	go mod tidy && \
+	if ! diff -q go.mod go.mod.check >/dev/null || ! diff -q go.sum go.sum.check >/dev/null; then \
 		echo "error: go.mod or go.sum is out of date — run 'go mod tidy' and commit the result"; \
 		exit 1; \
 	fi
-	@rm -f go.mod.check go.sum.check
 
 # mod-verify fails if the module cache has been tampered with.
 mod-verify:
@@ -285,8 +293,8 @@ bench-ci:
 		echo "error: bench-ci ran zero benchmarks — expected BenchmarkStatusLineUpdate and BenchmarkUserPromptSubmitNoWarning"; \
 		exit 1; \
 	fi; \
-	status_ns=$$(echo "$$output" | grep 'BenchmarkStatusLineUpdate' | head -1 | grep -oP '\d+(?= ns/op)'); \
-	hook_ns=$$(echo "$$output" | grep 'BenchmarkUserPromptSubmitNoWarning' | head -1 | grep -oP '\d+(?= ns/op)'); \
+	status_ns=$$(echo "$$output" | grep 'BenchmarkStatusLineUpdate' | head -1 | sed -E 's/.* ([0-9]+) ns\/op.*/\1/'); \
+	hook_ns=$$(echo "$$output" | grep 'BenchmarkUserPromptSubmitNoWarning' | head -1 | sed -E 's/.* ([0-9]+) ns\/op.*/\1/'); \
 	echo "status average = $${status_ns}ns, hook average = $${hook_ns}ns"; \
 	if [ "$$status_ns" -gt 5000000 ]; then \
 		echo "FAIL: status line average $${status_ns}ns exceeds 5ms ceiling (p95 target: 10ms)"; exit 1; \
@@ -306,7 +314,7 @@ run:
 # reads or mutates the operator's real cache, and never inherits real
 # credentials. Each command is asserted to exit cleanly.
 smoke: build
-	tmp="$$(mktemp -d)"; \
+	tmp="$$(mktemp -d "${TMPDIR:-/tmp}/fi-smoke.XXXXXX")"; \
 	trap 'rm -rf "$$tmp"' EXIT; \
 	HOME="$$tmp/home" \
 	FI_CACHE_DIR="$$tmp/cache" \

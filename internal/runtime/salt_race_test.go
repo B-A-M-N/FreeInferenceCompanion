@@ -27,7 +27,9 @@ func TestSaltCreation_CrossProcessRace(t *testing.T) {
 
 	// Build a test binary that just loads the salt
 	testBin := filepath.Join(tmpDir, "salt-loader")
-	buildCmd := exec.Command("go", "build", "-o", testBin, "-ldflags=-s -w", "/home/bamn/FreeInference/cmd/fi")
+	// Build from the module root (where go.mod is)
+	// This test runs from internal/runtime, so module root is ../../
+	buildCmd := exec.Command("go", "build", "-o", testBin, "-ldflags=-s -w", "../../cmd/fi")
 	if err := buildCmd.Run(); err != nil {
 		t.Fatalf("build: %v", err)
 	}
