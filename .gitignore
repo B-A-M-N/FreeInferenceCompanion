@@ -13,3 +13,8 @@ coverage.txt
 .vscode/
 plugins/claude-code/bin/
 plugins/codex/bin/
+/bin/
+/hooks/
+/plugin.json
+/scripts/
+/skills/

@@ -1,26 +1,63 @@
 // Command provenancegen generates an in-toto attestation-style provenance
-// file describing the FreeInference Companion release build.
+// file describing the FreeInference Companion release build. It scans the
+// release directory for all artifacts and lists each as a subject with its
+// SHA-256 digest.
 //
-// Usage: go run ./cmd/provenancegen <version> <commit> <output-path>
+// Usage: go run ./cmd/provenancegen <version> <commit> <release-dir> <output-path>
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 )
 
 func main() {
-	if len(os.Args) != 4 {
-		fmt.Fprintln(os.Stderr, "usage: provenancegen <version> <commit> <output-path>")
+	if len(os.Args) != 5 {
+		fmt.Fprintln(os.Stderr, "usage: provenancegen <version> <commit> <release-dir> <output-path>")
 		os.Exit(1)
 	}
 	version := os.Args[1]
 	commit := os.Args[2]
-	outPath := os.Args[3]
+	releaseDir := os.Args[3]
+	outPath := os.Args[4]
+
+	// Collect all release artifacts with their SHA-256 digests.
+	var subjects []map[string]any
+	entries, err := os.ReadDir(releaseDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "read release dir: %v\n", err)
+		os.Exit(1)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		path := filepath.Join(releaseDir, e.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "read %s: %v\n", e.Name(), err)
+			os.Exit(1)
+		}
+		sum := sha256.Sum256(data)
+		subjects = append(subjects, map[string]any{
+			"name": e.Name(),
+			"digest": map[string]string{
+				"sha256": hex.EncodeToString(sum[:]),
+			},
+		})
+	}
+	sort.Slice(subjects, func(i, j int) bool {
+		return subjects[i]["name"].(string) < subjects[j]["name"].(string)
+	})
 
 	goVerOut, _ := exec.Command("go", "version").Output()
 	kv := strings.Split(strings.TrimSpace(string(goVerOut)), " ")
@@ -38,18 +75,22 @@ func main() {
 	}
 
 	statement := map[string]any{
-		"subject": []map[string]any{{
-			"name":   "github.com/b-a-m-n/freeinference-companion",
-			"digest": map[string]any{"gitCommit": commit},
-		}},
+		"subject":       subjects,
 		"predicateType": "https://slsa.dev/provenance/v0.2",
 		"predicate": map[string]any{
-			"buildType": "https://freeinference-companion.dev/provenance/v1",
+			"buildType": "https://github.com/b-a-m-n/freeinference-companion/Makefile@v1",
 			"invocation": map[string]any{
 				"configSource": map[string]any{
 					"uri": "git+https://github.com/b-a-m-n/freeinference-companion@" + version,
+					"digest": map[string]string{
+						"gitCommit": commit,
+					},
+					"entryPoint": "make release",
 				},
-				"parameters": map[string]any{"version": version, "commit": commit},
+				"parameters": map[string]any{
+					"version": version,
+					"commit":  commit,
+				},
 				"environment": map[string]any{
 					"go-version": gv,
 					"os":         goos,
@@ -58,6 +99,7 @@ func main() {
 			},
 			"metadata": map[string]any{
 				"buildInvocationId": "make-release-" + version,
+				"buildStartedOn":    time.Now().UTC().Format(time.RFC3339),
 				"completeness": map[string]any{
 					"parameters":  true,
 					"environment": false,
@@ -66,8 +108,10 @@ func main() {
 				"reproducible": false,
 			},
 			"materials": []map[string]any{{
-				"uri":    "git+https://github.com/b-a-m-n/freeinference-companion",
-				"digest": map[string]any{"gitCommit": commit},
+				"uri": "git+https://github.com/b-a-m-n/freeinference-companion@" + commit,
+				"digest": map[string]string{
+					"gitCommit": commit,
+				},
 			}},
 		},
 	}
