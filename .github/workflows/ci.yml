@@ -74,11 +74,16 @@ jobs:
               assert key in m, f'missing top-level {key}'
           # Skills path must be present.
           assert 'skills' in m, 'missing skills path'
-          # The current Codex plugin contract rejects unsupported fields such as
-          # 'hooks'. Only allow the documented top-level keys.
-          allowed_top = {'name', 'version', 'description', 'author', 'skills', 'interface'}
+          # Allowed top-level keys for Codex plugins. Codex 0.145+ supports a
+          # top-level 'hooks' field pointing at hooks.json; auto-discovery of
+          # the default './hooks/hooks.json' path is also valid, in which case
+          # the field may be omitted. Both forms are accepted.
+          allowed_top = {'name', 'version', 'description', 'author', 'skills', 'interface', 'hooks'}
           unsupported = set(m.keys()) - allowed_top
           assert not unsupported, f'unsupported top-level field(s): {unsupported}'
+          # If hooks is declared, it must be a string path.
+          if 'hooks' in m:
+              assert isinstance(m['hooks'], str) and m['hooks'].strip(), 'hooks must be a non-empty string path'
           # Interface metadata is required by the current Codex plugin contract.
           iface = m.get('interface', {})
           allowed_iface = {'displayName', 'shortDescription', 'longDescription', 'developerName', 'category', 'capabilities', 'defaultPrompt'}
@@ -88,6 +93,14 @@ jobs:
               assert key in iface, f'missing interface.{key}'
           assert isinstance(iface['capabilities'], list) and len(iface['capabilities']) > 0, 'capabilities must be a non-empty list'
           assert isinstance(iface['defaultPrompt'], list) and len(iface['defaultPrompt']) > 0, 'defaultPrompt must be a non-empty list'
+          # hooks/hooks.json must exist if hooks are referenced (either explicitly or by default).
+          import os
+          default_hooks = 'hooks/hooks.json'
+          if 'hooks' in m:
+              hook_path = m['hooks']
+              assert os.path.isfile(hook_path), f'hooks path {hook_path} does not exist'
+          else:
+              assert os.path.isfile(default_hooks), f'default {default_hooks} must exist for Codex auto-discovery'
           print('Codex manifest satisfies the current plugin contract.')
           "
 
@@ -223,8 +236,23 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Run release gate and package
-        run: make release
+      - name: Download PR-packaging artifacts
+        uses: actions/download-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+        with:
+          name: release-artifacts-pr
+          path: release/
+      - name: Verify downloaded artifacts
+        run: |
+          set -euo pipefail
+          ls -la release/
+          test -f release/sbom.spdx.json || { echo 'missing SBOM'; exit 1; }
+          test -f release/provenance.intoto.jsonl || { echo 'missing provenance'; exit 1; }
+          test -f release/checksums.txt || { echo 'missing checksums'; exit 1; }
+          shopt -s nullglob
+          zips=(release/*.zip)
+          tars=(release/*.tar.gz)
+          test ${#zips[@]} -ge 2 || { echo 'missing plugin zips'; exit 1; }
+          test ${#tars[@]} -ge 4 || { echo 'missing source archives'; exit 1; }
       - name: Upload GitHub Release
         uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v2.0.0
         with:

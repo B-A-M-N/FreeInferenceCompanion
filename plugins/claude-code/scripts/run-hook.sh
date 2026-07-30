@@ -22,9 +22,10 @@ if [[ -n "$plugin_root" ]]; then
     # Try platform-specific binary first, then fall back to a generic one.
     os_name="$(uname -s | tr '[:upper:]' '[:lower:]')"
     arch_name="$(uname -m)"
-    # Normalize architecture names to match Makefile output (amd64/x86_64 -> amd64)
+    # Normalize architecture names to match Makefile output (amd64/x86_64 -> amd64, arm64/aarch64 -> arm64)
     case "$arch_name" in
         x86_64) arch_name="amd64" ;;
+        aarch64) arch_name="arm64" ;;
     esac
     plat="$os_name-$arch_name"
     for candidate in "$plugin_root/bin/$plat/fi" "$plugin_root/bin/fi"; do

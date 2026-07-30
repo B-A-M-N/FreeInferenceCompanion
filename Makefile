@@ -1,9 +1,9 @@
-.PHONY: build test test-race vet fmt-check plugin-syntax-check plugin-validate check release release-check checksums clean install lint tidy tidy-check mod-verify clean-tree-check security-scan smoke bench bench-ci run package package-smoke sbom provenance
+.PHONY: build test test-race vet fmt-check plugin-syntax-check plugin-validate check release release-check checksums clean install lint tidy tidy-check mod-verify clean-tree-check security-scan smoke bench bench-ci run package package-smoke plugin-clean-install sbom provenance
 
 BINARY=fi
 BUILD_DIR=build
-VERSION=$(shell git describe --tags --always --dirty 2>/dev/null || echo "0.1.0-dev")
-COMMIT=$(shell git rev-parse --short HEAD 2>/dev/null || echo "dev")
+VERSION?=$(shell git describe --tags --always --dirty 2>/dev/null || echo "0.1.0-dev")
+COMMIT?=$(shell git rev-parse --short HEAD 2>/dev/null || echo "dev")
 LDFLAGS=-ldflags "-s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT)"
 STATIC_FLAGS=CGO_ENABLED=0
 RELEASE_DIR=release
@@ -43,7 +43,7 @@ release-check: clean-tree-check fmt-check vet mod-verify tidy-check test test-ra
 	@echo "release gate passed"
 
 # release runs the full quality gate, then packages distributable artifacts.
-release: release-check package package-smoke
+release: release-check package
 	@echo ""
 	@echo "release $(VERSION) packaged in $(RELEASE_DIR)/"
 	@ls -la $(RELEASE_DIR)/
@@ -65,6 +65,16 @@ checksums:
 # package produces versioned distributable archives. Requires a clean tree
 # and a semantic-version tag (no "dirty" suffix) so every release artifact is
 # reproducible and traceable to a committed state.
+#
+# Source archives (tar.gz) have a single versioned top-level directory so
+# extraction never pollutes the cwd. Each archive contains fi, README, and
+# LICENSE under freeinference-companion-<version>-<plat>/.
+#
+# Plugin bundles (zip) preserve the vendor's expected layout:
+#   .claude-plugin/plugin.json, hooks/, scripts/, skills/, bin/<plat>/fi
+#   .codex-plugin/plugin.json, hooks/, scripts/, skills/, bin/<plat>/fi
+# The version is patched only on the staged copy; source manifests are
+# never mutated.
 package: build-all plugin-bin
 	@if echo "$(VERSION)" | grep -qE 'dirty'; then \
 		echo "error: refusing to package a dirty version ($(VERSION)); commit and tag first"; \
@@ -74,34 +84,55 @@ package: build-all plugin-bin
 		echo "error: VERSION $(VERSION) is not a semantic version; tag a release first"; \
 		exit 1; \
 	fi
-	@rm -rf $(RELEASE_DIR)
-	@mkdir -p $(RELEASE_DIR)
-	@for p in $(PLATFORMS); do \
+	@REL_VERSION=$$(echo "$(VERSION)" | sed 's/^v//' | sed 's/-.*//'); \
+	staging="$$(mktemp -d "$${TMPDIR:-/tmp}/fi-release-stage.XXXXXX")"; \
+	trap 'rm -rf "$$staging"' EXIT; \
+	rm -rf $(RELEASE_DIR); \
+	mkdir -p $(RELEASE_DIR); \
+	\
+	for p in $(PLATFORMS); do \
 		os=$$(echo "$$p" | cut -d- -f1); \
 		arch=$$(echo "$$p" | cut -d- -f2); \
-		archive="$(RELEASE_DIR)/fi_$(VERSION)_$$p.tar.gz"; \
-		mkdir -p "$$archive.tmp"; \
-		cp $(BUILD_DIR)/$(BINARY)-$$p "$$archive.tmp/fi"; \
-		cp LICENSE README.md "$$archive.tmp/"; \
-		tar -czf "$$archive" -C "$$archive.tmp" .; \
-		rm -rf "$$archive.tmp"; \
+		archive_name="freeinference-companion-$$REL_VERSION-$$p"; \
+		stage_dir="$$staging/$$archive_name"; \
+		mkdir -p "$$stage_dir"; \
+		install -m 0755 $(BUILD_DIR)/$(BINARY)-$$p "$$stage_dir/fi"; \
+		cp LICENSE README.md "$$stage_dir/"; \
+		archive="$(RELEASE_DIR)/$$archive_name.tar.gz"; \
+		tar -czf "$$archive" -C "$$staging" "$$archive_name"; \
 		echo "packaged $$archive"; \
-	done
-	# Stage plugin bundles with correct version in staging dir (don't mutate source)
-	@REL_VERSION=$$(echo $(VERSION) | sed 's/^v//' | sed 's/-.*//'); \
-	mkdir -p "$(RELEASE_DIR)/staging/claude-code" && \
-	sed "s/\"version\": \".*\"/\"version\": \"$$REL_VERSION\"/" plugins/claude-code/.claude-plugin/plugin.json > "$(RELEASE_DIR)/staging/claude-code/plugin.json" && \
-	cp -r plugins/claude-code/hooks plugins/claude-code/scripts plugins/claude-code/skills plugins/claude-code/bin "$(RELEASE_DIR)/staging/claude-code/" && \
-	(cd "$(RELEASE_DIR)/staging/claude-code" && zip -q -r "../../../$(RELEASE_DIR)/freeinference-companion-claude_$(VERSION).zip" .) && \
+	done; \
+	\
+	stage_claude="$$staging/claude-code"; \
+	mkdir -p "$$stage_claude/.claude-plugin"; \
+	sed "s/\"version\": \".*\"/\"version\": \"$$REL_VERSION\"/" \
+		plugins/claude-code/.claude-plugin/plugin.json \
+		> "$$stage_claude/.claude-plugin/plugin.json"; \
+	cp -R plugins/claude-code/hooks \
+		plugins/claude-code/scripts \
+		plugins/claude-code/skills \
+		plugins/claude-code/bin \
+		"$$stage_claude/"; \
+	(cd "$$stage_claude" && zip -q -r "$(CURDIR)/$(RELEASE_DIR)/freeinference-companion-claude_$(VERSION).zip" .) && \
 	echo "packaged Claude plugin bundle"; \
-	mkdir -p "$(RELEASE_DIR)/staging/codex" && \
-	sed "s/\"version\": \".*\"/\"version\": \"$$REL_VERSION\"/" plugins/codex/.codex-plugin/plugin.json > "$(RELEASE_DIR)/staging/codex/plugin.json" && \
-	cp -r plugins/codex/hooks plugins/codex/scripts plugins/codex/skills plugins/codex/bin "$(RELEASE_DIR)/staging/codex/" && \
-	(cd "$(RELEASE_DIR)/staging/codex" && zip -q -r "../../../$(RELEASE_DIR)/freeinference-companion-codex_$(VERSION).zip" .) && \
+	\
+	stage_codex="$$staging/codex"; \
+	mkdir -p "$$stage_codex/.codex-plugin"; \
+	sed "s/\"version\": \".*\"/\"version\": \"$$REL_VERSION\"/" \
+		plugins/codex/.codex-plugin/plugin.json \
+		> "$$stage_codex/.codex-plugin/plugin.json"; \
+	cp -R plugins/codex/hooks \
+		plugins/codex/scripts \
+		plugins/codex/skills \
+		plugins/codex/bin \
+		"$$stage_codex/"; \
+	(cd "$$stage_codex" && zip -q -r "$(CURDIR)/$(RELEASE_DIR)/freeinference-companion-codex_$(VERSION).zip" .) && \
 	echo "packaged Codex plugin bundle"; \
-	rm -rf "$(RELEASE_DIR)/staging"; \
-	cp LICENSE README.md $(RELEASE_DIR)/ && \
-	$(MAKE) sbom && $(MAKE) provenance && $(MAKE) checksums && \
+	\
+	cp LICENSE README.md $(RELEASE_DIR)/; \
+	$(MAKE) sbom RELEASE_DIR=$(RELEASE_DIR) VERSION=$(VERSION) STAGE_DIR="$$staging" && \
+	$(MAKE) provenance RELEASE_DIR=$(RELEASE_DIR) VERSION=$(VERSION) COMMIT=$(COMMIT) STAGE_DIR="$$staging" && \
+	$(MAKE) checksums RELEASE_DIR=$(RELEASE_DIR) && \
 	echo "packaging complete"
 
 # plugin-bin builds all platform binaries into each plugin's bin/ directory
@@ -124,57 +155,121 @@ plugin-bin: build-all
 
 # package-smoke validates the packaged archives: extracts each platform archive
 # into a temporary directory, runs the binary, and asserts it executes.
+# Validates that source archives have a versioned top-level directory and that
+# plugin bundles preserve the vendor-expected manifest directory layout.
 package-smoke:
 	@tmp="$$(mktemp -d "$${TMPDIR:-/tmp}/fi-pkg-smoke.XXXXXX")"; \
 	trap 'rm -rf "$$tmp"' EXIT; \
 	cur="$$(go env GOOS)-$$(go env GOARCH)"; \
-	archive="$(RELEASE_DIR)/fi_$(VERSION)_$$cur.tar.gz"; \
-	if [ ! -f "$$archive" ]; then echo "FAIL: current-platform archive missing: $$archive"; exit 1; fi; \
-	tar -xzf "$$archive" -C "$$tmp"; \
-	bin="$$tmp/fi"; \
+	REL_VERSION=$$(echo "$(VERSION)" | sed 's/^v//' | sed 's/-.*//'); \
+	\
+	for p in $(PLATFORMS); do \
+		archive_name="freeinference-companion-$$REL_VERSION-$$p"; \
+		archive="$(RELEASE_DIR)/$$archive_name.tar.gz"; \
+		if [ ! -f "$$archive" ]; then \
+			echo "FAIL: $$p archive missing: $$archive"; exit 1; \
+		fi; \
+		extract="$$tmp/extract-$$p"; \
+		mkdir -p "$$extract"; \
+		tar -xzf "$$archive" -C "$$extract"; \
+		if [ ! -d "$$extract/$$archive_name" ]; then \
+			echo "FAIL: $$p archive missing top-level dir $$archive_name"; exit 1; \
+		fi; \
+		if [ ! -x "$$extract/$$archive_name/fi" ]; then \
+			echo "FAIL: $$p archive fi not executable"; exit 1; \
+		fi; \
+		if [ ! -f "$$extract/$$archive_name/README.md" ] || [ ! -f "$$extract/$$archive_name/LICENSE" ]; then \
+			echo "FAIL: $$p archive missing README.md or LICENSE"; exit 1; \
+		fi; \
+		echo "archive OK: $$p"; \
+	done; \
+	\
+	extract="$$tmp/extract-$$cur"; \
+	mkdir -p "$$extract"; \
+	tar -xzf "$(RELEASE_DIR)/freeinference-companion-$$REL_VERSION-$$cur.tar.gz" -C "$$extract"; \
+	bin="$$extract/freeinference-companion-$$REL_VERSION-$$cur/fi"; \
 	if "$$bin" help >/dev/null 2>&1; then \
 		echo "smoke OK: $$cur (binary executes)"; \
 	else \
 		echo "FAIL: $$cur binary did not execute"; exit 1; \
 	fi; \
-	for p in $(PLATFORMS); do \
-		a="$(RELEASE_DIR)/fi_$(VERSION)_$$p.tar.gz"; \
-		if tar -tzf "$$a" >/dev/null 2>&1; then \
-			echo "archive OK: $$p"; \
-		else \
-			echo "FAIL: $$p archive corrupt"; exit 1; \
-		fi; \
+	\
+	for z in $(RELEASE_DIR)/freeinference-companion-claude*.zip; do \
+		edir="$$tmp/zip-claude"; \
+		rm -rf "$$edir"; \
+		mkdir -p "$$edir"; \
+		unzip -q "$$z" -d "$$edir"; \
+		test -f "$$edir/.claude-plugin/plugin.json" || { echo "FAIL: $$(basename $$z) missing .claude-plugin/plugin.json"; exit 1; }; \
+		test -d "$$edir/hooks" || { echo "FAIL: $$(basename $$z) missing hooks/"; exit 1; }; \
+		test -d "$$edir/scripts" || { echo "FAIL: $$(basename $$z) missing scripts/"; exit 1; }; \
+		test -d "$$edir/skills" || { echo "FAIL: $$(basename $$z) missing skills/"; exit 1; }; \
+		echo "archive OK: $$(basename $$z)"; \
 	done; \
-	for z in $(RELEASE_DIR)/freeinference-companion-*.zip; do \
-		if unzip -t "$$z" >/dev/null 2>&1; then \
-			echo "archive OK: $$(basename $$z)"; \
-		else \
-			echo "FAIL: corrupt zip $$z"; exit 1; \
-		fi; \
+	for z in $(RELEASE_DIR)/freeinference-companion-codex*.zip; do \
+		edir="$$tmp/zip-codex"; \
+		rm -rf "$$edir"; \
+		mkdir -p "$$edir"; \
+		unzip -q "$$z" -d "$$edir"; \
+		test -f "$$edir/.codex-plugin/plugin.json" || { echo "FAIL: $$(basename $$z) missing .codex-plugin/plugin.json"; exit 1; }; \
+		test -d "$$edir/hooks" || { echo "FAIL: $$(basename $$z) missing hooks/"; exit 1; }; \
+		test -d "$$edir/scripts" || { echo "FAIL: $$(basename $$z) missing scripts/"; exit 1; }; \
+		test -d "$$edir/skills" || { echo "FAIL: $$(basename $$z) missing skills/"; exit 1; }; \
+		echo "archive OK: $$(basename $$z)"; \
 	done; \
 	echo "package smoke tests passed"
 
-# plugin-clean-install smoke extracts each plugin zip into a temp directory
-# with an empty HOME and no fi on PATH, then exercises the hook wrapper
-# resolution chain (bundled bin/ -> fallback paths). Confirms the plugin
-# archives contain all platform binaries.
+# plugin-clean-install extracts each plugin ZIP into a temp directory with an
+# empty HOME, removes `fi` from PATH, and exercises the hook wrapper. The
+# wrapper must locate the bundled platform binary and exit zero. This proves
+# that a fresh install with no preinstalled fi binary still works.
 plugin-clean-install: package
 	@tmpdir="$$(mktemp -d "$${TMPDIR:-/tmp}/fi-plugin.XXXXXX")"; \
 	trap 'rm -rf "$$tmpdir"' EXIT; \
-	for z in $(RELEASE_DIR)/freeinference-companion-*.zip; do \
-		edir="$$(mktemp -d "$${TMPDIR:-/tmp}/fi-plugin-extract.XXXXXX")"; \
-		unzip -q "$$z" -d "$$edir" && echo "extracted $$(basename $$z)"; \
-		# ZIP has flat structure - bin/ is at root \
-		test -d "$$edir/bin" || { echo "FAIL: bin/ missing in $$(basename $$z)"; exit 1; }; \
-		for bin in "$$edir/bin"/*; do \
-			while [ -d "$$bin" ]; do \
-				for f in "$$bin"/*; do \
-					test -x "$$f" && { echo "  executable: $$(basename $$f)"; } || { echo "FAIL: $$(basename $$f) is not executable"; exit 1; }; \
-				done; \
-				break; \
-			done; \
-		done; \
-		ls "$$edir/scripts/run-hook.sh" >/dev/null 2>&1 || { echo "FAIL: run-hook.sh missing in $$(basename $$z)"; exit 1; }; \
+	empty_path="$$tmpdir/empty-bin"; \
+	mkdir -p "$$empty_path"; \
+	empty_home="$$tmpdir/empty-home"; \
+	mkdir -p "$$empty_home"; \
+	for z in $(RELEASE_DIR)/freeinference-companion-claude*.zip; do \
+		edir="$$tmpdir/extract-claude"; \
+		rm -rf "$$edir"; \
+		mkdir -p "$$edir"; \
+		unzip -q "$$z" -d "$$edir"; \
+		test -f "$$edir/.claude-plugin/plugin.json" || { echo "FAIL: $$(basename $$z) missing .claude-plugin/plugin.json"; exit 1; }; \
+		test -x "$$edir/scripts/run-hook.sh" || { echo "FAIL: $$(basename $$z) run-hook.sh not executable"; exit 1; }; \
+		hooks_file="$$edir/hooks/hooks.json"; \
+		test -f "$$hooks_file" || { echo "FAIL: $$(basename $$z) missing hooks/hooks.json"; exit 1; }; \
+		plat="$$(uname -s | tr '[:upper:]' '[:lower:]')-$$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"; \
+		bin="$$edir/bin/$$plat/fi"; \
+		test -x "$$bin" || { echo "FAIL: $$(basename $$z) missing bundled binary $$plat"; exit 1; }; \
+		CLAUDE_PLUGIN_ROOT="$$edir" \
+			HOME="$$empty_home" \
+			PATH="/usr/bin:/bin" \
+			FI_DISABLED=0 \
+			bash "$$edir/scripts/run-hook.sh" SessionStart >/dev/null 2>&1; \
+		rc=$$?; \
+		test "$$rc" -eq 0 || { echo "FAIL: Claude run-hook.sh exited $$rc"; exit 1; }; \
+		echo "clean-install OK: $$(basename $$z) ($$plat)"; \
+	done; \
+	for z in $(RELEASE_DIR)/freeinference-companion-codex*.zip; do \
+		edir="$$tmpdir/extract-codex"; \
+		rm -rf "$$edir"; \
+		mkdir -p "$$edir"; \
+		unzip -q "$$z" -d "$$edir"; \
+		test -f "$$edir/.codex-plugin/plugin.json" || { echo "FAIL: $$(basename $$z) missing .codex-plugin/plugin.json"; exit 1; }; \
+		test -x "$$edir/scripts/run-hook.sh" || { echo "FAIL: $$(basename $$z) run-hook.sh not executable"; exit 1; }; \
+		hooks_file="$$edir/hooks/hooks.json"; \
+		test -f "$$hooks_file" || { echo "FAIL: $$(basename $$z) missing hooks/hooks.json"; exit 1; }; \
+		plat="$$(uname -s | tr '[:upper:]' '[:lower:]')-$$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"; \
+		bin="$$edir/bin/$$plat/fi"; \
+		test -x "$$bin" || { echo "FAIL: $$(basename $$z) missing bundled binary $$plat"; exit 1; }; \
+		PLUGIN_ROOT="$$edir" \
+			HOME="$$empty_home" \
+			PATH="/usr/bin:/bin" \
+			FI_DISABLED=0 \
+			bash "$$edir/scripts/run-hook.sh" SessionStart >/dev/null 2>&1; \
+		rc=$$?; \
+		test "$$rc" -eq 0 || { echo "FAIL: Codex run-hook.sh exited $$rc"; exit 1; }; \
+		echo "clean-install OK: $$(basename $$z) ($$plat)"; \
 	done; \
 	echo "plugin clean-install smoke tests passed"
 
@@ -185,9 +280,10 @@ sbom:
 	@echo "SBOM written to $(RELEASE_DIR)/sbom.spdx.json"
 
 # provenance generates an in-toto attestation-style provenance file.
+# Lists every release artifact as a subject with its SHA-256 digest.
 # For signed provenance, install cosign (https://github.com/sigstore/cosign).
 provenance:
-	@go run ./cmd/provenancegen "$(VERSION)" "$(COMMIT)" "$(RELEASE_DIR)/provenance.intoto.jsonl"
+	@go run ./cmd/provenancegen "$(VERSION)" "$(COMMIT)" "$(RELEASE_DIR)" "$(RELEASE_DIR)/provenance.intoto.jsonl"
 	@echo "provenance written to $(RELEASE_DIR)/provenance.intoto.jsonl"
 
 install: build
@@ -228,9 +324,11 @@ plugin-syntax-check:
 plugin-validate: plugin-syntax-check
 
 # tidy-check fails if `go mod tidy` would modify go.mod or go.sum.
+# Always restores originals from backup on failure so the checkout is
+# byte-identical whether this target passes or fails.
 tidy-check:
 	@cp go.mod go.mod.check && cp go.sum go.sum.check && \
-	trap 'rm -f go.mod.check go.sum.check' EXIT && \
+	trap 'mv go.mod.check go.mod 2>/dev/null; mv go.sum.check go.sum 2>/dev/null; rm -f go.mod.check go.sum.check' EXIT && \
 	go mod tidy && \
 	if ! diff -q go.mod go.mod.check >/dev/null || ! diff -q go.sum go.sum.check >/dev/null; then \
 		echo "error: go.mod or go.sum is out of date — run 'go mod tidy' and commit the result"; \
