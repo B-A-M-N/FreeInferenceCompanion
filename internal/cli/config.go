@@ -98,6 +98,8 @@ func cmdConfigShow(args []string, stdout, stderr io.Writer) int {
 
 	fmt.Fprintln(stdout, "\nRefresh:")
 	printField("  interval_mins", fmt.Sprintf("%d", eff.Refresh.IntervalMins.Value), string(eff.Refresh.IntervalMins.Source), boolStr(eff.Refresh.IntervalMins.Valid), eff.Refresh.IntervalMins.Error)
+	fmt.Fprintln(stdout, "\nReporting:")
+	printField("  level", eff.Reporting.Level.Value, string(eff.Reporting.Level.Source), boolStr(eff.Reporting.Level.Valid), eff.Reporting.Level.Error)
 
 	fmt.Fprintln(stdout, "\nPrivacy:")
 	printField("  diagnostic_probes", fmt.Sprintf("%t", eff.Privacy.DiagnosticProbes.Value), string(eff.Privacy.DiagnosticProbes.Source), boolStr(eff.Privacy.DiagnosticProbes.Valid), eff.Privacy.DiagnosticProbes.Error)
@@ -129,7 +131,7 @@ func cmdConfigSet(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "Keys: context.watch_enter, context.warn_enter, context.critical_enter,")
 		fmt.Fprintln(stderr, "      context.watch_leave, context.warn_leave, context.critical_leave,")
 		fmt.Fprintln(stderr, "      context.output_reserve, cache.warn_threshold, cache.recovered_threshold, cache.cooldown_mins,")
-		fmt.Fprintln(stderr, "      refresh.interval_mins, privacy.diagnostic_probes")
+		fmt.Fprintln(stderr, "      refresh.interval_mins, reporting.level, privacy.diagnostic_probes")
 		return 2
 	}
 
@@ -143,6 +145,10 @@ func cmdConfigSet(args []string, stdout, stderr io.Writer) int {
 
 	if err := config.SetField(cfg, key, value); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 2
+	}
+	if err := config.Validate(cfg); err != nil {
+		fmt.Fprintf(stderr, "error: invalid configuration: %v\n", err)
 		return 2
 	}
 

@@ -4,7 +4,7 @@
 //
 // The release version is injected at build time via -ldflags:
 //
-//	go build -ldflags "-X github.com/b-a-m-n/freeinference-companion/version.Version=0.2.0"
+//	go build -ldflags "-X github.com/b-a-m-n/freeinference-companion/pkg/version.Version=0.2.0"
 //
 // The fallback matches the plugin manifest versions for development builds.
 package version

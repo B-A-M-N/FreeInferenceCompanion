@@ -712,6 +712,9 @@ func (a *ClaudeAdapter) HandlePreCompact(input *schema.ClaudeHookInput, sessionI
 	err := state.UpdateSnapshot(a.Paths, schema.ClientClaudeCode, sessionID, nil,
 		func(snap *schema.Snapshot) error {
 			snap.Compaction.Pending = true
+			snap.Compaction.AwaitingPostObservation = false
+			snap.Compaction.PreTokens = nil
+			snap.Compaction.Trigger = nil
 			snap.Compaction.InitiatedAt = &now
 			if input != nil && input.Trigger != "" {
 				trigger := input.Trigger

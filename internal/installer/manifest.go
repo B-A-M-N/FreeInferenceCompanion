@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
+	"strings"
 )
 
 // PlatformKey identifies a target platform (e.g. "linux-amd64").
@@ -47,6 +49,9 @@ type manifestWire struct {
 
 // FetchManifest downloads and parses a marketplace manifest from the given URL.
 func FetchManifest(manifestURL string) (*MarketplaceManifest, error) {
+	if err := validateRemoteURL(manifestURL); err != nil {
+		return nil, fmt.Errorf("fetch manifest: %w", err)
+	}
 	resp, err := http.Get(manifestURL)
 	if err != nil {
 		return nil, fmt.Errorf("fetch manifest: %w", err)
@@ -70,12 +75,49 @@ func FetchManifest(manifestURL string) (*MarketplaceManifest, error) {
 	for k, v := range wire.Platforms {
 		out.Platforms[k] = PlatformInfo{URL: v.URL, Hash: v.Hash}
 	}
+	if err := out.Validate(); err != nil {
+		return nil, fmt.Errorf("parse manifest: %w", err)
+	}
 	return out, nil
+}
+
+var semverPattern = regexp.MustCompile(`^v?[0-9]+\.[0-9]+\.[0-9]+$`)
+
+// Validate rejects malformed manifests before any platform asset is selected.
+// This catches publication mistakes and prevents ambiguous version comparisons.
+func (m *MarketplaceManifest) Validate() error {
+	if !semverPattern.MatchString(m.Version) {
+		return fmt.Errorf("version must be a semantic version")
+	}
+	if len(m.Platforms) == 0 {
+		return fmt.Errorf("platforms must not be empty")
+	}
+	for platform, info := range m.Platforms {
+		if strings.TrimSpace(platform) == "" {
+			return fmt.Errorf("platform key must not be empty")
+		}
+		if err := validateRemoteURL(info.URL); err != nil {
+			return fmt.Errorf("platform %q URL: %w", platform, err)
+		}
+		if len(info.Hash) != sha256.Size*2 {
+			return fmt.Errorf("platform %q checksum must be a %d-character SHA-256 hex digest", platform, sha256.Size*2)
+		}
+		if _, err := hex.DecodeString(info.Hash); err != nil {
+			return fmt.Errorf("platform %q checksum: %w", platform, err)
+		}
+	}
+	return nil
 }
 
 // VerifyChecksum computes the SHA-256 hex digest of data and compares it
 // with the expected hash from the manifest.
 func VerifyChecksum(data []byte, expectedHash string) error {
+	if len(expectedHash) != sha256.Size*2 {
+		return fmt.Errorf("checksum must be a %d-character SHA-256 hex digest", sha256.Size*2)
+	}
+	if _, err := hex.DecodeString(expectedHash); err != nil {
+		return fmt.Errorf("invalid checksum digest: %w", err)
+	}
 	h := sha256.Sum256(data)
 	actual := hex.EncodeToString(h[:])
 	if actual != expectedHash {
@@ -133,9 +175,8 @@ func parseVersion(v string) versionParts {
 // bytes written. On success the caller must verify the checksum against the
 // expected hash in the manifest.
 func DownloadTo(downloadURL, destPath string) (int64, error) {
-	// Validate URL to avoid open-redirect / file-write issues.
-	if u, err := url.Parse(downloadURL); err != nil || u.Scheme == "" {
-		return 0, fmt.Errorf("download %s: invalid URL: scheme is empty or malformed", downloadURL)
+	if err := validateRemoteURL(downloadURL); err != nil {
+		return 0, fmt.Errorf("download: %w", err)
 	}
 
 	resp, err := http.Get(downloadURL)
@@ -170,4 +211,23 @@ func DownloadTo(downloadURL, destPath string) (int64, error) {
 		return 0, fmt.Errorf("rename download: %w", err)
 	}
 	return n, nil
+}
+
+// validateRemoteURL limits installer inputs to HTTPS. Local HTTP is allowed
+// only for explicitly opted-in development and test endpoints.
+func validateRemoteURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || u.User != nil || u.Fragment != "" || u.RawQuery != "" {
+		return fmt.Errorf("invalid URL")
+	}
+	if u.Scheme == "https" {
+		return nil
+	}
+	if u.Scheme == "http" && os.Getenv("FI_ALLOW_INSECURE_LOCALHOST") == "1" {
+		host := strings.ToLower(u.Hostname())
+		if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+			return nil
+		}
+	}
+	return fmt.Errorf("URL must use HTTPS (or opted-in loopback HTTP for development)")
 }

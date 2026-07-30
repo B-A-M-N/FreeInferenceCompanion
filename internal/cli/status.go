@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/adapters"
+	"github.com/b-a-m-n/freeinference-companion/internal/config"
 	"github.com/b-a-m-n/freeinference-companion/internal/engine"
+	"github.com/b-a-m-n/freeinference-companion/internal/render"
 	"github.com/b-a-m-n/freeinference-companion/internal/runtime"
 	"github.com/b-a-m-n/freeinference-companion/internal/secure"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
@@ -23,21 +25,56 @@ func cmdStatus(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 	jsonOut := false
 
 	// Extract --color flag.
-	colorMode, remainingArgs := parseColorFlag(args)
+	colorMode, remainingArgs, err := parseColorFlag(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "usage error: %v\n", err)
+		return 2
+	}
 	_ = colorMode // used below via renderConfigWith
 
 	// Extract --compact and --json from remainingArgs, and filter them out
 	// so parseClientSessionFlags doesn't reject them as unknown.
+	level := ""
+	levelSpecified := false
 	var passthroughArgs []string
-	for _, a := range remainingArgs {
+	for i := 0; i < len(remainingArgs); i++ {
+		a := remainingArgs[i]
 		switch a {
 		case "--compact":
 			compact = true
 		case "--json":
 			jsonOut = true
+		case "--level":
+			if i+1 >= len(remainingArgs) {
+				fmt.Fprintln(stderr, "usage error: --level requires a value (summary, standard, or detailed)")
+				return 2
+			}
+			i++
+			levelSpecified = true
+			level = strings.ToLower(strings.TrimSpace(remainingArgs[i]))
 		default:
+			if strings.HasPrefix(a, "--level=") {
+				levelSpecified = true
+				level = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(a, "--level=")))
+				continue
+			}
 			passthroughArgs = append(passthroughArgs, a)
 		}
+	}
+	if levelSpecified && !config.ValidReportingLevel(level) {
+		fmt.Fprintf(stderr, "usage error: unknown reporting level %q (want summary, standard, or detailed)\n", level)
+		return 2
+	}
+	if compact && levelSpecified {
+		fmt.Fprintln(stderr, "usage error: --compact and --level cannot be used together")
+		return 2
+	}
+	if jsonOut && levelSpecified {
+		fmt.Fprintln(stderr, "usage error: --json and --level cannot be used together")
+		return 2
+	}
+	if !compact && !jsonOut && !levelSpecified {
+		level = configuredReportingLevel()
 	}
 	clientType, sessionID, _, reveal, _, err := parseClientSessionFlags(passthroughArgs)
 	if err != nil {
@@ -81,6 +118,11 @@ func cmdStatus(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 			gs := loadGlobal(paths)
 			vm := buildView(snap, gs, aid, activation.Active, clientType, sessionID)
 			rc := renderConfigWith(args)
+			if jsonOut {
+				statusJSON(stdout, snap, gs, reveal, aid, &activation.Active,
+					clientType, sessionID, snap.Model.ID, snap.Provider.Name)
+				return 0
+			}
 			if compact {
 				// Zero-output contract: write nothing when ineligible.
 				// Never write a newline for an empty line.
@@ -88,8 +130,8 @@ func cmdStatus(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 					fmt.Fprintln(stdout, line)
 				}
 			} else {
-				if expanded := vm.Expanded(rc); expanded != "" {
-					fmt.Fprintln(stdout, expanded)
+				if rendered := renderStatusLevel(vm, rc, level); rendered != "" {
+					fmt.Fprintln(stdout, rendered)
 				}
 			}
 			return 0
@@ -141,8 +183,38 @@ func cmdStatus(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 		return 0
 	}
 
-	fmt.Fprint(stdout, vm.Expanded(rc))
+	fmt.Fprint(stdout, renderStatusLevel(vm, rc, level))
 	return 0
+}
+
+// configuredReportingLevel returns the saved default. A malformed external
+// configuration never blocks a status check; it falls back to the established
+// detailed output, while `freeinference config show` exposes the bad value.
+func configuredReportingLevel() string {
+	mgr, err := config.NewManager()
+	if err != nil {
+		return "detailed"
+	}
+	eff, err := mgr.Resolve()
+	if err != nil || !eff.Reporting.Level.Valid || !config.ValidReportingLevel(eff.Reporting.Level.Value) {
+		return "detailed"
+	}
+	return eff.Reporting.Level.Value
+}
+
+func renderStatusLevel(vm interface {
+	Line(render.RenderConfig) string
+	Standard(render.RenderConfig) string
+	Expanded(render.RenderConfig) string
+}, rc render.RenderConfig, level string) string {
+	switch level {
+	case "summary":
+		return vm.Line(rc)
+	case "standard":
+		return vm.Standard(rc)
+	default:
+		return vm.Expanded(rc)
+	}
 }
 
 // statusJSON emits a JSON representation of status to stdout.

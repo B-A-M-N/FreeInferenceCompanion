@@ -168,7 +168,7 @@ func maybeRequestDetachedRefresh(paths state.Paths, activation runtime.Activatio
 	if !activation.Active {
 		return
 	}
-	stale := background.StaleWorkers(paths, os.Getenv("FI_HEALTH_URL"))
+	stale := background.StaleWorkersWithClient(paths, os.Getenv("FI_HEALTH_URL"), string(activation.CredentialSource))
 	if len(stale) == 0 {
 		return
 	}

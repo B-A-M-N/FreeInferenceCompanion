@@ -11,7 +11,7 @@ func clearActivationEnv(t *testing.T) {
 	for _, env := range []string{
 		"FI_PROVIDER", "FI_DISABLED", "FI_UNSAFE_FORCE_ACTIVATION",
 		"FREEINFERENCE_BASE_URL", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL",
-		"FREEINFERENCE_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
+		"FREEINFERENCE_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
 		"FI_ALLOW_CUSTOM_API_ENDPOINT", "FI_ALLOW_INSECURE_LOCALHOST",
 	} {
 		t.Setenv(env, "")
@@ -200,6 +200,22 @@ func TestActivation_AnthropicRuntimeMatchesCredential_Active(t *testing.T) {
 	}
 	if a.RuntimeKind != RuntimeAnthropic {
 		t.Errorf("RuntimeKind = %q, want %q", a.RuntimeKind, RuntimeAnthropic)
+	}
+}
+
+func TestActivation_DocumentedClaudeCodeCredential_Active(t *testing.T) {
+	clearActivationEnv(t)
+	t.Setenv("ANTHROPIC_BASE_URL", "https://freeinference.org/anthropic")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "free-inference-test")
+	a := Evaluate()
+	if !a.Active {
+		t.Fatalf("expected documented Claude Code setup to activate, got %+v", a)
+	}
+	if a.CredentialSource != CredAnthropicAuthToken {
+		t.Errorf("CredentialSource = %q, want %q", a.CredentialSource, CredAnthropicAuthToken)
+	}
+	if got := a.ManagementBaseURL(); got != "https://freeinference.org/v1" {
+		t.Errorf("ManagementBaseURL = %q, want https://freeinference.org/v1", got)
 	}
 }
 

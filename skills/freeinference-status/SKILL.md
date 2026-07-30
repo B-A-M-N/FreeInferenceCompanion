@@ -1,7 +1,7 @@
 ---
 name: freeinference-status
 description: This skill is automatically triggered when the user asks about FreeInference session status, current metrics, token usage, or context consumption. Use when the user wants to see their current session's token counts, cache performance, model information, or context pressure level. Community-built and unofficial. Not affiliated with or endorsed by FreeInference.
-argument-hint: "[--compact]"
+argument-hint: "[--level summary|standard|detailed]"
 allowed-tools: Bash
 ---
 
@@ -22,7 +22,14 @@ Run `freeinference status` to show:
 ### Options
 
 - `--compact` — Single-line output suitable for embedding in prompts or scripts
+- `--level summary` — One-line, at-a-glance session state
+- `--level standard` — Essential provider, context, usage, pressure, and turn state
+- `--level detailed` — Standard view plus cache history, compaction, circuit, and account diagnostics
 - `--session <id>` — Show a specific session (default: current)
+
+When the user asks for “a quick check,” use `--level summary`; for “full
+details” or troubleshooting, use `--level detailed`. The persistent default
+can be changed with `freeinference config set reporting.level <level>`.
 
 ### Example output
 

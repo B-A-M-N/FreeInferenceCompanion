@@ -5,12 +5,10 @@ import (
 
 	"github.com/b-a-m-n/freeinference-companion/internal/adapters"
 	"github.com/b-a-m-n/freeinference-companion/internal/cli"
+	"github.com/b-a-m-n/freeinference-companion/pkg/version"
 )
 
-var (
-	version = "0.1.0"
-	commit  = "dev"
-)
+var commit = "dev"
 
 func main() {
 	// Allow complete disable via environment variable.
@@ -21,8 +19,8 @@ func main() {
 		os.Setenv("FI_RUNTIME_INACTIVE", "1")
 	}
 
-	cli.Version = version
+	cli.Version = version.Version
 	cli.Commit = commit
-	adapters.PluginVersion = version
+	adapters.PluginVersion = version.Version
 	os.Exit(cli.Run(os.Args, os.Stdin, os.Stdout, os.Stderr))
 }

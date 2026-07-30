@@ -20,11 +20,16 @@ Show current session status with context usage, pressure, and cache analysis.
 ```bash
 freeinference status --json
 freeinference status --client codex
+freeinference status --level standard --client codex
 ```
 
 Note: Codex does not expose live context metrics; values may report as `unknown`.
 
-Flags: `--client <type>`, `--compact`, `--session <id>`, `--json`
+Flags: `--client <type>`, `--compact`, `--level summary|standard|detailed`, `--session <id>`, `--json`
+
+Use `--level summary` for an at-a-glance check, `standard` for core session
+state, and `detailed` for cache/compaction/circuit/account diagnostics. To
+persist the preference, run `freeinference config set reporting.level <level>`.
 
 ### `freeinference sessions`
 
@@ -149,6 +154,7 @@ Subcommands: `show`, `set <key> <value>`, `reset [<key>]`, `path`
 **Cache and other:**
 | Key | Default | Effect |
 |-----|---------|--------|
+| `reporting.level` | `detailed` | Default interactive status detail: `summary`, `standard`, or `detailed`. |
 | `cache.warn_threshold` | 0.20 | Cache read share below this triggers low-cache warnings. |
 | `cache.recovered_threshold` | 0.40 | Cache read share above this resolves warnings. |
 | `cache.cooldown_mins` | 30 | Cooldown between cache warnings. |
@@ -181,15 +187,44 @@ Many commands accept `--json` for machine-readable JSON output and `--help` for 
 
 ## Environment Variables
 
-- `FREEINFERENCE_API_KEY` — API key
+- `FREEINFERENCE_API_KEY` — API credential for the OpenAI-compatible API
 - `FREEINFERENCE_BASE_URL` — API base URL (default: `https://freeinference.org/v1`)
 - `FI_HEALTH_URL` — Health monitoring URL (optional)
 - `FI_CACHE_DIR` — Cache directory (default: `~/.cache/freeinference-companion`)
 - `FI_SESSION_ID` — Explicit session override
-- `FI_PROVIDER` — Force provider (e.g., `freeinference`)
+- `FI_PROVIDER` — Attribution metadata only; it does not activate the companion
 - `FI_NO_BACKGROUND` — Disable background refresh
 - `FI_DISABLED` — Set to `1` to disable all companion features
 - `FI_ALLOW_INSECURE_LOCALHOST` — Allow `http://` loopback (development only)
+
+## Codex Runtime Setup and Model Switching
+
+Codex uses FreeInference's OpenAI-compatible Responses endpoint, not the
+Anthropic-compatible endpoint used by Claude Code. Keep the credential in the
+environment rather than in `config.toml`:
+
+```bash
+export FREEINFERENCE_API_KEY='Free_Inference_API'
+```
+
+Add this provider once to `~/.codex/config.toml`:
+
+```toml
+model_provider = "freeinference"
+
+[model_providers.freeinference]
+name = "FreeInference"
+base_url = "https://freeinference.org/v1"
+env_key = "FREEINFERENCE_API_KEY"
+wire_api = "responses"
+```
+
+Create a profile per model, for example `~/.codex/glm.config.toml` with
+`model = "glm-5.1"` and `~/.codex/coding.config.toml` with
+`model = "kimi-k2.7-code"`. Switch with `codex --profile glm` or
+`codex --profile coding`; use `codex --model <id>` for a one-off choice.
+Only create profiles for models returned by the `/v1/models` catalog—some
+models are endpoint-exclusive and belong in Claude Code's Anthropic setup.
 
 ## Known Differences from Claude Code
 

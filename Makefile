@@ -1,9 +1,12 @@
-.PHONY: build test test-race vet fmt-check plugin-syntax-check plugin-validate check release release-check checksums clean install lint tidy tidy-check mod-verify clean-tree-check security-scan smoke bench bench-ci run package package-smoke plugin-clean-install sbom provenance
+.PHONY: build test test-race vet fmt-check plugin-syntax-check plugin-validate check release release-check checksums marketplace clean install lint tidy tidy-check mod-verify clean-tree-check security-scan smoke bench bench-ci run package package-smoke plugin-clean-install sbom provenance
 
 BINARY=freeinference
 BUILD_DIR=build
 VERSION?=$(shell git describe --tags --always --dirty 2>/dev/null || echo "0.1.0-dev")
 COMMIT?=$(shell git rev-parse HEAD 2>/dev/null || echo "dev")
+# Release tags conventionally include a leading "v", while the CLI and
+# manifests expose canonical semantic versions without it.
+BUILD_VERSION=$(patsubst v%,%,$(VERSION))
 
 # Reproducible builds: set SOURCE_DATE_EPOCH from the latest commit
 # so archive timestamps are deterministic. Override via environment.
@@ -12,7 +15,7 @@ ifneq ($(SOURCE_DATE_EPOCH),)
 export SOURCE_DATE_EPOCH
 endif
 
-LDFLAGS=-ldflags "-s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT)"
+LDFLAGS=-ldflags "-s -w -X github.com/b-a-m-n/freeinference-companion/pkg/version.Version=$(BUILD_VERSION) -X main.commit=$(COMMIT)"
 STATIC_FLAGS=CGO_ENABLED=0
 RELEASE_DIR=release
 
@@ -74,9 +77,12 @@ checksums:
 # and a semantic-version tag (no "dirty" suffix) so every release artifact is
 # reproducible and traceable to a committed state.
 #
-# Source archives (tar.gz) have a single versioned top-level directory so
+# Standalone archives (tar.gz) have a single versioned top-level directory so
 # extraction never pollutes the cwd. Each archive contains freeinference, README, and
 # LICENSE under freeinference-companion-<version>-<plat>/.
+#
+# Installer archives (zip) contain the platform binary and both plugin trees in
+# the exact layout consumed by `freeinference install` / `update`.
 #
 # Plugin bundles (zip) preserve the vendor's expected layout:
 #   .claude-plugin/plugin.json, hooks/, scripts/, skills/, bin/<plat>/freeinference
@@ -111,6 +117,18 @@ package: build-all plugin-bin
 		echo "packaged $$archive"; \
 	done; \
 	\
+	for p in $(PLATFORMS); do \
+		bundle_dir="$$staging/installer-$$p"; \
+		mkdir -p "$$bundle_dir/plugins/claude-code/bin/$$p" "$$bundle_dir/plugins/codex/bin/$$p"; \
+		install -m 0755 $(BUILD_DIR)/$(BINARY)-$$p "$$bundle_dir/$(BINARY)"; \
+		cp -R plugins/claude-code/.claude-plugin plugins/claude-code/hooks plugins/claude-code/scripts plugins/claude-code/skills "$$bundle_dir/plugins/claude-code/"; \
+		cp -R plugins/codex/.codex-plugin plugins/codex/hooks plugins/codex/scripts plugins/codex/skills "$$bundle_dir/plugins/codex/"; \
+		install -m 0755 $(BUILD_DIR)/$(BINARY)-$$p "$$bundle_dir/plugins/claude-code/bin/$$p/$(BINARY)"; \
+		install -m 0755 $(BUILD_DIR)/$(BINARY)-$$p "$$bundle_dir/plugins/codex/bin/$$p/$(BINARY)"; \
+		(cd "$$bundle_dir" && zip -q -r "$(CURDIR)/$(RELEASE_DIR)/freeinference-companion-$$REL_VERSION-$$p.zip" .); \
+		echo "packaged installer archive for $$p"; \
+	done; \
+	\
 	stage_claude="$$staging/claude-code"; \
 	mkdir -p "$$stage_claude/.claude-plugin"; \
 	sed "s/\"version\": \".*\"/\"version\": \"$$REL_VERSION\"/" \
@@ -121,7 +139,7 @@ package: build-all plugin-bin
 		plugins/claude-code/skills \
 		plugins/claude-code/bin \
 		"$$stage_claude/"; \
-	(cd "$$stage_claude" && zip -q -r "$(CURDIR)/$(RELEASE_DIR)/freeinference-companion-claude_$(VERSION).zip" .) && \
+	(cd "$$stage_claude" && zip -q -r "$(CURDIR)/$(RELEASE_DIR)/freeinference-companion-claude_$$REL_VERSION.zip" .) && \
 	echo "packaged Claude plugin bundle"; \
 	\
 	stage_codex="$$staging/codex"; \
@@ -134,14 +152,45 @@ package: build-all plugin-bin
 		plugins/codex/skills \
 		plugins/codex/bin \
 		"$$stage_codex/"; \
-	(cd "$$stage_codex" && zip -q -r "$(CURDIR)/$(RELEASE_DIR)/freeinference-companion-codex_$(VERSION).zip" .) && \
+	(cd "$$stage_codex" && zip -q -r "$(CURDIR)/$(RELEASE_DIR)/freeinference-companion-codex_$$REL_VERSION.zip" .) && \
 	echo "packaged Codex plugin bundle"; \
 	\
 	cp LICENSE README.md $(RELEASE_DIR)/; \
 	$(MAKE) sbom RELEASE_DIR=$(RELEASE_DIR) VERSION=$(VERSION) STAGE_DIR="$$staging" && \
+	$(MAKE) marketplace RELEASE_DIR=$(RELEASE_DIR) VERSION=$(VERSION) && \
 	$(MAKE) provenance RELEASE_DIR=$(RELEASE_DIR) VERSION=$(VERSION) COMMIT=$(COMMIT) STAGE_DIR="$$staging" && \
 	$(MAKE) checksums RELEASE_DIR=$(RELEASE_DIR) && \
 	echo "packaging complete"
+
+# marketplace creates the manifest published with each release. Its checksums
+# are derived from the exact combined installer ZIPs created above, so the
+# default install/update path and the release assets cannot drift.
+marketplace:
+	@rel_version=$$(echo "$(VERSION)" | sed 's/^v//' | sed 's/-.*//'); \
+	out="$(RELEASE_DIR)/marketplace.json"; \
+	hash_file() { \
+		if command -v sha256sum >/dev/null 2>&1; then sha256sum "$$1" | awk '{print $$1}'; \
+		else shasum -a 256 "$$1" | awk '{print $$1}'; fi; \
+	}; \
+	{ \
+		echo '{'; \
+		printf '  "version": "%s",\n' "$$rel_version"; \
+		echo '  "platforms": {'; \
+		first=1; \
+		for p in $(PLATFORMS); do \
+			asset="freeinference-companion-$$rel_version-$$p.zip"; \
+			hash=$$(hash_file "$(RELEASE_DIR)/$$asset"); \
+			test -n "$$hash" || { echo "error: cannot hash $$asset" >&2; exit 1; }; \
+			if [ $$first -eq 0 ]; then echo ','; fi; \
+			printf '    "%s": {"url": "https://github.com/b-a-m-n/freeinference-companion/releases/download/v%s/%s", "sha256": "%s"}' "$$p" "$$rel_version" "$$asset" "$$hash"; \
+			first=0; \
+		done; \
+		echo; \
+		echo '  },'; \
+		printf '  "plugin_urls": {"claude-code": "https://github.com/b-a-m-n/freeinference-companion/releases/download/v%s/freeinference-companion-claude_%s.zip", "codex": "https://github.com/b-a-m-n/freeinference-companion/releases/download/v%s/freeinference-companion-codex_%s.zip"}\n' "$$rel_version" "$$rel_version" "$$rel_version" "$$rel_version"; \
+		echo '}'; \
+	} > "$$out"; \
+	python3 -c "import json; json.load(open('$$out')); print('marketplace manifest written to $$out')"
 
 # plugin-bin builds all platform binaries into each plugin's bin/ directory
 # so that the installed hook wrappers can find a working freeinference binary without
@@ -190,7 +239,17 @@ package-smoke:
 			echo "FAIL: $$p archive missing README.md or LICENSE"; exit 1; \
 		fi; \
 		echo "archive OK: $$p"; \
+		installer="$(RELEASE_DIR)/$$archive_name.zip"; \
+		test -f "$$installer" || { echo "FAIL: $$p installer archive missing: $$installer"; exit 1; }; \
+		idir="$$tmp/installer-$$p"; \
+		mkdir -p "$$idir"; \
+		unzip -q "$$installer" -d "$$idir"; \
+		test -x "$$idir/$(BINARY)" || { echo "FAIL: $$p installer missing executable"; exit 1; }; \
+		test -f "$$idir/plugins/claude-code/.claude-plugin/plugin.json" || { echo "FAIL: $$p installer missing Claude plugin"; exit 1; }; \
+		test -f "$$idir/plugins/codex/.codex-plugin/plugin.json" || { echo "FAIL: $$p installer missing Codex plugin"; exit 1; }; \
+		echo "installer archive OK: $$p"; \
 	done; \
+	python3 -c "import hashlib,json,pathlib; m=json.load(open('$(RELEASE_DIR)/marketplace.json')); assert set(m['platforms']) == set('$(PLATFORMS)'.split()); assert all(len(info['sha256']) == 64 and hashlib.sha256((pathlib.Path('$(RELEASE_DIR)') / pathlib.PurePosixPath(info['url']).name).read_bytes()).hexdigest() == info['sha256'] for info in m['platforms'].values())"; \
 	\
 	extract="$$tmp/extract-$$cur"; \
 	mkdir -p "$$extract"; \

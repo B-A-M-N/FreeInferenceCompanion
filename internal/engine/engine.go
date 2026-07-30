@@ -62,6 +62,14 @@ func initThresholds() {
 	t.CriticalLeave = eff.Context.CriticalLeave.Value
 
 	t.reserve = eff.Context.OutputReserve.Value
+	if err := (ThresholdConfig{
+		WatchEnter: t.WatchEnter, WarnEnter: t.WarnEnter, CriticalEnter: t.CriticalEnter,
+		WatchLeave: t.WatchLeave, WarnLeave: t.WarnLeave, CriticalLeave: t.CriticalLeave,
+		OutputReserve: t.reserve,
+	}).Validate(); err != nil {
+		thresholds = defaultThresholds()
+		return
+	}
 	thresholds = t
 }
 

@@ -781,6 +781,9 @@ func TestClaudeCodeHookCreatesSessionState(t *testing.T) {
 		"HOME="+tmpHome,
 		"FI_CACHE_DIR="+cacheDir,
 		"FI_DISABLED=",
+		// SessionStart normally launches detached refresh workers. Keep this
+		// behavioral test self-contained so a child cannot outlive TempDir cleanup.
+		"FI_NO_BACKGROUND=1",
 		"FREEINFERENCE_API_KEY=test-key-hyi",
 		"FREEINFERENCE_BASE_URL=https://freeinference.org/v1",
 		"PATH="+filepath.Dir(bin)+":/usr/bin:/bin",

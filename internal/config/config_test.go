@@ -183,6 +183,9 @@ func TestSetField(t *testing.T) {
 	if err := SetField(&cfg, "privacy.diagnostic_probes", "false"); err != nil {
 		t.Fatal(err)
 	}
+	if err := SetField(&cfg, "reporting.level", "standard"); err != nil {
+		t.Fatal(err)
+	}
 	if err := Save(&cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -195,6 +198,48 @@ func TestSetField(t *testing.T) {
 	}
 	if loaded.Privacy.DiagnosticProbes != false {
 		t.Errorf("diagnostic_probes should be false")
+	}
+	if loaded.Reporting.Level != "standard" {
+		t.Errorf("reporting level = %q, want standard", loaded.Reporting.Level)
+	}
+}
+
+func TestReportingLevelValidationAndEnvironmentOverride(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FI_CONFIG_DIR", dir)
+	t.Setenv("FI_REPORTING_LEVEL", "summary")
+	mgr, err := NewManager()
+	if err != nil {
+		t.Fatal(err)
+	}
+	eff, err := mgr.Resolve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eff.Reporting.Level.Value != "summary" || eff.Reporting.Level.Source != SourceEnv || !eff.Reporting.Level.Valid {
+		t.Errorf("reporting level = %#v, want valid environment summary", eff.Reporting.Level)
+	}
+
+	cfg := defaultConfig()
+	if err := SetField(&cfg, "reporting.level", "verbose"); err == nil {
+		t.Fatal("expected invalid reporting level to be rejected")
+	}
+	cfg.Reporting.Level = "verbose"
+	if err := Validate(&cfg); err == nil {
+		t.Fatal("expected invalid persisted reporting level to fail validation")
+	}
+}
+
+func TestValidateRejectsCrossFieldThresholds(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Context.WarnEnter = cfg.Context.WatchEnter
+	if err := Validate(&cfg); err == nil {
+		t.Fatal("expected invalid context threshold ordering")
+	}
+	cfg = defaultConfig()
+	cfg.Cache.WarnThreshold = cfg.Cache.RecoveredThreshold
+	if err := Validate(&cfg); err == nil {
+		t.Fatal("expected invalid cache threshold ordering")
 	}
 }
 

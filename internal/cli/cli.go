@@ -229,12 +229,12 @@ func printUsage(w io.Writer) {
 	fmt.Fprint(w, `FreeInference Companion v`+Version+`
 
 Usage:
-  freeinference status [--client <type>] [--compact] [--session <id>]
+  freeinference status [--client <type>] [--compact|--level summary|standard|detailed] [--session <id>]
     [--json] [--color auto|always|never] [--help]
   freeinference sessions [--include-identifiers] [--json] [--help]
   freeinference snapshot --json [--client <type>] [--session <id>]
     [--include-identifiers] [--color auto|always|never] [--help]
-  freeinference render --mode line|expanded [--client <type>] [--session <id>]
+  freeinference render --mode line|standard|expanded [--client <type>] [--session <id>]
     [--include-identifiers] [--color auto|always|never] [--help]
   freeinference models [--model <name>] [--refresh] [--help]
   freeinference doctor [--probe --model <name>] [--help]
@@ -254,12 +254,13 @@ Usage:
   freeinference hook <client> <event>
 
 Environment:
-  FREEINFERENCE_API_KEY    FreeInference API key
+  FREEINFERENCE_API_KEY    FreeInference API credential
   FREEINFERENCE_BASE_URL   API base URL (default: https://freeinference.org/v1)
+  ANTHROPIC_AUTH_TOKEN     Claude Code credential for the FreeInference Anthropic endpoint
   FI_HEALTH_URL            Health monitoring URL (optional)
   FI_CACHE_DIR             Cache directory (default: ~/.cache/freeinference-companion)
   FI_SESSION_ID            Explicit session override for status/context/report
-  FI_PROVIDER              Set to "freeinference" to force provider detection
+  FI_PROVIDER              Attribution metadata only; does not activate the companion
   FI_NO_BACKGROUND         Disable background refresh
   FI_DISABLED              Disable all companion features
   FI_ALLOW_INSECURE_LOCALHOST  Allow http:// loopback (development only)
@@ -271,13 +272,14 @@ Environment:
 
 // Command help text constants
 const (
-	helpStatus = `Usage: freeinference status [--client <type>] [--compact] [--session <id>] [--json] [--color auto|always|never] [--help]
+	helpStatus = `Usage: freeinference status [--client <type>] [--compact|--level summary|standard|detailed] [--session <id>] [--json] [--color auto|always|never] [--help]
 
 Show the current session status with context usage, pressure, and cache analysis.
 
 Flags:
   --client <type>    Client type: claude-code (default) or codex
   --compact          Output a single line suitable for status-line wrappers
+	  --level <level>    Reporting detail: summary, standard, or detailed (saved default when omitted)
   --session <id>     Explicit session ID (also via FI_SESSION_ID env var)
   --json             Output machine-readable JSON
   --color auto|always|never  Color output mode (default: auto)
@@ -314,12 +316,12 @@ Flags:
   --help                 Show this help message
 `
 
-	helpRender = `Usage: freeinference render --mode line|expanded [--client <type>] [--session <id>] [--include-identifiers] [--help]
+	helpRender = `Usage: freeinference render --mode line|standard|expanded [--client <type>] [--session <id>] [--include-identifiers] [--help]
 
 Render session status as human-readable output.
 
 Flags:
-  --mode line|expanded   Render mode: line (default) or expanded
+	  --mode line|standard|expanded   Render mode: line (default), standard, or detailed expanded
   --client <type>        Client type: claude-code (default) or codex
   --session <id>         Explicit session ID (also via FI_SESSION_ID env var)
   --include-identifiers  Show full session IDs (default: masked)

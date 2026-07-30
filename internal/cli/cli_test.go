@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/b-a-m-n/freeinference-companion/internal/render"
 	"github.com/b-a-m-n/freeinference-companion/internal/runtime"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
@@ -18,6 +19,16 @@ import (
 func testPaths(t *testing.T) state.Paths {
 	t.Helper()
 	return state.NewPathsWithDir(t.TempDir())
+}
+
+func TestRenderConfigHonorsSpacedColorFlag(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	if got := renderConfigWith([]string{"--color", "always"}).ColorMode; got != render.ColorAlways {
+		t.Errorf("--color always mode = %v, want ColorAlways", got)
+	}
+	if got := renderConfigWith([]string{"--color", "never"}).ColorMode; got != render.ColorNever {
+		t.Errorf("--color never mode = %v, want ColorNever", got)
+	}
 }
 
 func TestDoctorRunsAllChecksWithoutEarlyExit(t *testing.T) {
@@ -89,6 +100,26 @@ func TestDoctorFailsWhenEndpointDown(t *testing.T) {
 	}
 }
 
+func TestNewAPIClientUsesActiveRuntimeEndpointAndCredential(t *testing.T) {
+	t.Setenv("FREEINFERENCE_BASE_URL", "")
+	t.Setenv("FREEINFERENCE_API_KEY", "")
+	t.Setenv("OPENAI_BASE_URL", "")
+	t.Setenv("ANTHROPIC_BASE_URL", "https://freeinference.org/anthropic")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "free-inference-test")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+
+	client, err := newAPIClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := client.BaseURL(); got != "https://freeinference.org/v1" {
+		t.Errorf("base URL = %q", got)
+	}
+	if got := client.APIKey(); got != "free-inference-test" {
+		t.Errorf("API key was not sourced from active runtime credential")
+	}
+}
+
 func TestRefreshWorkerFlag(t *testing.T) {
 	var calls int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -144,6 +175,8 @@ func TestStrictFlagParsing(t *testing.T) {
 		{"missing client value", []string{"--client"}},
 		{"missing session value", []string{"--session"}},
 		{"missing format value", []string{"--format"}},
+		{"missing color value", []string{"--color"}},
+		{"unknown color value", []string{"--color", "purple"}},
 		{"unknown client", []string{"--client", "vim"}},
 		{"unexpected arg", []string{"extra-arg"}},
 	}

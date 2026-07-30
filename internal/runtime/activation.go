@@ -69,8 +69,11 @@ type CredentialSource string
 const (
 	CredNone                CredentialSource = ""
 	CredFreeInferenceAPIKey CredentialSource = "FREEINFERENCE_API_KEY"
-	CredAnthropicAPIKey     CredentialSource = "ANTHROPIC_API_KEY"
-	CredOpenAIAPIKey        CredentialSource = "OPENAI_API_KEY"
+	// CredAnthropicAuthToken is the credential documented by FreeInference for
+	// its Anthropic-compatible Claude Code endpoint.
+	CredAnthropicAuthToken CredentialSource = "ANTHROPIC_AUTH_TOKEN"
+	CredAnthropicAPIKey    CredentialSource = "ANTHROPIC_API_KEY"
+	CredOpenAIAPIKey       CredentialSource = "OPENAI_API_KEY"
 )
 
 // Activation is the authoritative activation result. Pass this object into
@@ -98,6 +101,11 @@ type Activation struct {
 	CredentialSource CredentialSource `json:"credential_source,omitempty"`
 	// Origin: the sanitized scheme://host of the active endpoint (empty if not valid).
 	Origin string `json:"origin,omitempty"`
+	// EndpointURL is the validated endpoint including its API path. It identifies
+	// the coding-agent runtime and never includes credentials, query parameters,
+	// or fragments. Management requests use ManagementBaseURL instead because
+	// FreeInference's Anthropic runtime path is distinct from its /v1 catalog API.
+	EndpointURL string `json:"endpoint_url,omitempty"`
 	// RuntimeKind: which runtime matched (anthropic/openai/freeinference).
 	RuntimeKind RuntimeKind `json:"runtime_kind,omitempty"`
 	// InactiveReason: machine code from ActivationReason.
@@ -205,6 +213,7 @@ func EvaluateWithModel(modelID string) Activation {
 		a.EndpointValid = fiCandidate.Identity != nil
 		if fiCandidate.Identity != nil {
 			a.Origin = fiCandidate.Identity.Origin
+			a.EndpointURL = fiCandidate.Identity.RequestURL
 			a.RuntimeKind = fiCandidate.RuntimeKind
 			a.EndpointSource = fiCandidate.Source
 		} else {
@@ -355,8 +364,9 @@ func selectFIEndpoint(cands []EndpointCandidate) (*EndpointCandidate, bool) {
 }
 
 // detectCredential finds the supported runtime credential for the active kind.
-// FREEINFERENCE_API_KEY is the canonical companion credential. ANTHROPIC_API_KEY
-// and OPENAI_API_KEY are accepted only when the active runtime kind matches.
+// FREEINFERENCE_API_KEY is the canonical companion credential. FreeInference's
+// documented Claude Code setup uses ANTHROPIC_AUTH_TOKEN; ANTHROPIC_API_KEY and
+// OPENAI_API_KEY are also accepted only when the active runtime kind matches.
 // This prevents a generic API key from being treated as FreeInference creds
 // unless the endpoint is already confirmed.
 func detectCredential(kind RuntimeKind) (CredentialSource, bool) {
@@ -365,6 +375,9 @@ func detectCredential(kind RuntimeKind) (CredentialSource, bool) {
 	}
 	switch kind {
 	case RuntimeAnthropic:
+		if k := os.Getenv("ANTHROPIC_AUTH_TOKEN"); k != "" {
+			return CredAnthropicAuthToken, true
+		}
 		if k := os.Getenv("ANTHROPIC_API_KEY"); k != "" {
 			return CredAnthropicAPIKey, true
 		}
@@ -374,6 +387,17 @@ func detectCredential(kind RuntimeKind) (CredentialSource, bool) {
 		}
 	}
 	return CredNone, false
+}
+
+// ManagementBaseURL returns the FreeInference OpenAI-compatible API base for
+// catalog, health, and account-management calls. Runtime endpoints are not
+// necessarily management endpoints: Claude Code uses /anthropic while the
+// provider catalog lives at /v1 on the same approved origin.
+func (a Activation) ManagementBaseURL() string {
+	if !a.Active || a.UnsafeForced || a.Origin == "" {
+		return ""
+	}
+	return a.Origin + "/v1"
 }
 
 // IsFreeInferenceHost reports whether host is one of the approved FreeInference
@@ -450,6 +474,8 @@ func (a Activation) rawCredential() string {
 	switch a.CredentialSource {
 	case CredFreeInferenceAPIKey:
 		return os.Getenv("FREEINFERENCE_API_KEY")
+	case CredAnthropicAuthToken:
+		return os.Getenv("ANTHROPIC_AUTH_TOKEN")
 	case CredAnthropicAPIKey:
 		return os.Getenv("ANTHROPIC_API_KEY")
 	case CredOpenAIAPIKey:

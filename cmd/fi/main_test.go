@@ -388,3 +388,97 @@ func TestStatusLineCompactFromStdin(t *testing.T) {
 		t.Errorf("compact status line = %q", stdout)
 	}
 }
+
+func TestStatusReportingLevelsAndPipedJSON(t *testing.T) {
+	dir := t.TempDir()
+	configDir := t.TempDir()
+	env := []string{
+		"FREEINFERENCE_BASE_URL=https://freeinference.org/v1",
+		"FREEINFERENCE_API_KEY=hyi-test-12345",
+		"FI_CONFIG_DIR=" + configDir,
+		"NO_COLOR=1",
+	}
+	payload := statusPayload("report-levels", 42, 84000)
+
+	summary, stderr, code := runFI(t, dir, payload, env, "status", "--level", "summary", "--client", "claude-code")
+	if code != 0 || stderr != "" {
+		t.Fatalf("summary exit=%d stderr=%q", code, stderr)
+	}
+	if !strings.HasPrefix(summary, "FI glm-5.1") || strings.Contains(summary, "\n• Provider") {
+		t.Errorf("summary must be one line, got %q", summary)
+	}
+
+	standard, _, code := runFI(t, dir, payload, env, "status", "--level", "standard", "--client", "claude-code")
+	if code != 0 {
+		t.Fatalf("standard exit=%d", code)
+	}
+	if !strings.Contains(standard, "Pressure") || strings.Contains(standard, "Cache Analysis") {
+		t.Errorf("standard output should have core metrics only, got:\n%s", standard)
+	}
+
+	detailed, _, code := runFI(t, dir, payload, env, "status", "--level", "detailed", "--client", "claude-code")
+	if code != 0 {
+		t.Fatalf("detailed exit=%d", code)
+	}
+	if !strings.Contains(detailed, "Cache Analysis") {
+		t.Errorf("detailed output should include diagnostics, got:\n%s", detailed)
+	}
+
+	jsonOut, _, code := runFI(t, dir, payload, env, "status", "--json", "--client", "claude-code")
+	if code != 0 {
+		t.Fatalf("piped json exit=%d", code)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(jsonOut), &parsed); err != nil {
+		t.Fatalf("piped status --json must emit JSON: %v\n%s", err, jsonOut)
+	}
+	if parsed["model"] != "glm-5.1" {
+		t.Errorf("piped status json model = %v", parsed["model"])
+	}
+
+	_, stderr, code = runFI(t, dir, "", env, "config", "set", "reporting.level", "summary")
+	if code != 0 || stderr != "" {
+		t.Fatalf("set reporting level exit=%d stderr=%q", code, stderr)
+	}
+	configured, _, code := runFI(t, dir, payload, env, "status", "--client", "claude-code")
+	if code != 0 || !strings.HasPrefix(configured, "FI glm-5.1") {
+		t.Errorf("configured summary output = %q (exit %d)", configured, code)
+	}
+}
+
+// TestReleaseVersionStamp verifies that release builds update the package-level
+// version used by both CLI output and installation/update comparisons. Tags use
+// a leading "v" externally, but the binary contract is canonical semver.
+func TestReleaseVersionStamp(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "freeinference")
+	build := exec.Command("go", "build", "-ldflags", "-X github.com/b-a-m-n/freeinference-companion/pkg/version.Version=2.3.4 -X main.commit=test", "-o", bin, ".")
+	build.Stderr = os.Stderr
+	if err := build.Run(); err != nil {
+		t.Fatalf("build stamped binary: %v", err)
+	}
+
+	cmd := exec.Command(bin, "version", "--json")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("run stamped binary: %v", err)
+	}
+	var got struct {
+		Version string `json:"version"`
+		Commit  string `json:"commit"`
+	}
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("parse stamped version output: %v", err)
+	}
+	if got.Version != "2.3.4" || got.Commit != "test" {
+		t.Errorf("stamped version = %+v, want version 2.3.4 and commit test", got)
+	}
+
+	help := exec.Command(bin, "help")
+	helpOut, err := help.Output()
+	if err != nil {
+		t.Fatalf("run stamped binary help: %v", err)
+	}
+	if !strings.HasPrefix(string(helpOut), "FreeInference Companion v2.3.4\n") {
+		t.Errorf("stamped help header = %q", strings.SplitN(string(helpOut), "\n", 2)[0])
+	}
+}

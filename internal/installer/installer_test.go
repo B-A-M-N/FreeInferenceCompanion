@@ -17,6 +17,7 @@ import (
 // and a mock platform ZIP file. The caller should call server.Close() when done.
 func testServer(t *testing.T, version string, platform PlatformKey) (manifestURL string, zipHash string, server *httptest.Server) {
 	t.Helper()
+	t.Setenv("FI_ALLOW_INSECURE_LOCALHOST", "1")
 
 	// Create a ZIP file with a mock binary and plugin directories.
 	zipData, zipHash := createTestZIP(t, version)
@@ -286,13 +287,14 @@ func TestFetchManifestInvalidURL(t *testing.T) {
 }
 
 func TestManifestPlatformNotFound(t *testing.T) {
+	t.Setenv("FI_ALLOW_INSECURE_LOCALHOST", "1")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"version": "v1.0.0",
 			"platforms": map[string]any{
 				"linux-amd64": map[string]string{
-					"url":    "http://example.com/zip",
-					"sha256": "abc123",
+					"url":    "https://example.com/zip",
+					"sha256": strings.Repeat("0", 64),
 				},
 			},
 		})
@@ -310,10 +312,31 @@ func TestManifestPlatformNotFound(t *testing.T) {
 }
 
 func TestDownloadToInvalidURL(t *testing.T) {
+	t.Setenv("FI_ALLOW_INSECURE_LOCALHOST", "1")
 	_, err := DownloadTo("http://127.0.0.1:1/nonexistent", "/tmp/test.zip")
 	// Should return an error (connection refused or similar).
 	if err == nil {
 		t.Error("expected error for unreachable URL")
+	}
+}
+
+func TestInstallerRemoteURLsRequireHTTPS(t *testing.T) {
+	if _, err := FetchManifest("http://example.com/marketplace.json"); err == nil {
+		t.Fatal("expected HTTP manifest URL to be rejected")
+	}
+	if _, err := DownloadTo("file:///tmp/archive.zip", filepath.Join(t.TempDir(), "archive.zip")); err == nil {
+		t.Fatal("expected non-HTTP(S) download URL to be rejected")
+	}
+}
+
+func TestFetchManifestRejectsMalformedReleaseMetadata(t *testing.T) {
+	t.Setenv("FI_ALLOW_INSECURE_LOCALHOST", "1")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"version":"not-a-version","platforms":{"linux-amd64":{"url":"http://127.0.0.1/release.zip","sha256":"not-a-sha"}}}`))
+	}))
+	defer server.Close()
+	if _, err := FetchManifest(server.URL); err == nil {
+		t.Fatal("expected malformed manifest to be rejected")
 	}
 }
 

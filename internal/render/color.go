@@ -749,6 +749,18 @@ func (vm *ViewModel) Line(config RenderConfig) string {
 	return strings.Join(parts, sep)
 }
 
+// Standard renders the essential session panel: provider, health, context,
+// latest-request usage, pressure, turn state, and last failure. Detailed
+// rendering additionally includes historical cache, compaction, circuit, and
+// account sections. Both forms obey the same eligibility gate.
+func (vm *ViewModel) Standard(config RenderConfig) string {
+	out := vm.Expanded(config)
+	if split := strings.Index(out, "\n\n"); split >= 0 {
+		return out[:split]
+	}
+	return out
+}
+
 // Expanded renders the multi-line panel form with colors.
 func (vm *ViewModel) Expanded(config RenderConfig) string {
 	if !vm.Eligible {

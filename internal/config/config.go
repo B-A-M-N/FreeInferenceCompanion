@@ -31,12 +31,13 @@ type EffectiveValue[T any] struct {
 const SchemaVersion = 1
 
 type Config struct {
-	SchemaVersion int            `json:"schema_version"`
-	Context       ContextConfig  `json:"context"`
-	Cache         CacheConfig    `json:"cache"`
-	Refresh       RefreshConfig  `json:"refresh"`
-	Provider      ProviderConfig `json:"provider"`
-	Privacy       PrivacyConfig  `json:"privacy"`
+	SchemaVersion int             `json:"schema_version"`
+	Context       ContextConfig   `json:"context"`
+	Cache         CacheConfig     `json:"cache"`
+	Refresh       RefreshConfig   `json:"refresh"`
+	Reporting     ReportingConfig `json:"reporting"`
+	Provider      ProviderConfig  `json:"provider"`
+	Privacy       PrivacyConfig   `json:"privacy"`
 }
 
 type ContextConfig struct {
@@ -58,6 +59,12 @@ type CacheConfig struct {
 type RefreshConfig struct {
 	IntervalMins int `json:"interval_mins"`
 	StaleMins    int `json:"stale_mins"`
+}
+
+// ReportingConfig controls the default detail shown by interactive status
+// commands. Explicit command-line flags always take precedence.
+type ReportingConfig struct {
+	Level string `json:"level"`
 }
 
 type ProviderConfig struct {
@@ -89,6 +96,8 @@ func defaultConfig() Config {
 			IntervalMins: 5,
 			StaleMins:    15,
 		},
+		// Preserve the pre-reporting-level status output by default.
+		Reporting: ReportingConfig{Level: "detailed"},
 		Provider: ProviderConfig{
 			AllowInsecureLocalhost: false,
 		},
@@ -116,6 +125,9 @@ type EffectiveConfig struct {
 	Refresh struct {
 		IntervalMins EffectiveValue[int]
 		StaleMins    EffectiveValue[int]
+	}
+	Reporting struct {
+		Level EffectiveValue[string]
 	}
 	Provider struct {
 		AllowInsecureLocalhost EffectiveValue[bool]
@@ -162,6 +174,25 @@ func envBool(key string, def bool) (bool, bool, error) {
 		return false, true, nil
 	default:
 		return def, true, fmt.Errorf("invalid bool %q for %s", v, key)
+	}
+}
+
+func envString(key string, def string) (string, bool, error) {
+	v, ok := os.LookupEnv(key)
+	if !ok || strings.TrimSpace(v) == "" {
+		return def, false, nil
+	}
+	return strings.ToLower(strings.TrimSpace(v)), true, nil
+}
+
+// ValidReportingLevel reports whether level is a supported human-readable
+// reporting detail level.
+func ValidReportingLevel(level string) bool {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "summary", "standard", "detailed":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -346,6 +377,12 @@ func SetField(cfg *Config, key, value string) error {
 			return err
 		}
 		cfg.Refresh.IntervalMins = v
+	case "reporting.level":
+		level := strings.ToLower(strings.TrimSpace(value))
+		if !ValidReportingLevel(level) {
+			return fmt.Errorf("invalid reporting level %q (use summary, standard, or detailed)", value)
+		}
+		cfg.Reporting.Level = level
 	case "privacy.diagnostic_probes":
 		v, err := parseBool()
 		if err != nil {
@@ -366,6 +403,38 @@ func SetField(cfg *Config, key, value string) error {
 		cfg.Provider.AllowInsecureLocalhost = v
 	default:
 		return fmt.Errorf("unknown config key: %s", key)
+	}
+	return nil
+}
+
+// Validate checks cross-field invariants before a configuration is persisted
+// or consumed by the warning state machines.
+func Validate(cfg *Config) error {
+	c := cfg.Context
+	values := map[string]float64{"watch_enter": c.WatchEnter, "warn_enter": c.WarnEnter, "critical_enter": c.CriticalEnter, "watch_leave": c.WatchLeave, "warn_leave": c.WarnLeave, "critical_leave": c.CriticalLeave}
+	for name, value := range values {
+		if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || value > 100 {
+			return fmt.Errorf("context.%s must be finite and in [0,100]", name)
+		}
+	}
+	if !(c.WatchEnter < c.WarnEnter && c.WarnEnter < c.CriticalEnter) || !(c.WatchLeave < c.WarnLeave && c.WarnLeave < c.CriticalLeave) {
+		return fmt.Errorf("context thresholds must be ordered watch < warn < critical")
+	}
+	if c.WatchEnter-c.WatchLeave < 3 || c.WarnEnter-c.WarnLeave < 3 || c.CriticalEnter-c.CriticalLeave < 3 {
+		return fmt.Errorf("context enter thresholds must exceed matching leave thresholds by at least 3")
+	}
+	if c.OutputReserve <= 0 || c.OutputReserve > 1_000_000 {
+		return fmt.Errorf("context.output_reserve must be in [1,1000000]")
+	}
+	cache := cfg.Cache
+	if math.IsNaN(cache.WarnThreshold) || math.IsNaN(cache.RecoveredThreshold) || cache.WarnThreshold < 0 || cache.RecoveredThreshold > 1 || cache.WarnThreshold >= cache.RecoveredThreshold {
+		return fmt.Errorf("cache thresholds must satisfy 0 <= warn_threshold < recovered_threshold <= 1")
+	}
+	if cache.CooldownMins <= 0 || cfg.Refresh.IntervalMins <= 0 || cfg.Refresh.StaleMins <= 0 {
+		return fmt.Errorf("cache cooldown and refresh intervals must be positive")
+	}
+	if !ValidReportingLevel(cfg.Reporting.Level) {
+		return fmt.Errorf("reporting.level must be summary, standard, or detailed")
 	}
 	return nil
 }
@@ -495,6 +564,12 @@ func (m *Manager) Resolve() (*EffectiveConfig, error) {
 		}
 		return nil
 	})
+	eff.Reporting.Level = resolveString("FI_REPORTING_LEVEL", cfg.Reporting.Level, resolveSrc, envString, func(v string) error {
+		if !ValidReportingLevel(v) {
+			return fmt.Errorf("must be summary, standard, or detailed, got %q", v)
+		}
+		return nil
+	})
 	eff.Privacy.DiagnosticProbes = resolveBool("FI_DIAGNOSTIC_PROBES", cfg.Privacy.DiagnosticProbes, cfgLoaded, resolveSrc, envBool, nil)
 	eff.Provider.AllowInsecureLocalhost = resolveBool("FI_ALLOW_INSECURE_LOCALHOST", cfg.Provider.AllowInsecureLocalhost, cfgLoaded, resolveSrc, envBool, nil)
 
@@ -559,4 +634,21 @@ func resolveBool(envKey string, fileVal bool, cfgLoaded bool, resolveSrc func() 
 		return EffectiveValue[bool]{Value: envVal, Source: SourceEnv, RawValue: os.Getenv(envKey), Valid: true}
 	}
 	return EffectiveValue[bool]{Value: fileVal, Source: resolveSrc(), Valid: true}
+}
+
+func resolveString(envKey, fileVal string, resolveSrc func() ValueSource, readEnv func(string, string) (string, bool, error), validate func(string) error) EffectiveValue[string] {
+	envVal, envSet, err := readEnv(envKey, fileVal)
+	if err != nil {
+		return EffectiveValue[string]{Value: fileVal, Source: resolveSrc(), RawValue: os.Getenv(envKey), Valid: false, Error: fmt.Sprintf("%s=%q is invalid: %v", envKey, os.Getenv(envKey), err)}
+	}
+	if envSet {
+		if validate != nil {
+			if verr := validate(envVal); verr != nil {
+				return EffectiveValue[string]{Value: fileVal, Source: resolveSrc(), RawValue: os.Getenv(envKey), Valid: false, Error: fmt.Sprintf("%s=%q is invalid: %v", envKey, os.Getenv(envKey), verr)}
+			}
+		}
+		return EffectiveValue[string]{Value: envVal, Source: SourceEnv, RawValue: os.Getenv(envKey), Valid: true}
+	}
+	valid := validate == nil || validate(fileVal) == nil
+	return EffectiveValue[string]{Value: fileVal, Source: resolveSrc(), Valid: valid}
 }

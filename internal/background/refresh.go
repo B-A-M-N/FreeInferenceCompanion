@@ -170,6 +170,7 @@ func (r *Refresher) RefreshIfStale() *RefreshResult {
 		!breakerOpen(gs, WorkerAccountUsage, now) {
 		if accountUsageStale(gs, now) {
 			res := r.WorkerRefresh(WorkerAccountUsage)
+			result.AccountUsageRefreshed = res.AccountUsageRefreshed
 			if res.Error != "" && result.Error == "" {
 				result.Error = res.Error
 			}

@@ -11,6 +11,19 @@ Generate a sanitized support report for FreeInference maintainers. Community-bui
 
 ## Usage
 
+For interactive status before creating a support report, choose the reporting
+level that matches the request:
+
+```bash
+freeinference status --level summary
+freeinference status --level standard
+freeinference status --level detailed
+```
+
+The saved default is controlled by `freeinference config set reporting.level
+summary|standard|detailed`. Use `report --format json` when the user needs a
+sanitized shareable artifact rather than an interactive view.
+
 Run `freeinference report --session <id>` to generate a report with:
 - Plugin version
 - Client type and session ID

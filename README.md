@@ -80,10 +80,10 @@ surfaces the user already has:
 
 | Command | Description |
 |---------|-------------|
-| `freeinference status [--compact] [--client <type>] [--session <id>]` | Show session metrics (resolves the current session automatically) |
+| `freeinference status [--compact\|--level summary\|standard\|detailed] [--client <type>] [--session <id>]` | Show session metrics at the requested detail (resolves the current session automatically) |
 | `freeinference sessions` | List known sessions from the local index |
 | `freeinference snapshot --json [--session <id>]` | Machine-readable normalized view model |
-| `freeinference render --mode line\|expanded [--session <id>]` | Stable line/expanded render for panels |
+| `freeinference render --mode line\|standard\|expanded [--session <id>]` | Stable summary, standard, or detailed render for panels |
 | `freeinference models [--model <name>] [--refresh]` | List FreeInference models |
 | `freeinference doctor [--probe --model <name>]` | Diagnose connectivity and configuration |
 | `freeinference report [--client <type>] [--session <id>] [--format markdown\|json]` | Generate a sanitized support report (includes budget projection) |
@@ -98,17 +98,56 @@ surfaces the user already has:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `FREEINFERENCE_API_KEY` | — | FreeInference API key (starts with `hyi-`) |
+| `FREEINFERENCE_API_KEY` | — | FreeInference API credential |
 | `FREEINFERENCE_BASE_URL` | `https://freeinference.org/v1` | API base URL |
+| `ANTHROPIC_AUTH_TOKEN` | — | FreeInference key for Claude Code's Anthropic-compatible endpoint |
 | `FI_HEALTH_URL` | — | Provider health monitoring URL (optional) |
 | `FI_CACHE_DIR` | `~/.cache/freeinference-companion` | State cache directory |
 | `FI_SESSION_ID` | — | Explicit session override for status/context/report |
 | `FI_PROVIDER` | — | Set to `freeinference` for attribution metadata only. Does NOT activate the companion. Activation requires a supported endpoint and credential. |
 | `FI_NO_BACKGROUND` | — | Set to `1` to disable detached background refresh |
 
-Provider detection order: `FI_PROVIDER` → `FREEINFERENCE_BASE_URL` →
-`ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` pointing at a FreeInference host →
-`FREEINFERENCE_API_KEY` with no conflicting provider configuration.
+The companion activates only when an approved FreeInference runtime endpoint
+and its matching credential are both present. It recognizes the documented
+Claude Code pair `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`, as well as
+the FreeInference and OpenAI-compatible environment-variable pairs.
+
+## Configure Claude Code and Codex
+
+FreeInference has two API shapes. Configure the client for the shape it
+actually speaks; do not point Codex at the Anthropic path or Claude Code at
+the OpenAI-compatible path.
+
+| Client | Runtime endpoint | Credential | Protocol |
+|---|---|---|---|
+| Claude Code | `https://freeinference.org/anthropic` | `ANTHROPIC_AUTH_TOKEN` | Anthropic-compatible |
+| Codex | `https://freeinference.org/v1` | `FREEINFERENCE_API_KEY` | OpenAI Responses |
+
+### Claude Code
+
+Add the following to `~/.claude/settings.json`, replacing only the key value:
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://freeinference.org/anthropic",
+    "ANTHROPIC_AUTH_TOKEN": "Free_Inference_API",
+    "ANTHROPIC_MODEL": "glm-5.1",
+    "ANTHROPIC_SMALL_FAST_MODEL": "glm-5-turbo",
+    "API_TIMEOUT_MS": "600000"
+  }
+}
+```
+
+FreeInference's public Anthropic catalog does not include Claude Code's
+built-in Anthropic defaults, so set both model variables to public model IDs.
+Choose model IDs from the Anthropic route's catalog; availability can differ
+from the OpenAI-compatible route.
+
+### Codex
+
+The Codex provider setup, model profiles, model-catalog rules, and companion
+plugin behavior are documented separately in [Codex with FreeInference](docs/codex.md).
 
 ## State model
 
@@ -189,6 +228,22 @@ The shield icon `🛡` color tracks context usage: white when empty, orange
 when getting high (60%+), red when critical (85%+). Unknown telemetry
 renders as `—` (em dash), never fabricated as `0%`.
 
+### Reporting levels
+
+Ask the coding agent for a quick, normal, or detailed FreeInference check, or
+use the matching CLI level directly:
+
+```bash
+freeinference status --level summary   # one line for an at-a-glance check
+freeinference status --level standard  # current session essentials
+freeinference status --level detailed  # essentials plus history and account diagnostics
+```
+
+Set the preferred default once with `freeinference config set reporting.level
+standard`; `FI_REPORTING_LEVEL` can override it for a single shell or host.
+`--compact` remains reserved for status-line integrations, and `--json`
+remains the stable machine-readable contract.
+
 ### Sanitized event log
 
 Each session has a bounded `events.jsonl` recording only lifecycle event
@@ -198,27 +253,6 @@ types (`session_started`, `status_observed`, `prompt_submitted`,
 details. Rotation kicks in past 256 KiB or 1,000 events per session.
 Sessions older than 30 days are cleaned up opportunistically by
 `CleanupStaleSessions`.
-
-## Codex integration
-
-The Codex plugin bundles skills and lifecycle hooks using Codex's native
-plugin layout: `.codex-plugin/plugin.json` (manifest), `skills/`, and
-`hooks/hooks.json`. Codex 0.145+ supports plugin-local hooks subject to
-user trust — after installing the plugin, Codex prompts the user to review
-and approve the hooks before they execute.
-
-The hook events supported are: `SessionStart`, `SessionEnd`,
-`UserPromptSubmit`, `PreCompact`, `PostCompact`, and `Stop`. These update
-the companion's session state (turn tracking, compaction detection, event
-log) but produce no cache/context telemetry because Codex does not expose
-token counts in hook payloads.
-
-After installing the plugin in Codex, the following skills are available:
-`$freeinference-status`, `$freeinference-models`, `$freeinference-doctor`, `$freeinference-report`, `$freeinference-dashboard`,
-`$freeinference-cache`. These work regardless of hook trust state.
-
-Codex exposes no live token telemetry, so context and cache metrics stay
-`unknown` for Codex sessions — they are never fabricated.
 
 ## Development
 
@@ -239,6 +273,7 @@ make smoke      # Quick smoke test
 ```
 FreeInference/
 ├── cmd/fi/                    # Thin entry point (+ binary integration tests)
+├── docs/codex.md              # Codex provider, profiles, and companion guide
 ├── internal/
 │   ├── cli/                   # Command implementations (exit codes, no os.Exit)
 │   ├── state/                 # Snapshots, global cache, locks, session index

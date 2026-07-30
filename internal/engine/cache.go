@@ -93,6 +93,10 @@ func initCacheConfig() {
 	if eff.Cache.CooldownMins.Valid && eff.Cache.CooldownMins.Value > 0 {
 		c.warningCooldown = time.Duration(eff.Cache.CooldownMins.Value) * time.Minute
 	}
+	if c.lowThreshold < 0 || c.recoveredThreshold > 1 || c.lowThreshold >= c.recoveredThreshold {
+		c.lowThreshold = CacheReadLowThreshold
+		c.recoveredThreshold = CacheReadRecoveredThreshold
+	}
 	cacheConf = c
 }
 

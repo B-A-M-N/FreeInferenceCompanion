@@ -61,14 +61,11 @@ func cmdRefresh(paths state.Paths, args []string, stdout, stderr io.Writer) int 
 	if ifStale {
 		modeCount++
 	}
-	if detach {
-		modeCount++
-	}
 	if worker != "" {
 		modeCount++
 	}
-	if modeCount > 1 {
-		fmt.Fprintln(stderr, "usage error: --force, --if-stale, --detach, and --worker are mutually exclusive")
+	if modeCount > 1 || (detach && (force || worker != "")) {
+		fmt.Fprintln(stderr, "usage error: --force and --worker cannot be combined with --if-stale or --detach")
 		return 2
 	}
 
@@ -97,6 +94,9 @@ func cmdRefresh(paths state.Paths, args []string, stdout, stderr io.Writer) int 
 		if result.HealthRefreshed {
 			fmt.Fprintln(stdout, "Health refreshed.")
 		}
+		if result.AccountUsageRefreshed {
+			fmt.Fprintln(stdout, "Account usage refreshed.")
+		}
 		if result.Error != "" {
 			fmt.Fprintf(stderr, "refresh error: %s\n", result.Error)
 			return 1
@@ -106,7 +106,7 @@ func cmdRefresh(paths state.Paths, args []string, stdout, stderr io.Writer) int 
 
 	// Detached mode: spawn workers and return immediately.
 	if detach {
-		stale := background.StaleWorkers(paths, os.Getenv("FI_HEALTH_URL"))
+		stale := background.StaleWorkersWithClient(paths, os.Getenv("FI_HEALTH_URL"), client.APIKey())
 		if !ifStale {
 			stale = []string{background.WorkerModels}
 			if os.Getenv("FI_HEALTH_URL") != "" {
@@ -143,8 +143,9 @@ func cmdRefresh(paths state.Paths, args []string, stdout, stderr io.Writer) int 
 
 	if jsonOut {
 		r := map[string]any{
-			"models_refreshed": result.ModelsRefreshed,
-			"health_refreshed": result.HealthRefreshed,
+			"models_refreshed":        result.ModelsRefreshed,
+			"health_refreshed":        result.HealthRefreshed,
+			"account_usage_refreshed": result.AccountUsageRefreshed,
 		}
 		if result.Error != "" {
 			r["error"] = result.Error
@@ -162,6 +163,9 @@ func cmdRefresh(paths state.Paths, args []string, stdout, stderr io.Writer) int 
 	}
 	if result.HealthRefreshed {
 		fmt.Fprintln(stdout, "Health refreshed.")
+	}
+	if result.AccountUsageRefreshed {
+		fmt.Fprintln(stdout, "Account usage refreshed.")
 	}
 	if result.Error != "" {
 		fmt.Fprintf(stderr, "Warning: %s\n", result.Error)

@@ -183,11 +183,15 @@ func printSnapshot(stdout, stderr io.Writer, snap *schema.Snapshot, gs *schema.G
 	return 0
 }
 
-// cmdRender implements `freeinference render --mode line|expanded`.
+// cmdRender implements `freeinference render --mode line|standard|expanded`.
 func cmdRender(paths state.Paths, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	mode := ""
 	// Extract --color flag.
-	_, remainingArgs := parseColorFlag(args)
+	_, remainingArgs, colorErr := parseColorFlag(args)
+	if colorErr != nil {
+		fmt.Fprintf(stderr, "usage error: %v\n", colorErr)
+		return 2
+	}
 	// Build a filtered args list for parseClientSessionFlags: skip --mode and its
 	// value so the flag parser doesn't choke on the positional-looking mode token.
 	var parseArgs []string
@@ -212,8 +216,8 @@ func cmdRender(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 	if mode == "" {
 		mode = "line"
 	}
-	if mode != "line" && mode != "expanded" {
-		fmt.Fprintf(stderr, "unknown render mode: %s (want line|expanded)\n", mode)
+	if mode != "line" && mode != "standard" && mode != "expanded" {
+		fmt.Fprintf(stderr, "unknown render mode: %s (want line|standard|expanded)\n", mode)
 		return 2
 	}
 
@@ -256,9 +260,12 @@ func printRendered(stdout, stderr io.Writer, snap *schema.Snapshot, gs *schema.G
 	// Note: For render, we use the activation ID (aid) to gate visibility via SurfaceEligibility.
 	vm := buildView(snap, gs, aid, true, snap.Client.Type, snap.Session.ID)
 	rc := renderConfig()
-	if mode == "expanded" {
+	switch mode {
+	case "expanded":
 		fmt.Fprintln(stdout, vm.Expanded(rc))
-	} else {
+	case "standard":
+		fmt.Fprintln(stdout, vm.Standard(rc))
+	default:
 		line := vm.Line(rc)
 		if line != "" {
 			fmt.Fprintln(stdout, line)

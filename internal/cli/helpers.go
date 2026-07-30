@@ -11,6 +11,7 @@ import (
 	"github.com/b-a-m-n/freeinference-companion/internal/api"
 	"github.com/b-a-m-n/freeinference-companion/internal/engine"
 	"github.com/b-a-m-n/freeinference-companion/internal/render"
+	"github.com/b-a-m-n/freeinference-companion/internal/runtime"
 	"github.com/b-a-m-n/freeinference-companion/internal/secure"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
@@ -33,9 +34,27 @@ func newAPIClient() (*api.Client, error) {
 		baseURL = customCfg.EndpointIdentity.RequestURL
 		apiKey = customCfg.APIKey
 	} else {
+		activation := runtime.Evaluate()
+		if activation.Active {
+			baseURL = activation.ManagementBaseURL()
+			switch activation.CredentialSource {
+			case runtime.CredFreeInferenceAPIKey:
+				apiKey = os.Getenv("FREEINFERENCE_API_KEY")
+			case runtime.CredAnthropicAuthToken:
+				apiKey = os.Getenv("ANTHROPIC_AUTH_TOKEN")
+			case runtime.CredAnthropicAPIKey:
+				apiKey = os.Getenv("ANTHROPIC_API_KEY")
+			case runtime.CredOpenAIAPIKey:
+				apiKey = os.Getenv("OPENAI_API_KEY")
+			}
+		}
 		// Use standard FreeInference environment variables
-		baseURL = os.Getenv("FREEINFERENCE_BASE_URL")
-		apiKey = os.Getenv("FREEINFERENCE_API_KEY")
+		if baseURL == "" {
+			baseURL = os.Getenv("FREEINFERENCE_BASE_URL")
+		}
+		if apiKey == "" {
+			apiKey = os.Getenv("FREEINFERENCE_API_KEY")
+		}
 		if baseURL == "" {
 			baseURL = api.DefaultBaseURL
 		}
@@ -203,28 +222,17 @@ func buildView(snap *schema.Snapshot, gs *schema.GlobalState, currentActivationI
 // terminal.  --color always/never override detection.
 func renderConfigWith(args []string) render.RenderConfig {
 	cfg := render.DefaultRenderConfig()
-
-	// Parse --color flag from command arguments.
-	for _, a := range args {
-		switch a {
-		case "--color":
-			// --color needs a value from the next arg; fall through if missing.
-		case "--color=auto", "--color=always", "--color=never":
-			if eq := strings.SplitN(a, "=", 2); len(eq) == 2 {
-				cfg.ColorMode = render.ParseColorFlag(eq[1])
-			}
-		default:
-			if strings.HasPrefix(a, "--color") {
-				cfg.ColorMode = render.ParseColorFlag(strings.TrimPrefix(a, "--color="))
-			}
-		}
-		// Handle --color auto / --color always / --color never (space-separated).
-		// This is done by callers before passing args; here we catch the case
-		// where the whole flag value was already resolved.
+	// parseColorFlag handles both `--color=value` and `--color value`, and
+	// resolves NO_COLOR/FORCE_COLOR only when the user did not choose a mode.
+	// Keeping that logic in one place prevents spaced color flags from being
+	// silently ignored by status and render commands.
+	mode, _, err := parseColorFlag(args)
+	if err != nil {
+		// Command handlers validate flags before rendering. Keep this helper
+		// fail-safe for direct/internal callers by falling back to auto mode.
+		mode = render.ApplyEnv(render.ColorAuto)
 	}
-
-	// If no explicit flag was set, fall back to env/terminal detection.
-	cfg.ColorMode = render.ApplyEnv(cfg.ColorMode)
+	cfg.ColorMode = mode
 	return cfg
 }
 
@@ -235,29 +243,37 @@ func renderConfig() render.RenderConfig {
 
 // parseColorFlag extracts a --color flag from args, returning the resolved
 // ColorMode and the remaining args (with --color and its value removed).
-func parseColorFlag(args []string) (render.ColorMode, []string) {
+// It rejects missing or unknown values rather than silently changing a
+// user's requested output contract.
+func parseColorFlag(args []string) (render.ColorMode, []string, error) {
 	var remaining []string
 	mode := render.ColorAuto
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if a == "--color" {
 			if i+1 >= len(args) {
-				// Missing value — treat as unknown, fall back to auto.
-				mode = render.ColorAuto
-				continue
+				return render.ColorAuto, nil, fmt.Errorf("--color requires a value (auto, always, or never)")
 			}
-			mode = render.ParseColorFlag(args[i+1])
+			value := strings.ToLower(strings.TrimSpace(args[i+1]))
+			if value != "auto" && value != "always" && value != "never" {
+				return render.ColorAuto, nil, fmt.Errorf("unknown color mode %q (want auto, always, or never)", args[i+1])
+			}
+			mode = render.ParseColorFlag(value)
 			i++ // skip value
 			continue
 		}
 		if strings.HasPrefix(a, "--color=") {
-			mode = render.ParseColorFlag(strings.TrimPrefix(a, "--color="))
+			value := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(a, "--color=")))
+			if value != "auto" && value != "always" && value != "never" {
+				return render.ColorAuto, nil, fmt.Errorf("unknown color mode %q (want auto, always, or never)", strings.TrimPrefix(a, "--color="))
+			}
+			mode = render.ParseColorFlag(value)
 			continue
 		}
 		remaining = append(remaining, a)
 	}
 	mode = render.ApplyEnv(mode)
-	return mode, remaining
+	return mode, remaining, nil
 }
 
 // formatTokenCount renders a token count compactly.

@@ -118,6 +118,31 @@ func TestExpandedRender(t *testing.T) {
 	}
 }
 
+func TestStandardRenderOmitsHistoricalDiagnosticSections(t *testing.T) {
+	before, after := int64(180000), int64(120000)
+	snap := fixtureSnapshot(true)
+	snap.Compaction.LastResult = &schema.CompactionResult{At: time.Now(), PreTokens: &before, PostTokens: &after}
+	snap.CacheAnalysis.CacheCreationShare = f64p(0.03)
+	snap.CacheAnalysis.FreshInputShare = f64p(0.04)
+	vm := BuildViewModel("0.1.0", snap, &schema.GlobalState{}, "", time.Now(), true, "", "")
+	rc := DefaultRenderConfig()
+	rc.ColorMode = ColorNever
+
+	standard := vm.Standard(rc)
+	if !strings.Contains(standard, "Pressure  WARN") {
+		t.Fatalf("standard render missing core pressure:\n%s", standard)
+	}
+	for _, forbidden := range []string{"Cache Analysis", "Last Compaction", "Circuit Breakers", "Account Usage"} {
+		if strings.Contains(standard, forbidden) {
+			t.Errorf("standard render must omit %q:\n%s", forbidden, standard)
+		}
+	}
+	detailed := vm.Expanded(rc)
+	if !strings.Contains(detailed, "Cache Analysis") || !strings.Contains(detailed, "Last Compaction") {
+		t.Errorf("detailed render missing diagnostics:\n%s", detailed)
+	}
+}
+
 func TestJSONRoundTrip(t *testing.T) {
 	vm := BuildViewModel("0.1.0", fixtureSnapshot(true), nil, "", time.Now(), true, "", "")
 	data, err := vm.JSON()

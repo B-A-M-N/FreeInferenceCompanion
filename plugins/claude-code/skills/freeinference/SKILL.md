@@ -20,9 +20,14 @@ Show current session status with context usage, pressure, and cache analysis.
 ```bash
 freeinference status --json
 freeinference status --compact
+freeinference status --level standard
 ```
 
-Flags: `--client <type>`, `--compact`, `--session <id>`, `--json`
+Flags: `--client <type>`, `--compact`, `--level summary|standard|detailed`, `--session <id>`, `--json`
+
+Use `--level summary` for a quick one-line check, `standard` for core session
+state, and `detailed` for cache/compaction/circuit/account diagnostics. To
+persist the preference, run `freeinference config set reporting.level <level>`.
 
 ### `freeinference sessions`
 
@@ -160,6 +165,7 @@ Subcommands: `show`, `set <key> <value>`, `reset [<key>]`, `path`
 **Other:**
 | Key | Default | Effect |
 |-----|---------|--------|
+| `reporting.level` | `detailed` | Default interactive status detail: `summary`, `standard`, or `detailed`. |
 | `refresh.interval_mins` | 5 | How often background refresh checks for stale provider data. |
 | `privacy.diagnostic_probes` | true | Allow diagnostic inference probes (`doctor --probe`). Set to `false` to disable. |
 
@@ -195,15 +201,38 @@ Many commands accept `--json` for machine-readable JSON output and `--help` for 
 
 ## Environment Variables
 
-- `FREEINFERENCE_API_KEY` — API key
+- `FREEINFERENCE_API_KEY` — API credential for the OpenAI-compatible API
 - `FREEINFERENCE_BASE_URL` — API base URL (default: `https://freeinference.org/v1`)
+- `ANTHROPIC_AUTH_TOKEN` — Claude Code credential for the Anthropic-compatible endpoint
 - `FI_HEALTH_URL` — Health monitoring URL (optional)
 - `FI_CACHE_DIR` — Cache directory (default: `~/.cache/freeinference-companion`)
 - `FI_SESSION_ID` — Explicit session override
-- `FI_PROVIDER` — Force provider (e.g., `freeinference`)
+- `FI_PROVIDER` — Attribution metadata only; it does not activate the companion
 - `FI_NO_BACKGROUND` — Disable background refresh
 - `FI_DISABLED` — Set to `1` to disable all companion features
 - `FI_ALLOW_INSECURE_LOCALHOST` — Allow `http://` loopback (development only)
+
+## Claude Code Runtime Setup
+
+Claude Code uses FreeInference's Anthropic-compatible endpoint, not `/v1`.
+Set these values in `~/.claude/settings.json`; use `Free_Inference_API` only
+as a placeholder and keep the real credential outside shared files.
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://freeinference.org/anthropic",
+    "ANTHROPIC_AUTH_TOKEN": "Free_Inference_API",
+    "ANTHROPIC_MODEL": "glm-5.1",
+    "ANTHROPIC_SMALL_FAST_MODEL": "glm-5-turbo",
+    "API_TIMEOUT_MS": "600000"
+  }
+}
+```
+
+Use public model IDs for both model variables. The built-in Anthropic defaults
+are not FreeInference public-catalog models. Model availability can differ
+from the OpenAI-compatible `/v1` route used by Codex.
 
 ## Example Workflows
 

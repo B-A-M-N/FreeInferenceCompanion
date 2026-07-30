@@ -399,6 +399,29 @@ func TestClaudeCompactionWithoutPreTokensStaysUnknown(t *testing.T) {
 	}
 }
 
+func TestClaudeRepeatedCompactionClearsStalePreTokens(t *testing.T) {
+	confirmFreeInference(t)
+	paths := testPaths(t)
+	a := NewClaudeAdapter(paths)
+	_ = a.HandleStatusLineUpdate(statusInput("s1", "glm-5.1", 160000, 2000, 200000, 81, 5000, 150000, 5000, 2000), "s1")
+	_ = a.HandlePreCompact(&schema.ClaudeHookInput{SessionID: "s1", Trigger: "manual"}, "s1")
+	_ = a.HandlePostCompact(&schema.ClaudeHookInput{SessionID: "s1", Trigger: "manual"}, "s1")
+	_ = a.HandleStatusLineUpdate(statusInput("s1", "glm-5.1", 80000, 2000, 200000, 41, 3000, 75000, 2000, 2000), "s1")
+
+	if err := state.UpdateSnapshot(paths, schema.ClientClaudeCode, "s1", nil, func(s *schema.Snapshot) error {
+		s.LiveContext = nil
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_ = a.HandlePreCompact(&schema.ClaudeHookInput{SessionID: "s1", Trigger: "automatic"}, "s1")
+	_ = a.HandlePostCompact(&schema.ClaudeHookInput{SessionID: "s1", Trigger: "automatic"}, "s1")
+	snap := loadClaude(t, paths, "s1")
+	if snap.Compaction.PreTokens != nil || snap.Compaction.AwaitingPostObservation {
+		t.Errorf("missing second pre-observation must not reuse old values: %+v", snap.Compaction)
+	}
+}
+
 // TestClaudeCompactionPostGreaterThanPreNoNegative is the P1-12 regression
 // test: if the post-compaction observation has more tokens than pre, the
 // result must be recorded as unknown — never as a negative reduction.
