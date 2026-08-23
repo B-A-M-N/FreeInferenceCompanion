@@ -98,6 +98,18 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 	activation := runtime.Evaluate()
 	disabled := os.Getenv("FI_DISABLED") == "1" || activation.Disabled
 	if disabled {
+		// Installation-convenience checks (binary on PATH, hook config,
+		// status-line wrapper) are downgraded to warnings while disabled:
+		// they describe setup completeness, not correctness, and must not
+		// make `doctor` exit 1 — diagnostics stay usable when disabled.
+		for i := range checks {
+			switch checks[i].name {
+			case "freeinference binary", "Claude hook config", "Status-line wrapper":
+				if checks[i].result.State == api.CheckFail {
+					checks[i].result.State = api.CheckWarn
+				}
+			}
+		}
 		add("Model catalog", api.CheckResult{State: api.CheckUnknown, Detail: "skipped - disabled"})
 		add("API key format", api.CheckResult{State: api.CheckUnknown, Detail: "skipped - disabled"})
 		add("Authentication", api.CheckResult{State: api.CheckUnknown, Detail: "skipped - disabled"})

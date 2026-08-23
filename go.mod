@@ -1,6 +1,6 @@
 module github.com/b-a-m-n/freeinference-companion
 
-go 1.25.12
+go 1.25.13
 
 require golang.org/x/term v0.45.0
 

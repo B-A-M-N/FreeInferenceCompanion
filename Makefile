@@ -55,7 +55,7 @@ release-check: clean-tree-check fmt-check vet mod-verify tidy-check test test-ra
 
 # release runs the full quality gate, packages distributable artifacts, and
 # validates those exact archives from a clean extraction before succeeding.
-release: release-check package-smoke plugin-clean-install
+release: package release-check package-smoke plugin-clean-install
 	@echo ""
 	@echo "release $(VERSION) packaged in $(RELEASE_DIR)/"
 	@ls -la $(RELEASE_DIR)/
