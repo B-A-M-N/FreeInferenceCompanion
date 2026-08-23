@@ -586,6 +586,8 @@ func buildWrapper(binaryPath string, previous json.RawMessage) string {
 	} else {
 		b.WriteString("if command -v freeinference >/dev/null 2>&1; then\n")
 		b.WriteString("  fi_out=\"$(printf '%s' \"$input\" | freeinference status --compact --color=always --client claude-code 2>/dev/null || true)\"\n")
+		b.WriteString("elif [[ -x \"$HOME/.local/bin/freeinference\" ]]; then\n")
+		b.WriteString("  fi_out=\"$(printf '%s' \"$input\" | \"$HOME/.local/bin/freeinference\" status --compact --color=always --client claude-code 2>/dev/null || true)\"\n")
 		b.WriteString("fi\n")
 	}
 

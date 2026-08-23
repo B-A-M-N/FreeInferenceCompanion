@@ -27,10 +27,14 @@ func TestVersionConsistency(t *testing.T) {
 		t.Errorf("adapters.PluginVersion = %q, want %q", adapters.PluginVersion, want)
 	}
 
-	// Plugin manifests must match.
+	// Plugin manifests must match. The repo-root plugin.json is optional
+	// (marketplace metadata); the per-plugin manifests are authoritative.
 	manifestPaths := []string{
 		"../../plugins/claude-code/.claude-plugin/plugin.json",
 		"../../plugins/codex/.codex-plugin/plugin.json",
+	}
+	if _, err := os.Stat("../../plugin.json"); err == nil {
+		manifestPaths = append([]string{"../../plugin.json"}, manifestPaths...)
 	}
 	for _, p := range manifestPaths {
 		data, err := os.ReadFile(p)

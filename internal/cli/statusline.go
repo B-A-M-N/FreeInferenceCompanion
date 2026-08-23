@@ -120,6 +120,10 @@ func cmdStatusLine(args []string, stdout, stderr io.Writer) int {
 // resolveSelfPath returns the absolute path of the running binary when it is
 // a real on-disk file (not a test harness), else "" so the wrapper falls
 // back to PATH lookup.
+//
+// Ephemeral paths are rejected: a binary resolved under the Go build cache
+// (`go run` artifacts), /tmp, or similar transient locations can be
+// garbage-collected at any time, leaving the wrapper silently degraded.
 func resolveSelfPath() string {
 	exe, err := os.Executable()
 	if err != nil {
@@ -128,5 +132,27 @@ func resolveSelfPath() string {
 	if info, err := os.Stat(exe); err != nil || info.IsDir() {
 		return ""
 	}
+	if isEphemeralPath(exe) {
+		return ""
+	}
 	return exe
+}
+
+// ephemeralPathMarkers are path prefixes/segments that indicate a binary
+// living in transient storage. Wrappers must not pin these paths because the
+// files disappear without notice (Go build cache GC, tmp cleaners).
+var ephemeralPathMarkers = []string{
+	"/go-build/", // `go run` / `go build -o` into the build cache
+	"/tmp/",      // temp dirs and mktemp results
+	"/var/tmp/",
+	"/.cache/go-build/",
+}
+
+func isEphemeralPath(path string) bool {
+	for _, m := range ephemeralPathMarkers {
+		if strings.Contains(path, m) {
+			return true
+		}
+	}
+	return false
 }
