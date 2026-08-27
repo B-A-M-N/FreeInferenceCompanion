@@ -26,7 +26,7 @@ func NewCodexAdapter(paths state.Paths) *CodexAdapter {
 // ParseHookInput reads and parses a flat Codex hook event from stdin.
 func (a *CodexAdapter) ParseHookInput(r io.Reader) (*schema.CodexHookInput, error) {
 	var input schema.CodexHookInput
-	if err := json.NewDecoder(r).Decode(&input); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r, 1<<20)).Decode(&input); err != nil {
 		return nil, fmt.Errorf("parse codex hook event: %w", err)
 	}
 	return &input, nil

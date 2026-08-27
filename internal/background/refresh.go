@@ -275,7 +275,7 @@ func spawnDetached(executable string, args ...string) error {
 // ============================================================
 
 func modelsStale(gs *schema.GlobalState, now time.Time) bool {
-	if gs.Models == nil {
+	if gs == nil || gs.Models == nil {
 		return true
 	}
 	fetched := schema.SanitizeTimestamp(gs.Models.FetchedAt, now)
@@ -283,7 +283,7 @@ func modelsStale(gs *schema.GlobalState, now time.Time) bool {
 }
 
 func healthStale(gs *schema.GlobalState, now time.Time) bool {
-	if gs.Health == nil {
+	if gs == nil || gs.Health == nil {
 		return true
 	}
 	fetched := schema.SanitizeTimestamp(gs.Health.FetchedAt, now)
@@ -291,6 +291,9 @@ func healthStale(gs *schema.GlobalState, now time.Time) bool {
 }
 
 func breakerOpen(gs *schema.GlobalState, endpoint string, now time.Time) bool {
+	if gs == nil {
+		return false
+	}
 	for i, cb := range gs.CircuitBreakers {
 		if cb.Endpoint == endpoint && cb.State == schema.CircuitOpen {
 			if cb.NextRetryAt != nil && now.Before(*cb.NextRetryAt) {
@@ -487,7 +490,7 @@ func (r *Refresher) forceRefreshHealth(result *RefreshResult, now time.Time) {
 // ============================================================
 
 func accountUsageStale(gs *schema.GlobalState, now time.Time) bool {
-	if gs.AccountUsage == nil {
+	if gs == nil || gs.AccountUsage == nil {
 		return true
 	}
 	fetched := schema.SanitizeTimestamp(gs.AccountUsage.FetchedAt, now)

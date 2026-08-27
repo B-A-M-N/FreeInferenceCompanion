@@ -33,7 +33,7 @@ func NewClaudeAdapter(paths state.Paths) *ClaudeAdapter {
 // ParseStatusLineInput reads and parses Claude status line JSON from stdin.
 func (a *ClaudeAdapter) ParseStatusLineInput(r io.Reader) (*schema.ClaudeStatusLineInput, error) {
 	var input schema.ClaudeStatusLineInput
-	if err := json.NewDecoder(r).Decode(&input); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r, 1<<20)).Decode(&input); err != nil {
 		return nil, fmt.Errorf("parse status line: %w", err)
 	}
 	return &input, nil
@@ -42,7 +42,7 @@ func (a *ClaudeAdapter) ParseStatusLineInput(r io.Reader) (*schema.ClaudeStatusL
 // ParseHookInput reads and parses a flat Claude hook event from stdin.
 func (a *ClaudeAdapter) ParseHookInput(r io.Reader) (*schema.ClaudeHookInput, error) {
 	var input schema.ClaudeHookInput
-	if err := json.NewDecoder(r).Decode(&input); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r, 1<<20)).Decode(&input); err != nil {
 		return nil, fmt.Errorf("parse hook event: %w", err)
 	}
 	return &input, nil
@@ -502,10 +502,10 @@ func (a *ClaudeAdapter) HandleUserPromptSubmitWith(input *schema.ClaudeHookInput
 				switch {
 				case usedPct >= engine.ContextCriticalEnterThreshold():
 					contextSeverity = schema.WarningSeverityCritical
-					contextMsg = fmt.Sprintf("FreeInference: context usage is %.0f%%%% on %s. Compact or start a fresh session.", usedPct, snap.Model.ID)
+					contextMsg = fmt.Sprintf("FreeInference: context usage is %.0f%% on %s. Compact or start a fresh session.", usedPct, snap.Model.ID)
 				case usedPct >= engine.ContextWarnEnterThreshold():
 					contextSeverity = schema.WarningSeverityWarn
-					contextMsg = fmt.Sprintf("FreeInference: context usage is %.0f%%%% on %s. Consider compacting soon.", usedPct, snap.Model.ID)
+					contextMsg = fmt.Sprintf("FreeInference: context usage is %.0f%% on %s. Consider compacting soon.", usedPct, snap.Model.ID)
 				}
 			}
 			if contextMsg != "" {

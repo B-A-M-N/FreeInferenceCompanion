@@ -157,7 +157,6 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 	}
 
 	// 10. Circuit breaker status.
-	// 10. Circuit breaker status.
 	gs := loadGlobal(paths)
 	if len(gs.CircuitBreakers) > 0 {
 		for _, cb := range gs.CircuitBreakers {
