@@ -117,7 +117,7 @@ func cmdSnapshot(paths state.Paths, args []string, stdin io.Reader, stdout, stde
 	// This path is taken when no --session is specified and stdin has a status payload.
 	if sessionID == "" && stdinHasData(stdin) {
 		var statusInput schema.ClaudeStatusLineInput
-		if json.NewDecoder(stdin).Decode(&statusInput) == nil && statusInput.SessionID != "" {
+		if json.NewDecoder(io.LimitReader(stdin, 1<<20)).Decode(&statusInput) == nil && statusInput.SessionID != "" {
 			// Status-line mode with valid payload: update state and render.
 			// Identity failure in status-line mode → zero output (fail-closed).
 			if aidErr != nil {
@@ -282,7 +282,7 @@ func updateFromStdinStatus(paths state.Paths, stdin io.Reader) *schema.Snapshot 
 		return nil
 	}
 	var statusInput schema.ClaudeStatusLineInput
-	if err := json.NewDecoder(stdin).Decode(&statusInput); err != nil || statusInput.SessionID == "" {
+	if err := json.NewDecoder(io.LimitReader(stdin, 1<<20)).Decode(&statusInput); err != nil || statusInput.SessionID == "" {
 		return nil
 	}
 	adapter := adapters.NewClaudeAdapter(paths)

@@ -94,7 +94,7 @@ func cmdStatus(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 	// Identity failure also means zero output (fail-closed).
 	if stdinHasData(stdin) {
 		var statusInput schema.ClaudeStatusLineInput
-		if err := json.NewDecoder(stdin).Decode(&statusInput); err == nil && statusInput.SessionID != "" {
+		if err := json.NewDecoder(io.LimitReader(stdin, 1<<20)).Decode(&statusInput); err == nil && statusInput.SessionID != "" {
 			// P0-3: inactive runtime → zero bytes in status-line mode
 			if !activation.Active {
 				return 0
@@ -183,7 +183,9 @@ func cmdStatus(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 		return 0
 	}
 
-	fmt.Fprint(stdout, renderStatusLevel(vm, rc, level))
+	if rendered := renderStatusLevel(vm, rc, level); rendered != "" {
+		fmt.Fprintln(stdout, rendered)
+	}
 	return 0
 }
 

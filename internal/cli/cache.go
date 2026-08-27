@@ -72,16 +72,6 @@ func cmdCache(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	fmt.Fprintf(stdout, "Cache Analysis for %s (%s)\n", displaySessionID(snap.Session.ID, reveal), snap.Client.Type)
-	fmt.Fprintln(stdout, strings.Repeat("-", 60))
-
-	if ca == nil || ca.RequestSamples == 0 {
-		fmt.Fprintln(stdout, "No cache data yet. Send a few requests first.")
-		fmt.Fprintln(stdout)
-		printCacheBasics(stdout, lc)
-		return 0
-	}
-
 	// Current metrics
 	readPct := 0.0
 	createPct := 0.0

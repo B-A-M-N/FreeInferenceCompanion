@@ -206,7 +206,7 @@ func validateAndReadSalt(path string) ([]byte, error) {
 	}
 	// Ownership check where supported (not available on Windows).
 	if unixFile, ok := info.Sys().(*syscall.Stat_t); ok {
-		if uint32(os.Getuid()) != unixFile.Uid || uint32(os.Getgid()) != unixFile.Gid {
+		if uint32(os.Getuid()) != unixFile.Uid {
 			return nil, errSaltBadOwnership
 		}
 	}
