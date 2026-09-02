@@ -11,9 +11,12 @@ FreeInference.
 When a verified FreeInference client is started with `freeinference run`, the
 Companion generates a fresh `fic-v1-...` identifier containing at least 128
 bits of cryptographic randomness. The ID contains no username, repository,
-path, hostname, client session ID, or API key. Only the `X-Session-ID` header
-is added; normal requests never receive `X-Request-ID` from the Companion.
-FreeInference generates `X-Request-ID` itself when needed.
+path, hostname, client session ID, or API key. The launch adds that
+`X-Session-ID` plus three fixed classification headers:
+`X-FI-Client` (`claude-code` or `codex`), `X-FI-Companion-Version` (the
+Companion release), and `X-FI-Workload` (`coding-agent`). Normal requests
+never receive `X-Request-ID` from the Companion; FreeInference generates
+`X-Request-ID` itself when needed.
 
 Only a receipt-verified launch trace may be persisted in the private session snapshot:
 the opaque ID, client, provider, header name, source, endpoint origin, and
@@ -52,18 +55,22 @@ does not rewrite or delete prior private session metadata.
 
 ## Client mechanisms and privacy
 
-Claude Code receives a newline-separated `X-Session-ID` entry through its
+Claude Code receives newline-separated correlation entries through its
 documented `ANTHROPIC_CUSTOM_HEADERS` variable. Existing unrelated headers
-and an existing `X-Session-ID` are preserved. If the custom-header block is
-malformed, the launcher fails open and starts Claude without Companion trace
-injection.
+and existing Companion correlation entries are preserved; conflicting
+user-owned values cause the launcher to fail open without injecting any
+Companion headers. If the custom-header block is malformed, the launcher
+also fails open.
 
-Codex receives the same header through the selected provider's documented
+Codex receives these headers through the selected provider's documented
 `env_http_headers` mapping:
 
 ```toml
 [model_providers.freeinference.env_http_headers]
 "X-Session-ID" = "FI_TRACE_SESSION_ID"
+"X-FI-Client" = "FI_TRACE_CLIENT"
+"X-FI-Companion-Version" = "FI_TRACE_COMPANION_VERSION"
+"X-FI-Workload" = "FI_TRACE_WORKLOAD"
 ```
 
 Install the Codex mapping explicitly:
@@ -77,12 +84,13 @@ The equivalent `--client codex` form is also accepted.
 
 Setup keeps a mode-preserving backup and uses a lock, refuses conflicting
 existing mappings, and uninstall restores the original file only when the
-mapping is still Companion-owned. The launcher only inspects this mapping; it
+mapping is still Companion-owned. The launcher only inspects these mappings; it
 does not mutate Codex configuration during every run. Setup preserves
-unrelated TOML/comments and never replaces an existing `X-Session-ID` mapping. Codex
-trace injection is gated on the selected provider being verified, using its
-approved FreeInference URL and its configured `env_key`; an OpenAI provider,
-off-host provider, or unverified profile receives no trace.
+unrelated TOML/comments and never replaces an existing Companion correlation
+mapping. Codex trace injection is gated on the selected provider being
+verified, using its approved FreeInference URL and its configured `env_key`;
+an OpenAI provider, off-host provider, or unverified profile receives no
+correlation headers.
 
 Launch handoff receipts are short-lived private files (directory `0700`, file
 `0600`) consumed by the SessionStart hook. Receipt paths are constrained to

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/b-a-m-n/freeinference-companion/internal/tracing"
 )
 
 func TestEnsureCodexTraceHeaderPreservesConfigAndComments(t *testing.T) {
@@ -20,8 +22,14 @@ func TestEnsureCodexTraceHeaderPreservesConfigAndComments(t *testing.T) {
 	}
 	updated, _ := os.ReadFile(path)
 	text := string(updated)
-	if !strings.Contains(text, "# keep this comment") || !strings.Contains(text, "value = \"untouched\"") || !strings.Contains(text, "[model_providers.freeinference.env_http_headers]") || !strings.Contains(text, "\"X-Session-ID\" = \"FI_TRACE_SESSION_ID\"") {
+	if !strings.Contains(text, "# keep this comment") || !strings.Contains(text, "value = \"untouched\"") || !strings.Contains(text, "[model_providers.freeinference.env_http_headers]") {
 		t.Fatalf("surgical merge lost content or mapping:\n%s", text)
+	}
+	for _, mapping := range tracing.CodexHeaderMappings() {
+		want := "\"" + mapping.Header + "\" = \"" + mapping.Env + "\""
+		if !strings.Contains(text, want) {
+			t.Fatalf("Codex mapping %q missing:\n%s", want, text)
+		}
 	}
 }
 
@@ -57,6 +65,34 @@ func TestInspectCodexTraceHeaderIsReadOnly(t *testing.T) {
 	}
 }
 
+func TestInspectCodexTraceHeadersReportsIncompleteMapping(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	contents := "[model_providers.freeinference.env_http_headers]\n\"X-Session-ID\" = \"FI_TRACE_SESSION_ID\"\n"
+	if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
+		t.Fatal(err)
+	}
+	mapping, err := InspectCodexTraceHeaders(path, "freeinference")
+	if err != nil || mapping.Ready || len(mapping.Missing) != 3 || len(mapping.Conflicts) != 0 {
+		t.Fatalf("incomplete mapping = %#v, err=%v", mapping, err)
+	}
+}
+
+func TestEnsureCodexTraceHeadersRejectsStaticConflict(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	contents := "[model_providers.freeinference.env_http_headers]\n\"X-Session-ID\" = \"FI_TRACE_SESSION_ID\"\n\"X-FI-Client\" = \"other\"\n"
+	if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
+		t.Fatal(err)
+	}
+	mapping, err := EnsureCodexTraceHeaders(path, "freeinference")
+	if err == nil || mapping.Ready || len(mapping.Conflicts) != 1 || mapping.Conflicts[0] != tracing.ClientHeader {
+		t.Fatalf("static conflict = %#v, err=%v", mapping, err)
+	}
+	updated, _ := os.ReadFile(path)
+	if string(updated) != contents {
+		t.Fatal("conflicting Codex mapping was modified")
+	}
+}
+
 func TestCodexTraceBackupRestoreIsReversible(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	original := "model_provider = \"freeinference\"\n[model_providers.freeinference]\nbase_url=\"https://freeinference.org/v1\"\n"
@@ -78,6 +114,45 @@ func TestCodexTraceBackupRestoreIsReversible(t *testing.T) {
 	}
 	if _, err := os.Stat(path + codexTraceBackupSuffix); !os.IsNotExist(err) {
 		t.Fatalf("backup remains after restore: %v", err)
+	}
+}
+
+func TestCodexTraceRestoreRefusesChangedStaticMapping(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	original := "model_provider = \"freeinference\"\n[model_providers.freeinference]\nbase_url=\"https://freeinference.org/v1\"\n"
+	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SetupCodexTraceConfig(path, "freeinference"); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := strings.Replace(string(updated), `"X-FI-Client" = "FI_TRACE_CLIENT"`, `"X-FI-Client" = "USER_CLIENT"`, 1)
+	if changed == string(updated) {
+		t.Fatal("test fixture did not change static mapping")
+	}
+	if err := os.WriteFile(path, []byte(changed), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RestoreCodexTraceConfig(path, "freeinference"); err == nil {
+		t.Fatal("restore replaced a changed static mapping")
+	}
+	if _, err := os.Stat(path + codexTraceBackupSuffix); err != nil {
+		t.Fatalf("backup was removed after refused restore: %v", err)
+	}
+}
+
+func TestInspectCodexTraceHeadersRejectsDuplicateKnownMapping(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	contents := "[model_providers.freeinference.env_http_headers]\n\"X-Session-ID\" = \"FI_TRACE_SESSION_ID\"\n\"x-session-id\" = \"FI_TRACE_SESSION_ID\"\n"
+	if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectCodexTraceHeaders(path, "freeinference"); err == nil {
+		t.Fatal("duplicate known mapping accepted")
 	}
 }
 

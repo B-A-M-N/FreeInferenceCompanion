@@ -8,35 +8,59 @@ import (
 	"strings"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
+	"github.com/b-a-m-n/freeinference-companion/internal/tracing"
 )
 
-const codexTraceHeaderEnv = "FI_TRACE_SESSION_ID"
+const (
+	codexTraceHeaderEnv  = tracing.TraceSessionEnv
+	canonicalTraceHeader = tracing.SessionHeader
+)
 
 // CodexTraceMapping describes whether the selected provider's documented
-// env_http_headers mapping can carry the Companion trace ID.
+// env_http_headers mapping can carry Companion's bounded request metadata.
 type CodexTraceMapping struct {
-	Ready    bool
-	Existing bool
-	Modified bool
+	Ready     bool
+	Existing  bool
+	Modified  bool
+	Missing   []string
+	Conflicts []string
 }
 
-// InspectCodexTraceHeader reports mapping state without changing the Codex
-// config. It is used by doctor and deliberately returns no header value.
-func InspectCodexTraceHeader(path, providerID string) (configured, conflict bool, err error) {
+// InspectCodexTraceHeaders reports the complete mapping state without
+// changing Codex config. It deliberately returns no header values.
+func InspectCodexTraceHeaders(path, providerID string) (CodexTraceMapping, error) {
 	if !validCodexName(providerID) {
-		return false, false, errors.New("invalid Codex provider name")
+		return CodexTraceMapping{}, errors.New("invalid Codex provider name")
 	}
 	body, err := os.ReadFile(path)
 	if err != nil {
-		return false, false, err
+		return CodexTraceMapping{}, err
 	}
 	if len(body) > maxCodexConfigBytes {
-		return false, false, errors.New("Codex config exceeds the supported size limit")
+		return CodexTraceMapping{}, errors.New("Codex config exceeds the supported size limit")
 	}
 	providerTable := "model_providers." + providerID
 	nestedTable := providerTable + ".env_http_headers"
-	providerTableQuoted := `model_providers."` + providerID + `"`
+	providerTableQuoted := "model_providers.\"" + providerID + "\""
 	nestedTableQuoted := providerTableQuoted + ".env_http_headers"
+	mappings := tracing.CodexHeaderMappings()
+	values := make(map[string]string)
+	present := make(map[string]bool)
+	duplicate := ""
+	record := func(header, value string) {
+		for _, mapping := range mappings {
+			if strings.EqualFold(header, mapping.Header) {
+				key := strings.ToLower(mapping.Header)
+				if present[key] {
+					duplicate = mapping.Header
+					return
+				}
+				values[key] = value
+				present[key] = true
+				return
+			}
+		}
+	}
 	table := ""
 	for _, raw := range strings.Split(string(body), "\n") {
 		line := tomlLine(raw)
@@ -48,29 +72,77 @@ func InspectCodexTraceHeader(path, providerID string) (configured, conflict bool
 		if !ok {
 			continue
 		}
-		if (table == nestedTable || table == nestedTableQuoted) && strings.EqualFold(strings.Trim(key, " \""), canonicalTraceHeader) {
+		if table == nestedTable || table == nestedTableQuoted {
 			parsed, parsedOK := parseTomlString(strings.TrimSpace(value))
-			return parsedOK && parsed == codexTraceHeaderEnv, parsedOK && parsed != codexTraceHeaderEnv, nil
+			key = strings.Trim(key, " \"")
+			if isKnownCodexMapping(key, mappings) && !parsedOK {
+				return CodexTraceMapping{}, fmt.Errorf("Codex %s mapping is malformed", key)
+			}
+			if parsedOK {
+				record(key, parsed)
+			}
+			continue
 		}
 		if (table == providerTable || table == providerTableQuoted) && key == "env_http_headers" && strings.HasPrefix(strings.TrimSpace(value), "{") {
 			mapping, valid := parseInlineHeaderMap(strings.TrimSpace(value))
 			if !valid {
-				return false, false, errors.New("Codex env_http_headers table is malformed")
+				return CodexTraceMapping{}, errors.New("Codex env_http_headers table is malformed")
 			}
-			if mapped, exists := mappingValue(mapping, canonicalTraceHeader); exists {
-				return mapped == codexTraceHeaderEnv, mapped != codexTraceHeaderEnv, nil
+			for header, mapped := range mapping {
+				record(header, mapped)
 			}
+		}
+	}
+	if duplicate != "" {
+		return CodexTraceMapping{}, fmt.Errorf("duplicate Codex %s mapping", duplicate)
+	}
+
+	result := CodexTraceMapping{Existing: len(present) > 0}
+	for _, mapping := range mappings {
+		key := strings.ToLower(mapping.Header)
+		value, exists := values[key]
+		if !exists {
+			result.Missing = append(result.Missing, mapping.Header)
+		} else if value != mapping.Env {
+			result.Conflicts = append(result.Conflicts, mapping.Header)
+		}
+	}
+	result.Ready = len(result.Missing) == 0 && len(result.Conflicts) == 0
+	return result, nil
+}
+
+// InspectCodexTraceHeader is the legacy session-only view retained for callers
+// that only need to inspect the original X-Session-ID mapping.
+func InspectCodexTraceHeader(path, providerID string) (configured, conflict bool, err error) {
+	mapping, err := InspectCodexTraceHeaders(path, providerID)
+	if err != nil {
+		return false, false, err
+	}
+	for _, header := range mapping.Missing {
+		if strings.EqualFold(header, canonicalTraceHeader) {
 			return false, false, nil
 		}
 	}
-	return false, false, nil
+	for _, header := range mapping.Conflicts {
+		if strings.EqualFold(header, canonicalTraceHeader) {
+			return false, true, nil
+		}
+	}
+	return true, false, nil
 }
 
-// EnsureCodexTraceHeader adds the narrow mapping required by Codex when it is
-// absent. It preserves comments and unrelated TOML text and never replaces an
-// existing X-Session-ID mapping. Unsupported/ambiguous forms fail open to the
-// caller, which should launch Codex without Companion trace injection.
+// EnsureCodexTraceHeader adds Companion's complete bounded mapping set. The
+// name is retained for source compatibility with the original session-only
+// helper.
 func EnsureCodexTraceHeader(path, providerID string) (CodexTraceMapping, error) {
+	return EnsureCodexTraceHeaders(path, providerID)
+}
+
+// EnsureCodexTraceHeaders adds the mappings required by Codex when absent. It
+// preserves comments and unrelated TOML text and never replaces an existing
+// mapping. Unsupported/ambiguous forms fail open to the caller, which should
+// launch Codex without Companion trace injection.
+func EnsureCodexTraceHeaders(path, providerID string) (CodexTraceMapping, error) {
 	if !validCodexName(providerID) {
 		return CodexTraceMapping{}, errors.New("invalid Codex provider name")
 	}
@@ -100,8 +172,9 @@ func ensureCodexTraceHeaderLocked(path, providerID string) (CodexTraceMapping, e
 	contents := string(body)
 	providerTable := "model_providers." + providerID
 	nestedTable := providerTable + ".env_http_headers"
-	providerTableQuoted := `model_providers."` + providerID + `"`
+	providerTableQuoted := "model_providers.\"" + providerID + "\""
 	nestedTableQuoted := providerTableQuoted + ".env_http_headers"
+	mappings := tracing.CodexHeaderMappings()
 	lines := strings.SplitAfter(contents, "\n")
 
 	// Inline env_http_headers tables cannot safely be converted to a nested
@@ -127,13 +200,14 @@ func ensureCodexTraceHeaderLocked(path, providerID string) (CodexTraceMapping, e
 			if !valid {
 				return CodexTraceMapping{}, errors.New("Codex env_http_headers table is malformed")
 			}
-			if value, exists := mappingValue(mapping, canonicalTraceHeader); exists {
-				if value == codexTraceHeaderEnv {
-					return CodexTraceMapping{Ready: true, Existing: true}, nil
-				}
-				return CodexTraceMapping{Existing: true}, errors.New("Codex X-Session-ID mapping already points elsewhere")
+			missing, conflicts, existing := classifyCodexMappings(mapping, mappings)
+			if len(conflicts) > 0 {
+				return CodexTraceMapping{Existing: existing, Conflicts: conflicts}, fmt.Errorf("Codex mapping already points elsewhere: %s", strings.Join(conflicts, ", "))
 			}
-			updated, ok := addInlineHeaderMapping(lines[j])
+			if len(missing) == 0 {
+				return CodexTraceMapping{Ready: true, Existing: existing}, nil
+			}
+			updated, ok := addInlineHeaderMappings(lines[j], missing)
 			if !ok {
 				return CodexTraceMapping{}, errors.New("Codex env_http_headers table cannot be merged safely")
 			}
@@ -141,7 +215,7 @@ func ensureCodexTraceHeaderLocked(path, providerID string) (CodexTraceMapping, e
 			if err := atomicRewriteCodex(path, strings.Join(lines, ""), info.Mode().Perm()); err != nil {
 				return CodexTraceMapping{}, err
 			}
-			return CodexTraceMapping{Ready: true, Modified: true}, nil
+			return CodexTraceMapping{Ready: true, Existing: existing, Modified: true}, nil
 		}
 	}
 
@@ -152,6 +226,7 @@ func ensureCodexTraceHeaderLocked(path, providerID string) (CodexTraceMapping, e
 			continue
 		}
 		end := len(lines)
+		mapping := make(map[string]string)
 		for j := i + 1; j < len(lines); j++ {
 			candidate := tomlLine(lines[j])
 			if isTomlTable(candidate) {
@@ -159,20 +234,39 @@ func ensureCodexTraceHeaderLocked(path, providerID string) (CodexTraceMapping, e
 				break
 			}
 			key, value, ok := cutTomlAssignment(candidate)
-			if ok && strings.EqualFold(strings.Trim(key, " \""), canonicalTraceHeader) {
+			if ok {
+				key = strings.Trim(key, " \"")
+				known := isKnownCodexMapping(key, mappings)
 				parsed, parsedOK := parseTomlString(strings.TrimSpace(value))
-				if parsedOK && parsed == codexTraceHeaderEnv {
-					return CodexTraceMapping{Ready: true, Existing: true}, nil
+				if known && !parsedOK {
+					return CodexTraceMapping{}, fmt.Errorf("Codex %s mapping is malformed", key)
 				}
-				return CodexTraceMapping{Existing: true}, errors.New("Codex X-Session-ID mapping already points elsewhere")
+				if parsedOK {
+					if known {
+						if _, exists := mappingValue(mapping, key); exists {
+							return CodexTraceMapping{}, fmt.Errorf("duplicate Codex %s mapping", key)
+						}
+					}
+					mapping[key] = parsed
+				}
 			}
 		}
-		insert := "\"" + canonicalTraceHeader + "\" = \"" + codexTraceHeaderEnv + "\"" + tomlLineEnding(contents)
+		missing, conflicts, existing := classifyCodexMappings(mapping, mappings)
+		if len(conflicts) > 0 {
+			return CodexTraceMapping{Existing: existing, Conflicts: conflicts}, fmt.Errorf("Codex mapping already points elsewhere: %s", strings.Join(conflicts, ", "))
+		}
+		if len(missing) == 0 {
+			return CodexTraceMapping{Ready: true, Existing: existing}, nil
+		}
+		insert := ""
+		for _, wanted := range missing {
+			insert += "\"" + wanted.Header + "\" = \"" + wanted.Env + "\"" + tomlLineEnding(contents)
+		}
 		lines = append(lines[:end], append([]string{insert}, lines[end:]...)...)
 		if err := atomicRewriteCodex(path, strings.Join(lines, ""), info.Mode().Perm()); err != nil {
 			return CodexTraceMapping{}, err
 		}
-		return CodexTraceMapping{Ready: true, Modified: true}, nil
+		return CodexTraceMapping{Ready: true, Existing: existing, Modified: true}, nil
 	}
 
 	// No mapping exists. Appending a new nested table is valid as long as the
@@ -181,7 +275,10 @@ func ensureCodexTraceHeaderLocked(path, providerID string) (CodexTraceMapping, e
 		contents += "\n"
 	}
 	lineEnding := tomlLineEnding(contents)
-	contents += lineEnding + "[" + nestedTable + "]" + lineEnding + "\"" + canonicalTraceHeader + "\" = \"" + codexTraceHeaderEnv + "\"" + lineEnding
+	contents += lineEnding + "[" + nestedTable + "]" + lineEnding
+	for _, mapping := range mappings {
+		contents += "\"" + mapping.Header + "\" = \"" + mapping.Env + "\"" + lineEnding
+	}
 	if err := atomicRewriteCodex(path, contents, info.Mode().Perm()); err != nil {
 		return CodexTraceMapping{}, err
 	}
@@ -203,15 +300,15 @@ func SetupCodexTraceConfig(path, providerID string) (CodexTraceMapping, error) {
 	}
 	defer lock.Release()
 
-	configured, conflict, err := InspectCodexTraceHeader(path, providerID)
+	mapping, err := InspectCodexTraceHeaders(path, providerID)
 	if err != nil {
 		return CodexTraceMapping{}, err
 	}
-	if conflict {
-		return CodexTraceMapping{Existing: true}, errors.New("Codex X-Session-ID mapping already points elsewhere")
+	if len(mapping.Conflicts) > 0 {
+		return mapping, fmt.Errorf("Codex mapping already points elsewhere: %s", strings.Join(mapping.Conflicts, ", "))
 	}
-	if configured {
-		return CodexTraceMapping{Ready: true, Existing: true}, nil
+	if mapping.Ready {
+		return mapping, nil
 	}
 	if err := backupCodexTraceConfigLocked(path); err != nil {
 		return CodexTraceMapping{}, err
@@ -287,14 +384,14 @@ func RestoreCodexTraceConfig(path, providerID string) error {
 		return err
 	}
 	defer lock.Release()
-	configured, conflict, err := InspectCodexTraceHeader(path, providerID)
+	mapping, err := InspectCodexTraceHeaders(path, providerID)
 	if err != nil {
 		return err
 	}
-	if conflict {
-		return errors.New("Codex X-Session-ID mapping changed; refusing to restore over user changes")
+	if len(mapping.Conflicts) > 0 || len(mapping.Missing) > 0 {
+		return errors.New("Codex Companion mapping changed; refusing to restore over user changes")
 	}
-	if !configured {
+	if !mapping.Ready {
 		return errors.New("FreeInference Codex trace mapping is not installed")
 	}
 	backup := path + codexTraceBackupSuffix
@@ -332,8 +429,6 @@ func acquireCodexTraceLock(path string) (*state.FileLock, error) {
 	}
 	return lock, nil
 }
-
-const canonicalTraceHeader = "X-Session-ID"
 
 func isTomlTable(line string) bool {
 	return strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]")
@@ -387,6 +482,11 @@ func parseInlineHeaderMap(value string) (map[string]string, bool) {
 		if key == "" || !parsedOK {
 			return nil, false
 		}
+		for existingKey := range result {
+			if strings.EqualFold(existingKey, key) {
+				return nil, false
+			}
+		}
 		result[key] = parsed
 	}
 	return result, true
@@ -414,7 +514,7 @@ func splitInlineTable(value string) []string {
 	return result
 }
 
-func addInlineHeaderMapping(raw string) (string, bool) {
+func addInlineHeaderMappings(raw string, mappings []tracing.HeaderMapping) (string, bool) {
 	newline := ""
 	if strings.HasSuffix(raw, "\n") {
 		newline = "\n"
@@ -436,7 +536,41 @@ func addInlineHeaderMapping(raw string) (string, bool) {
 	if inside != "" {
 		separator = ", "
 	}
-	return raw[:close] + separator + "\"" + canonicalTraceHeader + "\" = \"" + codexTraceHeaderEnv + "\"" + raw[close:] + comment + newline, true
+	additions := make([]string, 0, len(mappings))
+	for _, mapping := range mappings {
+		additions = append(additions, "\""+mapping.Header+"\" = \""+mapping.Env+"\"")
+	}
+	return raw[:close] + separator + strings.Join(additions, ", ") + raw[close:] + comment + newline, true
+}
+
+func addInlineHeaderMapping(raw string) (string, bool) {
+	return addInlineHeaderMappings(raw, []tracing.HeaderMapping{
+		{Header: canonicalTraceHeader, Env: codexTraceHeaderEnv},
+	})
+}
+
+func classifyCodexMappings(values map[string]string, mappings []tracing.HeaderMapping) (missing []tracing.HeaderMapping, conflicts []string, existing bool) {
+	for _, mapping := range mappings {
+		value, found := mappingValue(values, mapping.Header)
+		if !found {
+			missing = append(missing, mapping)
+			continue
+		}
+		existing = true
+		if value != mapping.Env {
+			conflicts = append(conflicts, mapping.Header)
+		}
+	}
+	return missing, conflicts, existing
+}
+
+func isKnownCodexMapping(header string, mappings []tracing.HeaderMapping) bool {
+	for _, mapping := range mappings {
+		if strings.EqualFold(header, mapping.Header) {
+			return true
+		}
+	}
+	return false
 }
 
 func mappingValue(mapping map[string]string, wanted string) (string, bool) {

@@ -148,19 +148,19 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 		path, pathErr := runtime.CodexConfigPath()
 		if pathErr != nil {
 			add("Codex trace headers", api.CheckResult{State: api.CheckUnknown, Detail: "Codex config path unavailable"})
-		} else if configured, conflict, inspectErr := runtime.InspectCodexTraceHeader(path, codexActivation.Evidence.ProviderID); inspectErr != nil {
+		} else if mapping, inspectErr := runtime.InspectCodexTraceHeaders(path, codexActivation.Evidence.ProviderID); inspectErr != nil {
 			add("Codex trace headers", api.CheckResult{State: api.CheckWarn, Detail: "env_http_headers mapping unavailable; run will fail open"})
-		} else if conflict {
-			add("Codex trace headers", api.CheckResult{State: api.CheckWarn, Detail: "X-Session-ID mapping already exists and will not be replaced"})
-		} else if configured {
+		} else if len(mapping.Conflicts) > 0 {
+			add("Codex trace headers", api.CheckResult{State: api.CheckWarn, Detail: "Companion header mapping conflict; existing values will not be replaced"})
+		} else if mapping.Ready {
 			codexHeadersOK = true
-			add("Codex trace headers", api.CheckResult{State: api.CheckPass, Detail: "env_http_headers mapping confirmed"})
+			add("Codex trace headers", api.CheckResult{State: api.CheckPass, Detail: "Companion env_http_headers mappings confirmed"})
 		} else {
 			if codexConfigInstallable(path) {
-				add("Codex trace headers", api.CheckResult{State: api.CheckWarn, Detail: "env_http_headers mapping not configured; run `freeinference trace setup --client codex` first"})
+				add("Codex trace headers", api.CheckResult{State: api.CheckWarn, Detail: "Companion env_http_headers mappings incomplete; run `freeinference trace setup --client codex` first"})
 				add("Codex trace setup", api.CheckResult{State: api.CheckPass, Detail: "selected config is writable; setup is available"})
 			} else {
-				add("Codex trace headers", api.CheckResult{State: api.CheckWarn, Detail: "env_http_headers mapping not configured and config is not writable"})
+				add("Codex trace headers", api.CheckResult{State: api.CheckWarn, Detail: "Companion env_http_headers mappings incomplete and config is not writable"})
 			}
 		}
 	} else {

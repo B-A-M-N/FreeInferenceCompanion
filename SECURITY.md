@@ -31,13 +31,14 @@ to the public status endpoint and sends no provider credential. Explicit
 ## Trace correlation
 
 Explicit `freeinference run claude` and `freeinference run codex` launches may
-attach a fresh cryptographically random `X-Session-ID` so FreeInference can
-correlate requests from one client process. The identifier contains no user,
-repository, path, hostname, client session, or API-key material. It increases
-linkability between requests in that launch, which is why it is documented,
-configurable, and never used as a durable installation identifier. Traffic
-still goes directly from the client to FreeInference; the Companion is not a
-proxy and does not record request content.
+attach a fresh cryptographically random `X-Session-ID` plus fixed
+client/version/workload classifications so FreeInference can correlate and
+classify requests from one client process. These values contain no user,
+repository, path, hostname, client session, or API-key material. The session
+identifier increases linkability between requests in that launch, which is
+why it is documented, configurable, and never used as a durable installation
+identifier. Traffic still goes directly from the client to FreeInference; the
+Companion is not a proxy and does not record request content.
 
 Only trace metadata is retained in private session state. The Companion does
 not retain raw headers, prompts, responses, transcripts, or credentials, and

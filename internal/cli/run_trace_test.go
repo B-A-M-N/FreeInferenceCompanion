@@ -54,7 +54,7 @@ func clearRunTraceEnv(t *testing.T) {
 	for _, key := range []string{
 		"FI_CONFIG_DIR", "FI_TRACING", "FI_DISABLED", "FI_RUNTIME_INACTIVE", "FI_UNSAFE_FORCE_ACTIVATION",
 		"FREEINFERENCE_BASE_URL", "FREEINFERENCE_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY",
-		"OPENAI_BASE_URL", "OPENAI_API_KEY", "ANTHROPIC_CUSTOM_HEADERS", "FI_TRACE_SESSION_ID", "FI_TRACE_MANAGED", "FI_TRACE_SOURCE", "FI_TRACE_CLIENT", "FI_TRACE_RECEIPT",
+		"OPENAI_BASE_URL", "OPENAI_API_KEY", "ANTHROPIC_CUSTOM_HEADERS", "FI_TRACE_SESSION_ID", "FI_TRACE_MANAGED", "FI_TRACE_SOURCE", "FI_TRACE_CLIENT", "FI_TRACE_COMPANION_VERSION", "FI_TRACE_WORKLOAD", "FI_TRACE_RECEIPT",
 		"CODEX_HOME", "CODEX_PROFILE",
 	} {
 		t.Setenv(key, "")
@@ -71,7 +71,7 @@ func envValue(env []string, key string) string {
 	return ""
 }
 
-func TestPrepareLaunchClaudeGatesAndInjectsOnlySessionHeader(t *testing.T) {
+func TestPrepareLaunchClaudeGatesAndInjectsCorrelationHeaders(t *testing.T) {
 	clearRunTraceEnv(t)
 	t.Setenv("FI_CONFIG_DIR", t.TempDir())
 	t.Setenv("ANTHROPIC_BASE_URL", "https://freeinference.org/anthropic")
@@ -84,7 +84,11 @@ func TestPrepareLaunchClaudeGatesAndInjectsOnlySessionHeader(t *testing.T) {
 	if prepared.Trace == nil || !tracing.ValidateTraceID(prepared.Trace.SessionID) || prepared.Trace.Header != tracing.SessionHeader {
 		t.Fatalf("trace = %#v", prepared.Trace)
 	}
-	if !strings.Contains(envValue(prepared.Env, "ANTHROPIC_CUSTOM_HEADERS"), "X-Unrelated: retained") || !strings.Contains(envValue(prepared.Env, "ANTHROPIC_CUSTOM_HEADERS"), "X-Session-ID: "+prepared.Trace.SessionID) {
+	headers := envValue(prepared.Env, "ANTHROPIC_CUSTOM_HEADERS")
+	if !strings.Contains(headers, "X-Unrelated: retained") || !strings.Contains(headers, "X-Session-ID: "+prepared.Trace.SessionID) ||
+		!strings.Contains(headers, "X-FI-Client: claude-code") ||
+		!strings.Contains(headers, "X-FI-Companion-Version: 0.1.0") ||
+		!strings.Contains(headers, "X-FI-Workload: coding-agent") {
 		t.Fatalf("Claude headers were not composed: %q", envValue(prepared.Env, "ANTHROPIC_CUSTOM_HEADERS"))
 	}
 	if envValue(prepared.Env, "X-Probe") != "" || envValue(prepared.Env, "X-Request-ID") != "" {
@@ -145,8 +149,14 @@ func TestPrepareLaunchCodexAddsDocumentedMapping(t *testing.T) {
 		t.Fatalf("Codex launch trace = %#v, %v", prepared.Trace, err)
 	}
 	updated, _ := os.ReadFile(configPath)
-	if !strings.Contains(string(updated), "env_http_headers") || !strings.Contains(string(updated), "FI_TRACE_SESSION_ID") {
+	if !strings.Contains(string(updated), "env_http_headers") || !strings.Contains(string(updated), "FI_TRACE_SESSION_ID") ||
+		!strings.Contains(string(updated), "X-FI-Client") ||
+		!strings.Contains(string(updated), "FI_TRACE_COMPANION_VERSION") ||
+		!strings.Contains(string(updated), "X-FI-Workload") {
 		t.Fatalf("Codex mapping missing:\n%s", updated)
+	}
+	if envValue(prepared.Env, tracing.TraceCompanionVersionEnv) != "0.1.0" || envValue(prepared.Env, tracing.TraceWorkloadEnv) != tracing.WorkloadCodingAgent {
+		t.Fatalf("static correlation environment missing: %q / %q", envValue(prepared.Env, tracing.TraceCompanionVersionEnv), envValue(prepared.Env, tracing.TraceWorkloadEnv))
 	}
 	tracing.RemoveLaunchReceipt(prepared.ReceiptPath)
 }

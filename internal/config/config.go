@@ -77,8 +77,9 @@ type PrivacyConfig struct {
 }
 
 // TracingConfig controls Companion's launch-time support correlation. It is
-// intentionally separate from diagnostic probes: tracing adds only a random
-// per-launch X-Session-ID and never sends X-Probe or X-Request-ID.
+// intentionally separate from diagnostic probes: tracing adds one random
+// per-launch X-Session-ID plus fixed client/version/workload classifications,
+// and never sends X-Probe or X-Request-ID.
 type TracingConfig struct {
 	Enabled bool `json:"enabled"`
 }

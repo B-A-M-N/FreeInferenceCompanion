@@ -227,9 +227,9 @@ func cmdTraceCodexLifecycle(operation string, args []string, stdout, stderr io.W
 		if jsonOut {
 			fmt.Fprintf(stdout, "{\"operation\":\"setup\",\"client\":%q,\"ready\":%t,\"modified\":%t}\n", clientType, mapping.Ready, mapping.Modified)
 		} else if mapping.Modified {
-			fmt.Fprintln(stdout, "Codex trace mapping installed. Backup retained for uninstall.")
+			fmt.Fprintln(stdout, "Codex trace mappings installed. Backup retained for uninstall.")
 		} else {
-			fmt.Fprintln(stdout, "Codex trace mapping already installed.")
+			fmt.Fprintln(stdout, "Codex trace mappings already installed.")
 		}
 		return 0
 	}
@@ -303,27 +303,27 @@ func applyCodexMappingStatus(status *traceStatus) {
 		status.CodexMapping = "not applicable (provider is not FreeInference)"
 		return
 	}
-	configured, conflict, err := runtime.InspectCodexTraceHeader(path, evidence.ProviderID)
+	mapping, err := runtime.InspectCodexTraceHeaders(path, evidence.ProviderID)
 	if err != nil {
 		status.CodexMapping = "unavailable"
 		status.Note = "Codex trace mapping could not be inspected"
 		return
 	}
-	if conflict {
+	if len(mapping.Conflicts) > 0 {
 		status.CodexMapping = "conflict"
-		status.Note = "Codex X-Session-ID mapping is user-owned; Companion will not replace it"
+		status.Note = "Codex Companion header mapping is user-owned; Companion will not replace it"
 		return
 	}
-	if configured {
+	if mapping.Ready {
 		status.CodexMapping = "configured"
 		return
 	}
 	status.CodexMapping = "missing"
 	status.CodexSetupAvailable = codexConfigInstallable(path)
 	if status.CodexSetupAvailable {
-		status.Note = "Run `freeinference trace setup --client codex` to install the reversible mapping"
+		status.Note = "Run `freeinference trace setup --client codex` to install the reversible mappings"
 	} else {
-		status.Note = "Codex trace mapping is missing and its config is not writable"
+		status.Note = "Codex Companion mappings are incomplete and its config is not writable"
 	}
 }
 
