@@ -34,8 +34,18 @@ func installOrUpdate(opts Options, stdout, stderr io.Writer, update bool) (*Resu
 		return nil, errors.New("cannot install with both --no-bin and --no-plugin")
 	}
 	metadata, metadataFound, metadataErr := LoadInstallationMetadata(paths.MetadataPath())
-	if metadataErr != nil && !opts.Force {
-		return nil, fmt.Errorf("read installation metadata: %w (use --force to repair)", metadataErr)
+	if metadataErr != nil {
+		if !opts.Force {
+			return nil, fmt.Errorf("read installation metadata: %w (use --force to repair)", metadataErr)
+		}
+		// Force can repair corrupt metadata only when every target that would be
+		// replaced is absent or independently proven owned below. Never treat a
+		// corrupt record as proof that an existing file belongs to us.
+		metadata = nil
+		metadataFound = false
+		if stderr != nil {
+			fmt.Fprintf(stderr, "warning: installation metadata is unusable; force repair will refuse unowned existing targets: %v\n", metadataErr)
+		}
 	}
 	if metadataFound {
 		if err := validateMetadataPaths(metadata, paths); err != nil {
@@ -131,11 +141,10 @@ func installOrUpdate(opts Options, stdout, stderr io.Writer, update bool) (*Resu
 	result.Updated = update && result.OldVersion != ""
 	if result.Updated {
 		fmt.Fprintf(stdout, "Update complete: %s -> %s\n", result.OldVersion, result.Version)
+	} else if result.PartiallyInstalled {
+		fmt.Fprintln(stdout, "Core installation complete with warnings; review the lines above.")
 	} else {
 		fmt.Fprintln(stdout, "Installation complete.")
-	}
-	if result.PartiallyInstalled {
-		fmt.Fprintln(stdout, "Core installation complete with warnings; review the lines above.")
 	}
 	if result.PathMsg != "" {
 		fmt.Fprintf(stdout, "  %s\n", result.PathMsg)
@@ -290,6 +299,21 @@ func commitRelease(extractDir string, paths Paths, opts Options, manifest *Marke
 	metadata.ClaudePluginSHA256, _ = pathDigest(paths.claudePluginPath())
 	metadata.CodexPluginSHA256, _ = pathDigest(paths.codexPluginPath())
 	metadata.CodexMarketplaceSHA256, _ = pathDigest(paths.CodexMarketplaceDir)
+	if priorFound && prior != nil {
+		if opts.NoBin {
+			metadata.ManagedBinaryOwned = prior.ManagedBinaryOwned
+			metadata.ManagedBinarySHA256 = prior.ManagedBinarySHA256
+			metadata.ShimOwned = prior.ShimOwned
+		}
+		if opts.NoPlugin {
+			metadata.ClaudePluginOwned = prior.ClaudePluginOwned
+			metadata.ClaudePluginSHA256 = prior.ClaudePluginSHA256
+			metadata.CodexPluginOwned = prior.CodexPluginOwned
+			metadata.CodexPluginSHA256 = prior.CodexPluginSHA256
+			metadata.CodexMarketplaceOwned = prior.CodexMarketplaceOwned
+			metadata.CodexMarketplaceSHA256 = prior.CodexMarketplaceSHA256
+		}
+	}
 	metadataStage, err := stageInstallationMetadata(paths.MetadataPath(), metadata)
 	if err != nil {
 		return failed(fmt.Errorf("stage installation metadata: %w", err))

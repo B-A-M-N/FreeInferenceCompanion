@@ -26,6 +26,11 @@ type installTransaction struct {
 	entries []transactionEntry
 }
 
+// transactionFailureHook is test-only fault injection. It is nil in normal
+// operation and lets installer tests simulate a failure after a sibling rename
+// so rollback behavior is exercised at the live commit boundary.
+var transactionFailureHook func(target string) error
+
 func (tx *installTransaction) replace(target, staged string) error {
 	return tx.replaceInternal(target, staged, false)
 }
@@ -67,6 +72,11 @@ func (tx *installTransaction) replaceInternal(target, staged string, allowSymlin
 	}
 	entry.committed = true
 	tx.entries = append(tx.entries, entry)
+	if transactionFailureHook != nil {
+		if err := transactionFailureHook(target); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

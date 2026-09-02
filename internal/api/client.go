@@ -412,7 +412,7 @@ func newClientLegacyWithMode(baseURL, apiKey string, timeout time.Duration, test
 	return &Client{
 		baseURL: baseURL,
 		apiKey:  apiKey,
-		version: "dev",
+		version: version.Version,
 		httpClient: &http.Client{
 			Timeout: timeout,
 			Transport: &http.Transport{

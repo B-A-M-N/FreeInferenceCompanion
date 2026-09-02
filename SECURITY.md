@@ -2,9 +2,10 @@
 
 ## Supported versions
 
-The latest tagged release on the default branch is supported. Older releases
-may not contain current activation, credential-safety, or state-migration
-fixes; update before reporting a suspected issue.
+Until the first stable tag, the default branch is pre-release and support is
+best effort. After the first stable tag, the latest tagged release on the
+default branch is supported; older releases may not contain current
+activation, credential-safety, or state-migration fixes.
 
 ## Private reports
 

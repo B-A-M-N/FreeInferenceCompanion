@@ -294,8 +294,9 @@ types (`session_started`, `status_observed`, `prompt_submitted`,
 `turn_stopped`, `turn_failed`, `compaction_started`, `compaction_completed`,
 `model_switch`, `session_ended`, `warning_shown`, `warning_resolved`) and short sanitized
 details. Rotation kicks in past 256 KiB or 1,000 events per session.
-Sessions older than 30 days are cleaned up opportunistically by
-`CleanupStaleSessions`.
+Sessions older than 30 days become eligible for cleanup. The explicit
+`refresh` maintenance command invokes `CleanupStaleSessions`; normal hooks do
+not scan or delete session history.
 
 Use `freeinference failures` to aggregate retained incidents by category,
 model, and client. Categories cover rate limits, authentication and
@@ -320,7 +321,7 @@ make smoke      # Quick smoke test
 ## Project layout
 
 ```
-FreeInference/
+FreeInferenceCompanion/
 ├── cmd/fi/                    # Thin entry point (+ binary integration tests)
 ├── docs/codex.md              # Codex provider, profiles, and companion guide
 ├── internal/

@@ -66,6 +66,12 @@ func UpdateSessionIndex(paths Paths, snap *schema.Snapshot) error {
 	if snap == nil || snap.Session.ID == "" {
 		return nil
 	}
+	if err := validateClientType(snap.Client.Type); err != nil {
+		return err
+	}
+	if err := validateSessionID(snap.Session.ID); err != nil {
+		return err
+	}
 	// Ensure the sessions-index directory exists before acquiring the lock.
 	// This is an unnamespaced directory shared across all activations.
 	if err := ensureSecureDirAll(paths.SessionIndexDir()); err != nil {

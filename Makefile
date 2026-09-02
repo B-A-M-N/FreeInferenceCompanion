@@ -1,4 +1,4 @@
-.PHONY: build test test-race vet staticcheck fmt-check plugin-syntax-check plugin-validate trace-contract-check check release release-check checksums marketplace clean install lint tidy tidy-check mod-verify clean-tree-check security-scan smoke bench bench-ci run package package-smoke plugin-clean-install sbom provenance
+.PHONY: build test test-race vet staticcheck fmt-check plugin-syntax-check plugin-validate trace-contract-check check release release-check checksums marketplace clean install lint tidy tidy-check mod-verify clean-tree-check security-scan smoke bench bench-ci run package package-smoke package-repro-check plugin-clean-install sbom provenance
 
 BINARY=freeinference
 BUILD_DIR=build
@@ -55,7 +55,7 @@ release-check: clean-tree-check fmt-check vet staticcheck mod-verify tidy-check 
 
 # release runs the full quality gate, packages distributable artifacts, and
 # validates those exact archives from a clean extraction before succeeding.
-release: release-check package package-smoke plugin-clean-install
+release: release-check package package-repro-check package-smoke plugin-clean-install
 	@echo ""
 	@echo "release $(VERSION) packaged in $(RELEASE_DIR)/"
 	@ls -la $(RELEASE_DIR)/
@@ -95,7 +95,7 @@ package: build-all
 		echo "error: refusing to package a dirty version ($(VERSION)); commit and tag first"; \
 		exit 1; \
 	fi
-	@if ! echo "$(VERSION)" | grep -qE '^v?[0-9]+\.[0-9]+\.[0-9]+'; then \
+	@if ! echo "$(VERSION)" | grep -qE '^v?[0-9]+\.[0-9]+\.[0-9]+$$'; then \
 		echo "error: VERSION $(VERSION) is not a semantic version; tag a release first"; \
 		exit 1; \
 	fi
@@ -167,7 +167,19 @@ package: build-all
 	$(MAKE) marketplace RELEASE_DIR=$(RELEASE_DIR) VERSION=$(VERSION) && \
 	$(MAKE) provenance RELEASE_DIR=$(RELEASE_DIR) VERSION=$(VERSION) COMMIT=$(COMMIT) STAGE_DIR="$$staging" && \
 	$(MAKE) checksums RELEASE_DIR=$(RELEASE_DIR) && \
-	echo "packaging complete"
+		echo "packaging complete"
+
+# package-repro-check builds the package twice with the same source epoch and
+# compares every generated file. This keeps the reproducibility claim honest,
+# including generated SBOM and provenance metadata.
+package-repro-check: package
+	@tmp="$$(mktemp -d "$${TMPDIR:-/tmp}/freeinference-package-repro.XXXXXX")"; \
+	trap 'rm -rf "$$tmp"' EXIT; \
+	cp -a $(RELEASE_DIR) "$$tmp/first"; \
+	$(MAKE) package VERSION=$(VERSION) COMMIT=$(COMMIT); \
+	cp -a $(RELEASE_DIR) "$$tmp/second"; \
+	diff -ru "$$tmp/first" "$$tmp/second"; \
+	echo "package reproducibility check passed"
 
 # marketplace creates the manifest published with each release. Its checksums
 # are derived from the exact combined installer ZIPs created above, so the

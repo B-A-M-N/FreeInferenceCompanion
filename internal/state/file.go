@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/secure"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
@@ -20,6 +21,8 @@ import (
 const (
 	DefaultCacheDir   = ".cache/freeinference-companion"
 	DefaultConfigFile = "config.toml"
+	MaxSessionIDBytes = 512
+	maxStateJSONBytes = 8 << 20
 )
 
 // ChecksumFileSuffix is appended to cache files to store their SHA-256 checksum.
@@ -103,6 +106,21 @@ func validateClientType(clientType string) error {
 	return nil
 }
 
+func validateSessionID(sessionID string) error {
+	if strings.TrimSpace(sessionID) == "" {
+		return errors.New("session ID must not be empty")
+	}
+	if len(sessionID) > MaxSessionIDBytes {
+		return fmt.Errorf("session ID exceeds %d bytes", MaxSessionIDBytes)
+	}
+	for _, r := range sessionID {
+		if unicode.IsControl(r) {
+			return errors.New("session ID contains control characters")
+		}
+	}
+	return nil
+}
+
 // SessionDir returns the directory for a given client type and session ID.
 // Validates clientType against the fixed schema enum to prevent path injection.
 func (p Paths) SessionDir(clientType, sessionID string) string {
@@ -119,6 +137,9 @@ func (p Paths) SessionDir(clientType, sessionID string) string {
 // directory.
 func (p Paths) SessionDirFor(clientType, sessionID string) (string, error) {
 	if err := validateClientType(clientType); err != nil {
+		return "", err
+	}
+	if err := validateSessionID(sessionID); err != nil {
 		return "", err
 	}
 	return filepath.Join(p.CacheDir, "sessions", clientType, sessionKey(sessionID)), nil
@@ -472,6 +493,16 @@ func WriteJSONAtomically(path string, v any) error {
 // Rejects files with trailing garbage after the JSON value (likely a
 // partial write or corruption) — the decode will not reach EOF.
 func ReadJSON(path string, v any) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return fmt.Errorf("JSON state file is not a regular file: %s", path)
+	}
+	if info.Size() > maxStateJSONBytes {
+		return fmt.Errorf("JSON state file exceeds the supported size limit: %s", path)
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -504,6 +535,9 @@ func ReadJSON(path string, v any) error {
 // return a clear incompatibility error so a downgrade does not destroy valid
 // newer state.
 func LoadSnapshot(paths Paths, clientType, sessionID string) (*schema.Snapshot, error) {
+	if _, err := paths.SessionDirFor(clientType, sessionID); err != nil {
+		return nil, err
+	}
 	path := paths.SessionSnapshot(clientType, sessionID)
 	var s schema.Snapshot
 	if err := ReadJSON(path, &s); err != nil {

@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -76,7 +77,7 @@ func main() {
 		var m struct {
 			Path    string
 			Version string
-			Hash    string
+			Sum     string
 			Main    bool
 		}
 		if err := dec.Decode(&m); err != nil {
@@ -88,12 +89,17 @@ func main() {
 		}
 		if m.Main {
 			mod.Version = m.Version
-			mod.Hash = m.Hash
+			mod.Sum = m.Sum
 			continue
 		}
-		deps = append(deps, module{Path: m.Path, Version: m.Version, Hash: m.Hash})
+		deps = append(deps, module{Path: m.Path, Version: m.Version, Sum: m.Sum})
 	}
 	sort.Slice(deps, func(i, j int) bool { return deps[i].Path < deps[j].Path })
+	created, err := creationTimestamp()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "creation timestamp: %v\n", err)
+		os.Exit(1)
+	}
 
 	packages := []pkg{makePackage("SPDXRef-Package-Root", mod)}
 	rels := []relationship{
@@ -114,7 +120,7 @@ func main() {
 		DocName:           "freeinference-companion-" + version,
 		DocumentNamespace: "https://github.com/b-a-m-n/freeinference-companion/releases/" + version,
 		CreationInfo: creationInfo{
-			Created:  time.Now().UTC().Format(time.RFC3339),
+			Created:  created,
 			Creators: []string{"Tool: freeinference-companion-makefile"},
 		},
 		Packages:      packages,
@@ -149,7 +155,7 @@ func main() {
 type module struct {
 	Path    string
 	Version string
-	Hash    string
+	Sum     string
 }
 
 func makePackage(spdxID string, m module) pkg {
@@ -163,15 +169,28 @@ func makePackage(spdxID string, m module) pkg {
 		LicenseDeclared:  "NOASSERTION",
 		Copyright:        "NOASSERTION",
 	}
-	// Go module hashes are base64-encoded SHA-256 h1 hashes prefixed with
-	// "h1:". SPDX expects the digest as hexadecimal SHA-256, so decode the
-	// base64 bytes and emit those bytes as hex. If decoding fails, omit.
-	if m.Hash != "" {
-		if algo, hexsum, ok := decodeGoHash(m.Hash); ok {
+	// Go module sums are base64-encoded SHA-256 h1 hashes prefixed with
+	// "h1:". They identify the module zip in the Go module cache, not a
+	// source-tree digest. SPDX expects the digest as hexadecimal SHA-256, so
+	// decode the base64 bytes and emit those bytes as hex. If decoding fails,
+	// omit the checksum rather than inventing one.
+	if m.Sum != "" {
+		if algo, hexsum, ok := decodeGoHash(m.Sum); ok {
 			p.Checksums = []map[string]string{{"algorithm": algo, "checksumValue": hexsum}}
 		}
 	}
 	return p
+}
+
+func creationTimestamp() (string, error) {
+	if raw := os.Getenv("SOURCE_DATE_EPOCH"); raw != "" {
+		seconds, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			return "", fmt.Errorf("SOURCE_DATE_EPOCH must be an integer: %w", err)
+		}
+		return time.Unix(seconds, 0).UTC().Format(time.RFC3339), nil
+	}
+	return time.Now().UTC().Format(time.RFC3339), nil
 }
 
 func decodeGoHash(h string) (algo, hexsum string, ok bool) {

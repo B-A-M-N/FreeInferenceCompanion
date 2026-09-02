@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/secure"
+	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
 
 // Event is one sanitized lifecycle event persisted to events.jsonl. It NEVER
@@ -335,19 +338,28 @@ func ReadEvents(paths Paths, clientType, sessionID string, max int) ([]Event, er
 // than MaxSessionAge. Best-effort. Also prunes stale entries from the session
 // index so the index does not accumulate dead references.
 func CleanupStaleSessions(paths Paths, now time.Time) error {
-	sessionsRoot := paths.CacheDir + "/sessions"
-	entries, err := os.ReadDir(sessionsRoot)
-	if err != nil {
-		if os.IsNotExist(err) {
+	sessionsRoot := filepath.Join(paths.CacheDir, "sessions")
+	if info, statErr := os.Lstat(sessionsRoot); statErr != nil {
+		if os.IsNotExist(statErr) {
 			return nil
 		}
+		return statErr
+	} else if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("sessions root is not a directory: %s", sessionsRoot)
+	}
+	entries, err := os.ReadDir(sessionsRoot)
+	if err != nil {
 		return err
 	}
 	for _, clientEntry := range entries {
-		if !clientEntry.IsDir() {
+		if clientEntry.Name() != schema.ClientClaudeCode && clientEntry.Name() != schema.ClientCodex {
 			continue
 		}
-		clientDir := sessionsRoot + "/" + clientEntry.Name()
+		clientDir := filepath.Join(sessionsRoot, clientEntry.Name())
+		clientInfo, infoErr := os.Lstat(clientDir)
+		if infoErr != nil || clientInfo.Mode()&os.ModeSymlink != 0 || !clientInfo.IsDir() {
+			continue
+		}
 		sessions, err := os.ReadDir(clientDir)
 		if err != nil {
 			continue
@@ -356,14 +368,26 @@ func CleanupStaleSessions(paths Paths, now time.Time) error {
 			if !s.IsDir() {
 				continue
 			}
-			dir := clientDir + "/" + s.Name()
-			if isStale(dir, now) {
-				_ = os.RemoveAll(dir)
-			}
+			dir := filepath.Join(clientDir, s.Name())
+			cleanupStaleSession(dir, now)
 		}
 	}
 	// Prune stale entries from the index.
 	return pruneStaleIndexEntries(paths, now)
+}
+
+func cleanupStaleSession(dir string, now time.Time) {
+	if !isStale(dir, now) {
+		return
+	}
+	lock := NewFileLock(filepath.Join(dir, "lock"))
+	if err := lock.Acquire(); err != nil {
+		return
+	}
+	defer lock.Release()
+	if isStale(dir, now) {
+		_ = os.RemoveAll(dir)
+	}
 }
 
 // pruneStaleIndexEntries removes index entries whose session directories no
@@ -391,6 +415,9 @@ func pruneStaleIndexEntries(paths Paths, now time.Time) error {
 
 	var live []SessionIndexEntry
 	for _, e := range idx.Sessions {
+		if validateClientType(e.Client) != nil || validateSessionID(e.SessionID) != nil {
+			continue
+		}
 		// Drop entries whose last event exceeds the retention window.
 		if now.Sub(e.LastEventAt) > MaxSessionAge {
 			continue
@@ -416,6 +443,9 @@ func isStale(dir string, now time.Time) bool {
 	}
 	newest := time.Time{}
 	for _, e := range entries {
+		if e.Name() == "lock" || strings.HasSuffix(e.Name(), ".lock") {
+			continue
+		}
 		info, err := e.Info()
 		if err != nil {
 			continue

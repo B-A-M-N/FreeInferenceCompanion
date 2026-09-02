@@ -519,8 +519,18 @@ func extractZIP(archive, destDir string) error {
 			rc.Close()
 			return fmt.Errorf("archive entry exceeds the individual size limit")
 		}
-		outFile.Close()
+		if err := outFile.Close(); err != nil {
+			rc.Close()
+			return fmt.Errorf("close extracted file: %w", err)
+		}
 		rc.Close()
+		mode = f.Mode().Perm()
+		if mode == 0 {
+			mode = 0644
+		}
+		if err := os.Chmod(target, mode); err != nil {
+			return fmt.Errorf("set extracted file mode: %w", err)
+		}
 	}
 	return nil
 }
@@ -548,19 +558,46 @@ func safeArchiveTarget(destDir, name string) (string, error) {
 
 // copyFile copies src to dst.
 func copyFile(src, dst string) error {
-	in, err := os.ReadFile(src)
+	info, err := os.Lstat(src)
 	if err != nil {
 		return err
 	}
-	info, err := os.Stat(src)
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return fmt.Errorf("source is not a regular file: %s", src)
+	}
+	f, err := os.Open(src)
 	if err != nil {
 		return err
+	}
+	in, readErr := io.ReadAll(io.LimitReader(f, maxArchiveFileBytes+1))
+	closeErr := f.Close()
+	if readErr != nil {
+		return readErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if len(in) > maxArchiveFileBytes {
+		return fmt.Errorf("source file exceeds the supported size limit")
 	}
 	mode := info.Mode().Perm()
 	if mode == 0 {
 		mode = 0644
 	}
-	return os.WriteFile(dst, in, mode)
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := out.Write(in); err != nil {
+		_ = out.Close()
+		_ = os.Remove(dst)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(dst)
+		return err
+	}
+	return nil
 }
 
 // copyDir recursively copies src directory into dst directory.

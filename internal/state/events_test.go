@@ -2,6 +2,7 @@ package state
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -55,6 +56,21 @@ func TestEventPathsRejectUnknownClientWithoutCreatingDirectories(t *testing.T) {
 	}
 	if _, err := os.Stat(paths.CacheDir + "/sessions"); !os.IsNotExist(err) {
 		t.Fatalf("invalid client created cache directories: %v", err)
+	}
+}
+
+func TestSessionPathsRejectEmptyOversizedAndControlIDs(t *testing.T) {
+	paths := testPaths(t)
+	for _, sessionID := range []string{"", strings.Repeat("x", MaxSessionIDBytes+1), "bad\nvalue"} {
+		if err := paths.EnsureSessionDir(schema.ClientClaudeCode, sessionID); err == nil {
+			t.Fatalf("session ID %q must be rejected", sessionID)
+		}
+		if err := AppendEvent(paths, schema.ClientClaudeCode, sessionID, Event{Type: EventSessionStarted}); err == nil {
+			t.Fatalf("event append accepted invalid session ID %q", sessionID)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(paths.CacheDir, "sessions")); !os.IsNotExist(err) {
+		t.Fatalf("invalid session IDs created session state: %v", err)
 	}
 }
 

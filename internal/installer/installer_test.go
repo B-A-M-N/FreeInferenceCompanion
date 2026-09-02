@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -181,6 +182,171 @@ func TestInstallFresh(t *testing.T) {
 	// Verify version output.
 	if !strings.Contains(stdout.String(), "v0.2.0") {
 		t.Errorf("expected version v0.2.0 in output:\n%s", stdout.String())
+	}
+}
+
+func TestUpdateForceReinstallsSameVersion(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "/usr/bin:/bin")
+	manifestURL, _, server := testServer(t, "v0.2.0", "linux-amd64")
+	defer server.Close()
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Install(Options{ManifestURL: manifestURL, Platform: "linux-amd64"}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("initial install: %v", err)
+	}
+	result, err := Update(Options{ManifestURL: manifestURL, Platform: "linux-amd64", Force: true}, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("forced update: %v", err)
+	}
+	if result.AlreadyLatest || !result.Installed || !result.Updated {
+		t.Fatalf("forced update result = %+v", result)
+	}
+	metadata, found, err := LoadInstallationMetadata(paths.MetadataPath())
+	if err != nil || !found || metadata.InstalledVersion != "v0.2.0" {
+		t.Fatalf("forced update metadata = %+v, found=%v, err=%v", metadata, found, err)
+	}
+}
+
+func TestPartialUpdatePreservesSkippedOwnership(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "/usr/bin:/bin")
+	manifestURL, _, server := testServer(t, "v0.2.0", "linux-amd64")
+	defer server.Close()
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Install(Options{ManifestURL: manifestURL, Platform: "linux-amd64"}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("initial install: %v", err)
+	}
+	newManifest, _, newServer := testServer(t, "v0.3.0", "linux-amd64")
+	defer newServer.Close()
+	if _, err := Update(Options{ManifestURL: newManifest, Platform: "linux-amd64", NoPlugin: true}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("binary-only update: %v", err)
+	}
+	latestManifest, _, latestServer := testServer(t, "v0.4.0", "linux-amd64")
+	defer latestServer.Close()
+	if _, err := Update(Options{ManifestURL: latestManifest, Platform: "linux-amd64", NoBin: true}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("plugin-only update: %v", err)
+	}
+	if err := Uninstall(paths, io.Discard, io.Discard); err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	for _, path := range []string{paths.BinaryPath, paths.shimPath(), paths.claudePluginPath(), paths.codexPluginPath(), paths.CodexMarketplaceDir} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Errorf("installer-owned target survived uninstall: %s (%v)", path, err)
+		}
+	}
+}
+
+func TestForceRepairRejectsExistingTargetWithoutOwnership(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "/usr/bin:/bin")
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.BinaryPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.BinaryPath, []byte("foreign"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.MetadataPath()), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.MetadataPath(), []byte("{"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	manifestURL, _, server := testServer(t, "v0.2.0", "linux-amd64")
+	defer server.Close()
+	if _, err := Install(Options{ManifestURL: manifestURL, Platform: "linux-amd64", Force: true}, io.Discard, io.Discard); err == nil {
+		t.Fatal("force repair must not adopt an existing target without ownership proof")
+	}
+	data, err := os.ReadFile(paths.BinaryPath)
+	if err != nil || string(data) != "foreign" {
+		t.Fatalf("foreign binary changed: %q, %v", data, err)
+	}
+}
+
+func TestInstallTransactionRollsBackAfterReplacementFailure(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "/usr/bin:/bin")
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldManifest, _, oldServer := testServer(t, "v0.2.0", "linux-amd64")
+	defer oldServer.Close()
+	if _, err := Install(Options{ManifestURL: oldManifest, Platform: "linux-amd64"}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("initial install: %v", err)
+	}
+	oldBinary, err := os.ReadFile(paths.BinaryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldClaude, err := os.ReadFile(filepath.Join(paths.claudePluginPath(), ".claude-plugin", "plugin.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	transactionFailureHook = func(target string) error {
+		if target == paths.codexPluginPath() {
+			return errors.New("injected commit failure")
+		}
+		return nil
+	}
+	defer func() { transactionFailureHook = nil }()
+	newManifest, _, newServer := testServer(t, "v0.3.0", "linux-amd64")
+	defer newServer.Close()
+	if _, err := Update(Options{ManifestURL: newManifest, Platform: "linux-amd64"}, io.Discard, io.Discard); err == nil {
+		t.Fatal("injected commit failure must be returned")
+	}
+	gotBinary, _ := os.ReadFile(paths.BinaryPath)
+	gotClaude, _ := os.ReadFile(filepath.Join(paths.claudePluginPath(), ".claude-plugin", "plugin.json"))
+	if string(gotBinary) != string(oldBinary) || string(gotClaude) != string(oldClaude) {
+		t.Fatalf("transaction rollback lost prior installation: binary=%q claude=%q", gotBinary, gotClaude)
+	}
+}
+
+func TestExtractZIPPreservesExecutableMode(t *testing.T) {
+	archivePath := filepath.Join(t.TempDir(), "mode.zip")
+	f, err := os.Create(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := zip.NewWriter(f)
+	h := &zip.FileHeader{Name: "scripts/run-hook.sh", Method: zip.Store}
+	h.SetMode(0755)
+	entry, err := w.CreateHeader(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := entry.Write([]byte("#!/bin/sh\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dest := t.TempDir()
+	if err := extractZIP(archivePath, dest); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(dest, "scripts", "run-hook.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0755 {
+		t.Fatalf("extracted mode = %o, want 0755", info.Mode().Perm())
 	}
 }
 
