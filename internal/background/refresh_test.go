@@ -1,6 +1,7 @@
 package background
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -214,20 +215,50 @@ func TestHealthWorkerRespectsMissingURL(t *testing.T) {
 	}
 }
 
+func TestPublicStatusWorkerUsesUnauthenticatedBoundedCache(t *testing.T) {
+	paths := state.NewPathsWithDir(t.TempDir())
+	r := NewRefresher(nil, paths, "")
+	now := time.Now().UTC().Truncate(time.Second)
+	ok := true
+	latency := int64(412)
+	uptime := 0.998
+	r.PublicStatusFetch = func(context.Context) (*api.PublicStatusResponse, error) {
+		return &api.PublicStatusResponse{
+			Total: 1, Healthy: 1,
+			Cycle: api.PublicStatusCycle{OK: &ok, CheckedAt: now.Format(time.RFC3339)},
+			Models: []api.PublicStatusModel{{
+				ModelID: "glm-5.1", UptimeRatio: &uptime,
+				Latest: &api.PublicStatusSample{OK: &ok, CheckedAt: now.Format(time.RFC3339), LatencyMs: &latency},
+			}},
+		}, nil
+	}
+	res := r.WorkerRefresh(WorkerPublicStatus)
+	if !res.PublicStatusRefreshed || res.Error != "" {
+		t.Fatalf("public status refresh = %+v", res)
+	}
+	gs, err := state.LoadGlobal(r.Paths)
+	if err != nil || gs.PublicStatus == nil || len(gs.PublicStatus.Models) != 1 {
+		t.Fatalf("public status cache = %#v, err=%v", gs.PublicStatus, err)
+	}
+	if gs.PublicStatus.Models[0].Latest == nil || gs.PublicStatus.Models[0].Latest.LatencyMs == nil || *gs.PublicStatus.Models[0].Latest.LatencyMs != latency {
+		t.Fatalf("cached model metrics = %#v", gs.PublicStatus.Models[0])
+	}
+}
+
 func TestStaleWorkers(t *testing.T) {
 	server := modelsServer(t, nil, func(w http.ResponseWriter, r *http.Request) { writeModelsJSON(w) })
 	defer server.Close()
 
 	r := testRefresher(t, server, "")
 	stale := StaleWorkers(r.Paths, "")
-	if len(stale) != 1 || stale[0] != WorkerModels {
+	if len(stale) != 2 || stale[0] != WorkerModels || stale[1] != WorkerPublicStatus {
 		t.Errorf("stale = %v", stale)
 	}
 
 	r.WorkerRefresh(WorkerModels)
 	stale = StaleWorkers(r.Paths, "")
-	if len(stale) != 0 {
-		t.Errorf("after refresh, stale = %v", stale)
+	if len(stale) != 1 || stale[0] != WorkerPublicStatus {
+		t.Errorf("after model refresh, stale = %v", stale)
 	}
 }
 

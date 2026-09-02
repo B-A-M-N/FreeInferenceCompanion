@@ -1,4 +1,4 @@
-.PHONY: build test test-race vet fmt-check plugin-syntax-check plugin-validate check release release-check checksums marketplace clean install lint tidy tidy-check mod-verify clean-tree-check security-scan smoke bench bench-ci run package package-smoke plugin-clean-install sbom provenance
+.PHONY: build test test-race vet fmt-check plugin-syntax-check plugin-validate trace-contract-check check release release-check checksums marketplace clean install lint tidy tidy-check mod-verify clean-tree-check security-scan smoke bench bench-ci run package package-smoke plugin-clean-install sbom provenance
 
 BINARY=freeinference
 BUILD_DIR=build
@@ -45,7 +45,7 @@ build-all: build-linux-amd64 build-linux-arm64 build-darwin-amd64 build-darwin-a
 # release-check is the authoritative quality gate for both CI and local
 # releases. Every gate listed here MUST pass or the release stops. This is the
 # single source of truth — the tag workflow depends on this exact target.
-release-check: clean-tree-check fmt-check vet mod-verify tidy-check test test-race security-scan bench-ci plugin-syntax-check build-all build
+release-check: clean-tree-check fmt-check vet mod-verify tidy-check test test-race security-scan bench-ci plugin-syntax-check trace-contract-check build-all build
 	@if file $(BUILD_DIR)/$(BINARY) 2>&1 | grep -q "statically linked"; then \
 		echo "static binary verified"; \
 	else \
@@ -281,7 +281,7 @@ package-smoke:
 # empty HOME, removes `freeinference` from PATH, and exercises the hook wrapper. The
 # wrapper must locate the bundled platform binary and exit zero. This proves
 # that a fresh install with no preinstalled freeinference binary still works.
-plugin-clean-install: package
+plugin-clean-install: package trace-contract-check
 	@tmpdir="$$(mktemp -d "$${TMPDIR:-/tmp}/freeinference-plugin.XXXXXX")"; \
 	trap 'rm -rf "$$tmpdir"' EXIT; \
 	empty_path="$$tmpdir/empty-bin"; \
@@ -363,6 +363,13 @@ plugin-syntax-check:
 	@python3 -c "import json; json.load(open('plugins/claude-code/.claude-plugin/plugin.json')); json.load(open('plugins/claude-code/hooks/hooks.json')); json.load(open('plugins/codex/.codex-plugin/plugin.json')); print('plugin manifests are syntactically valid JSON')"
 	@bash -n plugins/claude-code/scripts/run-hook.sh && echo "hook wrapper is syntactically valid bash"
 
+# trace-contract-check exercises launch-time ID/header/receipt behavior and
+# client-specific activation gates without starting a real coding client.
+# Keep this in both release and clean-install validation so a distributable
+# bundle cannot regress the documented launcher contract silently.
+trace-contract-check:
+	@GOCACHE=$${GOCACHE:-/tmp/fic-gocache} go test ./internal/tracing ./internal/runtime ./internal/cli -run 'TestGenerateTraceID|TestValidateTraceID|TestComposeClaudeHeaders|TestReceiptIsPrivate|TestEnsureCodexTraceHeader|TestInspectCodexTraceHeader|TestPrepareLaunch|TestLaunchReceipt|TestSessionEventsNeverContainTraceID|TestReportIncludesTrace' -count=1
+
 # plugin-validate is the legacy name for plugin-syntax-check. It is preserved
 # for compatibility with existing CI jobs and scripts, but it does NOT perform
 # full plugin validation. New callers should use plugin-syntax-check to make
@@ -416,7 +423,7 @@ security-scan:
 	fi
 	govulncheck ./...
 
-check: fmt-check vet test test-race plugin-syntax-check mod-verify tidy-check
+check: fmt-check vet test test-race plugin-syntax-check trace-contract-check mod-verify tidy-check
 	@git diff --check
 	@echo "all checks passed"
 

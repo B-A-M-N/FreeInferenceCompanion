@@ -34,6 +34,26 @@ wire_api = "responses"
 Responses protocol. The configuration above was verified with Codex and
 FreeInference's `glm-5.1` model.
 
+For launch-time support correlation, the Companion uses Codex's documented
+environment-header mapping. Install it explicitly; `freeinference run codex`
+only verifies the mapping and fails open when setup is absent:
+
+```toml
+[model_providers.freeinference.env_http_headers]
+"X-Session-ID" = "FI_TRACE_SESSION_ID"
+```
+
+Use the reversible lifecycle commands:
+
+```bash
+freeinference trace setup --client codex
+freeinference trace uninstall --client codex
+```
+
+Setup creates a one-time backup, preserves unrelated configuration, refuses
+conflicts, and uninstall restores the backup only when the mapping is still
+unchanged.
+
 ## 2. Add model profiles
 
 Codex profiles are small configuration layers. Create one file per model in
@@ -110,6 +130,19 @@ When Codex does not expose its active profile to child commands, provider
 selection is reported as unverified. The companion remains fail-closed rather
 than treating a generic FreeInference key as proof that the current Codex
 session uses that provider.
+
+To launch Codex with a fresh per-process trace correlation, use the explicit
+launcher. It does not proxy traffic:
+
+```bash
+freeinference run codex
+freeinference trace --client codex --json
+```
+
+Disable new trace injection with `freeinference config set tracing.enabled
+false` or `FI_TRACING=0`. If the selected provider is unverified, off-host, or
+already has a different `X-Session-ID` mapping, the launcher starts Codex
+normally and does not replace that mapping.
 
 After installation, these skills are available:
 

@@ -25,6 +25,9 @@ func TestFetchPublicStatusUsesUnauthenticatedGET(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "" {
 			t.Errorf("public status request carried authorization header %q", got)
 		}
+		if got := r.Header.Get("X-Session-ID"); got != "" {
+			t.Errorf("public status request carried trace header %q", got)
+		}
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Body: io.NopCloser(strings.NewReader(`{

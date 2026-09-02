@@ -10,6 +10,7 @@ import (
 	"github.com/b-a-m-n/freeinference-companion/internal/background"
 	"github.com/b-a-m-n/freeinference-companion/internal/runtime"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
+	"github.com/b-a-m-n/freeinference-companion/internal/tracing"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
 
@@ -99,7 +100,7 @@ func handleClaudeHook(paths state.Paths, eventName string, stdin io.Reader, stdo
 
 	switch eventName {
 	case "SessionStart":
-		_ = adapter.HandleSessionStartWith(input, activation)
+		_ = adapter.HandleSessionStartWithTrace(input, activation, consumeTraceForHook(schema.ClientClaudeCode, activation))
 		maybeRequestDetachedRefresh(paths, activation)
 	case "SessionEnd":
 		_ = adapter.HandleSessionEnd(sessionID)
@@ -140,7 +141,7 @@ func handleCodexHook(paths state.Paths, eventName string, stdin io.Reader, stdou
 
 	switch eventName {
 	case "SessionStart":
-		_ = adapter.HandleSessionStartWith(input, activation)
+		_ = adapter.HandleSessionStartWithTrace(input, activation, consumeTraceForHook(schema.ClientCodex, activation))
 		maybeRequestDetachedRefresh(paths, activation)
 	case "SessionEnd":
 		_ = adapter.HandleSessionEnd(sessionID)
@@ -162,6 +163,28 @@ func handleCodexHook(paths state.Paths, eventName string, stdin io.Reader, stdou
 		_ = adapter.HandleStopFailure(input, sessionID)
 	default:
 		return
+	}
+}
+
+func consumeTraceForHook(client string, activation runtime.Activation) *schema.TraceInfo {
+	path := os.Getenv(tracing.TraceReceiptEnv)
+	if path == "" {
+		return nil
+	}
+	receipt, err := tracing.ConsumeLaunchReceipt(path, string(client), activation.Origin)
+	if err != nil {
+		return nil
+	}
+	return &schema.TraceInfo{
+		Enabled:        true,
+		Verified:       true,
+		SessionID:      receipt.TraceID,
+		Source:         string(receipt.Source),
+		StartedAt:      receipt.StartedAt,
+		Provider:       receipt.Provider,
+		Client:         receipt.Client,
+		Header:         receipt.HeaderName,
+		EndpointOrigin: receipt.EndpointOrigin,
 	}
 }
 

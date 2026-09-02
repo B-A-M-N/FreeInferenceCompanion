@@ -18,6 +18,10 @@ freeinference doctor
 # Check public service health without credentials or session state
 freeinference fi-status
 
+# Launch a client with per-process support correlation (optional)
+freeinference run claude
+freeinference trace
+
 # Browse available models
 freeinference models --refresh
 
@@ -33,11 +37,12 @@ The release binary is fully static (`CGO_ENABLED=0`, verified with `ldd`).
 ```
 freeinference CLI (Go, static binary)
   ├── reads/writes ~/.cache/freeinference-companion/
-  │   ├── global/          # Provider health, model catalog, circuit breakers,
-  │   │                    # session index, refresh locks
+  │   ├── global/          # Provider health, model catalog, public-status,
+  │   │                    # circuit breakers, session index, refresh locks
   │   └── sessions/        # Per-session snapshots and advisory locks
   ├── commands: status, sessions, snapshot, render, models, doctor,
-  │             report, dashboard, context, cache, fi-status, refresh, status-line
+  │             report, failures, dashboard, context, cache, fi-status, run, trace,
+  │             refresh, status-line
   └── hook: freeinference hook claude-code <event>
 
 Claude Code plugin → scripts/run-hook.sh → freeinference hook claude-code <event>
@@ -67,17 +72,17 @@ surfaces the user already has:
 
 ### Design principles
 
-- **Status line reads live Claude JSON from stdin + cached health data** — zero network, average-latency target only
+- **Status line reads live Claude JSON from stdin + cached health/model-monitor data** — zero network, average-latency target only
 - **Hooks do local computation only** — no network, average-latency target only, always fail open (exit 0)
 - **Every session mutation holds a cross-process file lock** — concurrent hooks and status lines coordinate writes; lock contention returns immediately (fail-open) and is counted in `state.DroppedMutations()`
 - **Warnings use JSON `systemMessage`** — never plain stdout, never `additionalContext`, never in model context; no warning → no output at all (zero bytes)
 - **Surface eligibility is gated by seven checks** — runtime active, client matches, session matches, session active, activation identity matches, observation fresh, provider confirmed FreeInference; any gate failing produces zero bytes
 - **Provider detection gates all warnings** — no FreeInference warning or health symbol ever appears in a non-FreeInference session
-- **Background refreshes are detached and coalesced across processes** — file-lock single-flight, per-endpoint circuit breakers (2→30min backoff), `Retry-After` honored
+- **Background refreshes are detached and coalesced across processes** — file-lock single-flight, per-endpoint circuit breakers (2→30min backoff), `Retry-After` honored; public model status uses no credentials
 - **No inference probes for monitoring** — `freeinference doctor --probe --model <name>` is manual only, marked `X-Probe: synthetic`
 - **Advisory warnings, never blocking** — context pressure, projection overflow, cache-low with pattern classification and likely diagnosis, cache TTL expiry; all labeled with confidence, all advisory
 - **Schema validation + quarantine** — corrupt or unsupported state files are renamed aside so subsequent writes start fresh; hooks never block on bad state
-- **Sanitized structured event log** — per-session `events.jsonl` records only event types and short categories; never prompt text, responses, transcripts, paths, keys, or raw error bodies
+- **Sanitized structured event log** — per-session `events.jsonl` records bounded failure categories and safe metadata; never prompt text, responses, transcripts, paths, keys, or raw error bodies
 
 ## CLI reference
 
@@ -90,11 +95,14 @@ surfaces the user already has:
 | `freeinference models [--model <name>] [--refresh]` | List FreeInference models |
 | `freeinference doctor [--probe --model <name>]` | Diagnose connectivity and configuration |
 | `freeinference report [--client <type>] [--session <id>] [--format markdown\|json]` | Generate a sanitized support report (includes budget projection when the provider capability is available) |
+| `freeinference failures [--client <type>] [--session <id>] [--model <name>] [--since <duration>] [--json]` | Summarize retained, sanitized turn-failure incidents locally |
 | `freeinference dashboard [--status] [--print-url]` | Open FreeInference account dashboard (`--status` for service health page) |
 | `freeinference fi-status [--json] [--problems|--down] [--details]` | Fetch public service status without credentials or local session state; all models are shown by default |
+| `freeinference run claude|codex [args...]` | Explicitly launch a verified client with a fresh per-process `X-Session-ID` correlation |
+| `freeinference trace [setup\|uninstall] [--client codex] [--json]` | Show trace metadata or manage the reversible Codex header mapping |
 | `freeinference context [--session <id>]` | Show context pressure information |
 | `freeinference cache [--session <id>]` | Show cache efficiency pattern classification and likely diagnoses |
-| `freeinference refresh [--force] [--if-stale --detach] [--worker models\|health\|account-usage]` | Refresh cached provider metadata |
+| `freeinference refresh [--force] [--if-stale --detach] [--worker models\|health\|account-usage\|public-status]` | Refresh cached provider metadata and public model status |
 | `freeinference hook <client> <event>` | Process a lifecycle hook event (internal) |
 | `freeinference status-line install\|uninstall` | Manage the Claude Code status line |
 
@@ -110,6 +118,7 @@ surfaces the user already has:
 | `FI_SESSION_ID` | — | Explicit session override for status/context/report |
 | `FI_PROVIDER` | — | Set to `freeinference` for attribution metadata only. Does NOT activate the companion. Activation requires a supported endpoint and credential. |
 | `FI_NO_BACKGROUND` | — | Set to `1` to disable detached background refresh |
+| `FI_TRACING` | `1` for `freeinference run` | Enable or disable launch-time trace correlation; it does not affect ordinary client launches |
 
 The companion activates only when the current client has an approved
 FreeInference runtime route and its matching credential. Claude Code uses
@@ -117,6 +126,12 @@ FreeInference runtime route and its matching credential. Claude Code uses
 Codex activation is established from the selected provider in
 `~/.codex/config.toml` and that provider's `env_key`; a generic
 `FREEINFERENCE_API_KEY` alone is not evidence that either client is using it.
+
+Trace correlation is explicit and launch-scoped. `freeinference run claude`
+uses Claude's `ANTHROPIC_CUSTOM_HEADERS`; `freeinference run codex` uses the
+selected provider's `env_http_headers` mapping. It adds only `X-Session-ID`,
+never `X-Request-ID` or `X-Probe`. See [Trace correlation](docs/TRACING.md)
+for privacy, opt-out, and compatibility details.
 
 ## Configure Claude Code and Codex
 
@@ -240,6 +255,11 @@ The shield icon `🛡` color tracks context usage: white when empty, orange
 when getting high (60%+), red when critical (85%+). Unknown telemetry
 renders as `—` (em dash), never fabricated as `0%`.
 
+Detailed status surfaces may include cached public monitor data for the
+current model (health, uptime, latency, and check age). The monitor is read
+from `global/public-status.json`; hooks and status-line paths never fetch it
+synchronously.
+
 ### Reporting levels
 
 Ask the coding agent for a quick, normal, or detailed FreeInference check, or
@@ -265,6 +285,12 @@ types (`session_started`, `status_observed`, `prompt_submitted`,
 details. Rotation kicks in past 256 KiB or 1,000 events per session.
 Sessions older than 30 days are cleaned up opportunistically by
 `CleanupStaleSessions`.
+
+Use `freeinference failures` to aggregate retained incidents by category,
+model, and client. Categories cover rate limits, authentication and
+permission failures, invalid requests, timeouts, model-not-found, overload,
+gateway/server errors, network/TLS errors, cancellation, and output limits.
+Error bodies are never included.
 
 ## Development
 

@@ -13,6 +13,21 @@ The `freeinference` CLI provides the following commands. Run any command with `-
 
 ## Commands
 
+### `freeinference run` and `freeinference trace`
+
+Use the explicit launcher when you want a fresh, per-process support
+correlation. It injects only the documented `X-Session-ID` header for a
+verified FreeInference route; ordinary client launches are unaffected.
+
+```bash
+freeinference run claude
+freeinference trace
+freeinference trace --json
+freeinference config set tracing.enabled false
+```
+
+Trace correlation records no prompts, responses, raw headers, or credentials.
+
 ### `freeinference fi-status`
 
 Fetch public service health without session state or credentials. In this
@@ -230,6 +245,7 @@ Many commands accept `--json` for machine-readable JSON output and `--help` for 
 - `FI_NO_BACKGROUND` — Disable background refresh
 - `FI_DISABLED` — Set to `1` to disable all companion features
 - `FI_ALLOW_INSECURE_LOCALHOST` — Allow `http://` loopback (development only)
+- `FI_TRACING` — Enable/disable launch-time `X-Session-ID` correlation (`1` by default for `freeinference run`)
 
 ## Claude Code Runtime Setup
 
@@ -281,6 +297,13 @@ freeinference models --model minimax-m3
 **List recent sessions:**
 ```bash
 freeinference sessions --json
+```
+
+**Launch and inspect trace correlation:**
+```bash
+freeinference run claude
+freeinference trace --json
+freeinference config set tracing.enabled false
 ```
 
 **View configuration:**

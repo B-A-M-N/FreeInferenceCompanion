@@ -18,6 +18,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/secure"
+	"github.com/b-a-m-n/freeinference-companion/internal/tracing"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
 
@@ -462,9 +463,27 @@ type ViewModel struct {
 	ProviderName          string                `json:"provider_name"`
 	ProviderConfirmed     bool                  `json:"provider_confirmed"`
 	ContextTokenSemantics schema.TokenSemantics `json:"context_token_semantics,omitempty"`
+	TraceActive           bool                  `json:"trace_active,omitempty"`
+	TraceSessionID        string                `json:"trace_session_id,omitempty"`
+	TraceSource           string                `json:"trace_source,omitempty"`
+	TraceProvider         string                `json:"trace_provider,omitempty"`
+	TraceHeader           string                `json:"trace_header,omitempty"`
+	TraceStartedAt        *time.Time            `json:"trace_started_at,omitempty"`
 
 	HealthStatus  string `json:"health_status,omitempty"`
 	HealthAgeSecs *int64 `json:"health_age_seconds,omitempty"`
+
+	// Model-specific public monitor metrics. These are cache-only and never
+	// trigger a request from a render or status-line path.
+	ModelMonitorOK            *bool      `json:"model_monitor_ok,omitempty"`
+	ModelMonitorUptimeRatio   *float64   `json:"model_monitor_uptime_ratio,omitempty"`
+	ModelMonitorLatencyMs     *int64     `json:"model_monitor_latency_ms,omitempty"`
+	ModelMonitorTTFTMs        *int64     `json:"model_monitor_ttft_ms,omitempty"`
+	ModelMonitorThroughputTps *float64   `json:"model_monitor_throughput_tps,omitempty"`
+	ModelMonitorCheckedAt     *time.Time `json:"model_monitor_checked_at,omitempty"`
+	ModelMonitorAgeSecs       *int64     `json:"model_monitor_age_seconds,omitempty"`
+	ModelMonitorStale         bool       `json:"model_monitor_stale,omitempty"`
+	ModelMonitorError         string     `json:"model_monitor_error,omitempty"`
 
 	ContextUsedTokens *int64   `json:"context_used_tokens,omitempty"`
 	ContextWindowSize *int64   `json:"context_window_size,omitempty"`
@@ -567,6 +586,20 @@ func BuildViewModel(version string, snap *schema.Snapshot, gs *schema.GlobalStat
 	vm.ModelID = secure.SanitizeField(snap.Model.ID)
 	vm.ProviderName = secure.SanitizeField(snap.Provider.Name)
 	vm.ProviderConfirmed = snap.Provider.Confirmed && snap.Provider.Name == schema.ProviderFreeInference
+	if snap.Trace != nil && snap.Trace.Enabled && snap.Trace.Verified && vm.ProviderConfirmed &&
+		(snap.Trace.Client == "" || snap.Trace.Client == snap.Client.Type) &&
+		snap.Trace.Provider == schema.ProviderFreeInference && snap.Trace.Header == tracing.SessionHeader &&
+		snap.Trace.Source != schema.TraceSourceNone && tracing.ValidateTraceID(snap.Trace.SessionID) {
+		vm.TraceActive = true
+		vm.TraceSessionID = secure.MaskSessionID(snap.Trace.SessionID)
+		vm.TraceSource = secure.SanitizeField(snap.Trace.Source)
+		vm.TraceProvider = secure.SanitizeField(snap.Trace.Provider)
+		vm.TraceHeader = secure.SanitizeField(snap.Trace.Header)
+		if !snap.Trace.StartedAt.IsZero() {
+			started := snap.Trace.StartedAt
+			vm.TraceStartedAt = &started
+		}
+	}
 
 	if snap.Client.Type != schema.ClientCodex && snap.LiveContext != nil {
 		lc := snap.LiveContext
@@ -637,6 +670,35 @@ func BuildViewModel(version string, snap *schema.Snapshot, gs *schema.GlobalStat
 		}
 	}
 
+	// Public model monitor data is read from the detached worker's bounded
+	// cache. A model without a valid cached record remains unknown.
+	if vm.ProviderConfirmed && activationMatches && gs != nil && gs.PublicStatus != nil {
+		for _, metric := range gs.PublicStatus.Models {
+			if metric.ModelID != snap.Model.ID {
+				continue
+			}
+			vm.ModelMonitorUptimeRatio = metric.UptimeRatio
+			if metric.Latest != nil {
+				vm.ModelMonitorOK = metric.Latest.OK
+				vm.ModelMonitorLatencyMs = metric.Latest.LatencyMs
+				vm.ModelMonitorTTFTMs = metric.Latest.TTFTMs
+				vm.ModelMonitorThroughputTps = metric.Latest.ThroughputTps
+				checked := metric.Latest.CheckedAt
+				vm.ModelMonitorCheckedAt = &checked
+				vm.ModelMonitorError = secure.SanitizeField(metric.Latest.Error)
+			} else if !gs.PublicStatus.CheckedAt.IsZero() {
+				checked := gs.PublicStatus.CheckedAt
+				vm.ModelMonitorCheckedAt = &checked
+			}
+			if vm.ModelMonitorCheckedAt != nil {
+				age := max(int64(0), int64(now.Sub(*vm.ModelMonitorCheckedAt).Seconds()))
+				vm.ModelMonitorAgeSecs = &age
+				vm.ModelMonitorStale = age > int64((45 * time.Minute).Seconds())
+			}
+			break
+		}
+	}
+
 	if snap.Compaction.LastResult != nil {
 		r := snap.Compaction.LastResult
 		vm.CompactionLastResultAt = &r.At
@@ -682,7 +744,7 @@ func BuildViewModel(version string, snap *schema.Snapshot, gs *schema.GlobalStat
 //
 // Rendering tiers (based on COLUMNS):
 //
-//	wide   (≥100): model, shield, cache_read, cache_new, fresh, ctx, health, pressure
+//	wide   (≥100): model, shield, cache_read, fresh, ctx, pressure
 //	medium (60–99): model, shield, cache_read, fresh, ctx, pressure
 //	narrow (<60):   shield, cache_read, ctx
 //
@@ -823,6 +885,37 @@ func (vm *ViewModel) Expanded(config RenderConfig) string {
 	}
 	fmt.Fprintf(&b, "%s%s%s %s\n", bullet, config.colorize("Health", ColorWhite), sep, config.colorize(health, healthColor))
 
+	if vm.ModelMonitorOK != nil || vm.ModelMonitorUptimeRatio != nil || vm.ModelMonitorLatencyMs != nil || vm.ModelMonitorError != "" {
+		monitor := "unknown"
+		monitorColor := ColorGray
+		if vm.ModelMonitorOK != nil {
+			if *vm.ModelMonitorOK {
+				monitor = "healthy"
+				monitorColor = ColorGreen
+			} else {
+				monitor = "down"
+				monitorColor = ColorRed
+			}
+		}
+		if vm.ModelMonitorStale {
+			monitor += " · stale"
+			monitorColor = ColorYellow
+		}
+		if vm.ModelMonitorUptimeRatio != nil {
+			monitor += fmt.Sprintf(" · up %.1f%%", *vm.ModelMonitorUptimeRatio*100)
+		}
+		if vm.ModelMonitorLatencyMs != nil {
+			monitor += fmt.Sprintf(" · %dms", *vm.ModelMonitorLatencyMs)
+		}
+		if vm.ModelMonitorAgeSecs != nil {
+			monitor += fmt.Sprintf(" · checked %ds ago", *vm.ModelMonitorAgeSecs)
+		}
+		if vm.ModelMonitorError != "" && (vm.ModelMonitorOK == nil || !*vm.ModelMonitorOK) {
+			monitor += " · " + vm.ModelMonitorError
+		}
+		fmt.Fprintf(&b, "%s%s%s %s\n", bullet, config.colorize("Model monitor", ColorWhite), sep, config.colorize(monitor, monitorColor))
+	}
+
 	context := "unknown"
 	if vm.ContextUsedTokens != nil && vm.ContextWindowSize != nil {
 		context = fmt.Sprintf("%s / %s", FormatTokenCount(*vm.ContextUsedTokens), FormatTokenCount(*vm.ContextWindowSize))
@@ -899,6 +992,19 @@ func (vm *ViewModel) Expanded(config RenderConfig) string {
 		lastFailure = config.colorize(vm.LastFailureCategory, ColorRed)
 	}
 	fmt.Fprintf(&b, "%s%s%s %s\n", bullet, config.colorize("Last failure", ColorWhite), sep, lastFailure)
+
+	if vm.TraceActive {
+		fmt.Fprintln(&b)
+		fmt.Fprintf(&b, "%sTrace Correlation:\n", bullet)
+		fmt.Fprintf(&b, "%s  Status:%s active\n", bullet, sep)
+		fmt.Fprintf(&b, "%s  ID:%s %s\n", bullet, sep, vm.TraceSessionID)
+		fmt.Fprintf(&b, "%s  Header:%s %s\n", bullet, sep, vm.TraceHeader)
+		fmt.Fprintf(&b, "%s  Provider:%s %s\n", bullet, sep, vm.TraceProvider)
+		fmt.Fprintf(&b, "%s  Source:%s %s\n", bullet, sep, vm.TraceSource)
+		if vm.TraceStartedAt != nil {
+			fmt.Fprintf(&b, "%s  Started:%s %s\n", bullet, sep, vm.TraceStartedAt.UTC().Format(time.RFC3339))
+		}
+	}
 
 	// Cache analysis
 	if vm.CacheAnalysisObservedSamples > 0 {

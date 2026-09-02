@@ -13,6 +13,20 @@ The `freeinference` CLI provides the following commands. Run any command with `-
 
 ## Commands
 
+### `freeinference run` and `freeinference trace`
+
+Use `freeinference run codex` for explicit per-process support correlation.
+The launcher uses the selected verified provider's `env_http_headers` mapping
+for `X-Session-ID`; it does not proxy traffic or replace an existing mapping.
+
+```bash
+freeinference run codex
+freeinference trace --client codex --json
+freeinference config set tracing.enabled false
+```
+
+Unverified/off-host providers receive no trace injection.
+
 ### `freeinference fi-status`
 
 Fetch public FreeInference service status. This is stateless and
@@ -213,6 +227,7 @@ Many commands accept `--json` for machine-readable JSON output and `--help` for 
 - `FI_NO_BACKGROUND` — Disable background refresh
 - `FI_DISABLED` — Set to `1` to disable all companion features
 - `FI_ALLOW_INSECURE_LOCALHOST` — Allow `http://` loopback (development only)
+- `FI_TRACING` — Enable/disable launch-time `X-Session-ID` correlation (`1` by default for `freeinference run`)
 
 ## Codex Runtime Setup and Model Switching
 
@@ -236,6 +251,14 @@ env_key = "FREEINFERENCE_API_KEY"
 wire_api = "responses"
 ```
 
+The explicit launcher can add the documented mapping below while preserving
+unrelated Codex configuration:
+
+```toml
+[model_providers.freeinference.env_http_headers]
+"X-Session-ID" = "FI_TRACE_SESSION_ID"
+```
+
 Create a profile per model, for example `~/.codex/glm.config.toml` with
 `model = "glm-5.1"` and `~/.codex/coding.config.toml` with
 `model = "kimi-k2.7-code"`. Switch with `codex --profile glm` or
@@ -255,6 +278,13 @@ models are endpoint-exclusive and belong in Claude Code's Anthropic setup.
 **Quick status check:**
 ```bash
 freeinference status --client codex --json
+```
+
+**Launch and inspect trace correlation:**
+```bash
+freeinference run codex
+freeinference trace --client codex --json
+freeinference config set tracing.enabled false
 ```
 
 **Full diagnostic:**

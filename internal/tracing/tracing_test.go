@@ -1,0 +1,115 @@
+package tracing
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestGenerateTraceIDIsOpaqueUniqueAndBounded(t *testing.T) {
+	seen := make(map[string]bool)
+	for i := 0; i < 256; i++ {
+		id, err := GenerateTraceID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(id) != TraceIDLength || !ValidateTraceID(id) || seen[id] {
+			t.Fatalf("invalid or repeated trace id %q", id)
+		}
+		seen[id] = true
+		if strings.ContainsAny(id, "/\\:@\r\n\x00") {
+			t.Fatalf("trace id contains unsafe data: %q", id)
+		}
+	}
+}
+
+func TestValidateTraceIDRejectsControlsArbitraryAndWrongLength(t *testing.T) {
+	valid, err := GenerateTraceID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range []string{
+		"", valid + "x", strings.ToUpper(valid),
+		"fic-v1-aaaaaaaaaaaaaaaaaaaaaaaaa\n",
+		"fic-v1-aaaaaaaaaaaaaaaaaaaaaaaa!",
+		"fic-v1-" + strings.Repeat("a", 100000),
+		"fic-v1-user-name",
+	} {
+		if ValidateTraceID(candidate) {
+			t.Errorf("ValidateTraceID(%q) accepted unsafe/arbitrary value", candidate)
+		}
+	}
+}
+
+func TestComposeClaudeHeadersPreservesExistingAndUnrelatedHeaders(t *testing.T) {
+	generated, err := GenerateTraceID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	existing := "X-Foo: bar\ncontent-type: application/json"
+	composed, got, source, err := ComposeClaudeCustomHeaders(existing, generated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != generated || source != SourceCompanionGenerated || !strings.Contains(composed, existing) || !strings.Contains(composed, "X-Session-ID: "+generated) {
+		t.Fatalf("composed headers = %q, id=%q, source=%q", composed, got, source)
+	}
+
+	userID, _ := GenerateTraceID()
+	userBlock := "X-Foo: bar\nx-session-id: " + userID
+	composed, got, source, err = ComposeClaudeCustomHeaders(userBlock, generated)
+	if err != nil || composed != userBlock || got != userID || source != SourceExistingHeader {
+		t.Fatalf("existing session header was not preserved: %q, %q, %q, %v", composed, got, source, err)
+	}
+}
+
+func TestComposeClaudeHeadersMalformedFailsOpen(t *testing.T) {
+	generated, _ := GenerateTraceID()
+	for _, block := range []string{"not-a-header", "X-Foo: ok\n\nX-Bar: ok", "X-Foo: bad\r\nX-Bar: ok", "X-Foo: bad\x01"} {
+		if _, _, _, err := ComposeClaudeCustomHeaders(block, generated); err == nil {
+			t.Errorf("malformed block %q was accepted", block)
+		}
+	}
+}
+
+func TestReceiptIsPrivateAndCannotDeleteArbitraryPath(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	r := LaunchReceipt{
+		TraceID:        "fic-v1-aaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Client:         "claude-code",
+		Provider:       "freeinference",
+		EndpointOrigin: "https://freeinference.org",
+		StartedAt:      time.Now().UTC(),
+		HeaderName:     SessionHeader,
+		Source:         SourceCompanionGenerated,
+	}
+	path, err := WriteLaunchReceipt(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0600 {
+		t.Fatalf("receipt permissions = %v, %v", info.Mode().Perm(), err)
+	}
+	dirInfo, err := os.Stat(filepath.Dir(path))
+	if err != nil || dirInfo.Mode().Perm() != 0700 {
+		t.Fatalf("receipt directory permissions = %v, %v", dirInfo.Mode().Perm(), err)
+	}
+
+	arbitrary := filepath.Join(t.TempDir(), "do-not-delete")
+	if err := os.WriteFile(arbitrary, []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ConsumeLaunchReceipt(arbitrary, "claude-code", r.EndpointOrigin); err == nil {
+		t.Fatal("arbitrary receipt path was accepted")
+	}
+	if _, err := os.Stat(arbitrary); err != nil {
+		t.Fatalf("arbitrary file was changed: %v", err)
+	}
+	consumed, err := ConsumeLaunchReceipt(path, r.Client, r.EndpointOrigin)
+	if err != nil || consumed.TraceID != r.TraceID {
+		t.Fatalf("consume = %#v, %v", consumed, err)
+	}
+}

@@ -44,6 +44,16 @@ func ValidateSnapshot(s *Snapshot) error {
 	if s.Client.Type != ClientClaudeCode && s.Client.Type != ClientCodex {
 		return fmt.Errorf("unknown client type %q", s.Client.Type)
 	}
+	if s.Trace != nil {
+		if err := validateTraceInfo(s.Trace); err != nil {
+			return err
+		}
+	}
+	if s.LastFailure != nil {
+		if err := validateFailureRecord(s.LastFailure); err != nil {
+			return err
+		}
+	}
 
 	// Pressure state must be a known constant. Empty is allowed because
 	// snapshots are mutated incrementally and a fresh snapshot may not yet
@@ -161,6 +171,82 @@ func ValidateSnapshot(s *Snapshot) error {
 		return fmt.Errorf("invalid session status %q", s.Session.Status)
 	}
 
+	return nil
+}
+
+func validateFailureRecord(f *FailureRecord) error {
+	if f == nil {
+		return nil
+	}
+	if len(f.Category) > 64 || len(f.Source) > 128 || len(f.TransportClass) > 64 ||
+		len(f.ProviderErrorType) > 128 || len(f.ErrorOrigin) > 64 || len(f.RequestReference) > 128 {
+		return errors.New("failure metadata field is too long")
+	}
+	for name, value := range map[string]string{
+		"category": f.Category, "source": f.Source, "transport_class": f.TransportClass,
+		"provider_error_type": f.ProviderErrorType, "error_origin": f.ErrorOrigin,
+		"request_reference": f.RequestReference,
+	} {
+		for _, r := range value {
+			if r < 0x20 || r > 0x7e {
+				return fmt.Errorf("failure %s contains unsafe characters", name)
+			}
+		}
+	}
+	if f.HTTPStatus != nil && (*f.HTTPStatus < 400 || *f.HTTPStatus > 599) {
+		return fmt.Errorf("failure http_status out of range: %d", *f.HTTPStatus)
+	}
+	if f.RetryAfterSeconds != nil && (*f.RetryAfterSeconds < 0 || *f.RetryAfterSeconds > 7*24*60*60) {
+		return fmt.Errorf("failure retry_after_seconds out of range: %d", *f.RetryAfterSeconds)
+	}
+	return nil
+}
+
+func validateTraceInfo(t *TraceInfo) error {
+	if t.Source != TraceSourceCompanionGenerated && t.Source != TraceSourceExistingHeader && t.Source != TraceSourceNone {
+		return fmt.Errorf("invalid trace source %q", t.Source)
+	}
+	if t.Header != "" && t.Header != TraceHeaderSessionID {
+		return fmt.Errorf("invalid trace header %q", t.Header)
+	}
+	if t.Client != "" && t.Client != ClientClaudeCode && t.Client != ClientCodex {
+		return fmt.Errorf("invalid trace client %q", t.Client)
+	}
+	if t.Provider != "" && t.Provider != ProviderFreeInference {
+		return fmt.Errorf("invalid trace provider %q", t.Provider)
+	}
+	for name, value := range map[string]string{"client": t.Client, "provider": t.Provider, "endpoint_origin": t.EndpointOrigin} {
+		if len(value) > 256 {
+			return fmt.Errorf("trace %s is too long", name)
+		}
+		for _, r := range value {
+			if r < 0x20 || r > 0x7e {
+				return fmt.Errorf("trace %s contains unsafe characters", name)
+			}
+		}
+	}
+	if t.SessionID != "" {
+		if len(t.SessionID) != len("fic-v1-")+26 || !strings.HasPrefix(t.SessionID, "fic-v1-") {
+			return fmt.Errorf("invalid trace session id")
+		}
+		for _, r := range t.SessionID[len("fic-v1-"):] {
+			if !((r >= 'a' && r <= 'z') || (r >= '2' && r <= '7')) {
+				return fmt.Errorf("invalid trace session id")
+			}
+		}
+	}
+	if !t.Enabled && t.SessionID != "" {
+		return fmt.Errorf("disabled trace cannot have a session id")
+	}
+	if t.Enabled && t.Source == TraceSourceNone {
+		return fmt.Errorf("enabled trace cannot have an empty source")
+	}
+	if t.Enabled && (t.SessionID == "" || t.Header != TraceHeaderSessionID) {
+		return fmt.Errorf("enabled trace is missing its correlation header or id")
+	}
+	if t.Enabled && !t.Verified {
+		return fmt.Errorf("durable trace provenance is not receipt-verified")
+	}
 	return nil
 }
 

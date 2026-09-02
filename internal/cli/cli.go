@@ -74,6 +74,9 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int
 		}
 		return cmdFIStatus(rest, stdout, stderr)
 	}
+	if cmd == "run" {
+		return cmdRun(rest, stdout, stderr)
+	}
 	automaticStdin := (cmd == "status" || cmd == "snapshot" || cmd == "render") && stdinHasData(stdin)
 	if automaticStdin && !runtime.EvaluateForClient(runtime.ClientClaudeCode).Active {
 		// Automatic status-line surfaces are a true no-op for non-FreeInference
@@ -105,6 +108,9 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int
 		"refresh": true,
 	}
 	needsProviderState := requiresActiveProvider[cmd]
+	if cmd == "refresh" && refreshOnlyPublicStatus(rest) {
+		needsProviderState = false
+	}
 	// An interactive status lookup without an explicit session is a live
 	// provider view. An explicit session is a historical diagnostic and remains
 	// readable after activation ends. Automatic status-line input is handled by
@@ -189,6 +195,16 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int
 			return 0
 		}
 		return cmdReport(paths, rest, stdout, stderr)
+	case "failures", "incidents":
+		if printCmdHelp(stdout, stderr, "failures", rest) {
+			return 0
+		}
+		return cmdFailures(paths, rest, stdout, stderr)
+	case "trace":
+		if printCmdHelp(stdout, stderr, "trace", rest) {
+			return 0
+		}
+		return cmdTrace(paths, rest, stdout, stderr)
 	case "context":
 		if printCmdHelp(stdout, stderr, "context", rest) {
 			return 0
@@ -221,6 +237,15 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int
 		printUsage(stderr)
 		return 1
 	}
+}
+
+func refreshOnlyPublicStatus(args []string) bool {
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--worker" && i+1 < len(args) {
+			return args[i+1] == "public-status"
+		}
+	}
+	return false
 }
 
 func activationForCLICommand(cmd string, args []string) runtime.Activation {
@@ -300,17 +325,21 @@ Usage:
   freeinference doctor [--probe --model <name>] [--help]
   freeinference report [--client <type>] [--session <id>] [--format markdown|json]
     [--include-identifiers] [--help]
+  freeinference failures [--client <type>] [--session <id>] [--model <name>]
+    [--since <duration|timestamp>] [--json] [--help]
   freeinference dashboard
   freeinference install [--manifest <url>] [--platform <key>] [--dry-run] [--no-plugin] [--force]
   freeinference update [--manifest <url>] [--platform <key>] [--dry-run] [--force]
   freeinference context [--client <type>] [--session <id>] [--help]
   freeinference cache [--client <type>] [--session <id>] [--help]
-  freeinference refresh [--force|--if-stale] [--detach]
-    [--worker models|health|account-usage] [--help]
+	freeinference refresh [--force|--if-stale] [--detach]
+	  [--worker models|health|account-usage|public-status] [--help]
   freeinference status-line install|uninstall
   freeinference config show|set|reset|path [--json]
   freeinference companion status|enable|disable
   freeinference fi-status [--json] [--problems|--down] [--details] [--fail-degraded] [--refresh] [--all]
+  freeinference run claude|codex [args...]
+  freeinference trace [--json] [--client claude-code|codex] [--session <id>]
   freeinference version [--json]
   freeinference hook <client> <event>
 
@@ -325,6 +354,7 @@ Environment:
   FI_NO_BACKGROUND         Disable background refresh
   FI_DISABLED              Disable all companion features
   FI_ALLOW_INSECURE_LOCALHOST  Allow http:// loopback (development only)
+  FI_TRACING                Enable/disable Companion launch tracing (default: enabled for run)
   NO_COLOR                 Disable colors (see https://no-color.org)
   FORCE_COLOR              Force color output even without a terminal
   COLUMNS                  Terminal width in columns (0 = auto-detect)
@@ -439,6 +469,19 @@ Flags:
   --help                  Show this help message
 `
 
+	helpFailures = `Usage: freeinference failures [--client <type>] [--session <id>] [--model <name>] [--since <duration|timestamp>] [--json] [--help]
+
+Show a sanitized summary of retained turn failures from local session events.
+
+Flags:
+  --client <type>       Limit results to claude-code or codex
+  --session <id>        Limit results to one session
+  --model <name>        Limit results to one model ID
+  --since <value>       Look back by duration (24h default) or RFC3339 timestamp
+  --json                Output machine-readable JSON
+  --help                Show this help message
+`
+
 	helpDashboard = `Usage: freeinference dashboard [--status] [--account] [--print-url] [--help]
 
 Open the FreeInference dashboard in your browser.
@@ -460,7 +503,7 @@ Flags:
   --help           Show this help message
 `
 
-	helpRefresh = `Usage: freeinference refresh [--force|--if-stale] [--detach] [--worker models|health] [--help]
+	helpRefresh = `Usage: freeinference refresh [--force|--if-stale] [--detach] [--worker models|health|account-usage|public-status] [--help]
 
 Refresh cached data (models, health, account usage).
 
@@ -468,7 +511,7 @@ Modes (mutually exclusive):
   --force             Force refresh regardless of staleness
   --if-stale          Refresh only if caches are stale (default)
   --detach            Spawn detached background workers for stale caches
-  --worker <name>     Single worker: models or health
+  --worker <name>     Single worker: models, health, account-usage, or public-status
 
 Flags:
   --help  Show this help message
@@ -499,6 +542,14 @@ Flags:
   --refresh        Deprecated compatibility no-op; every run fetches directly
   --all            Deprecated compatibility no-op; all models are shown by default
   --help           Show this help message
+`
+
+	helpTrace = `Usage: freeinference trace [--json] [--client claude-code|codex] [--session <id>] [--help]
+
+Show the current per-launch X-Session-ID correlation metadata.
+
+Trace IDs are opaque, random, and retained only as private session metadata.
+No request content or credentials are included.
 `
 
 	helpStatusLine = `Usage: freeinference status-line install|uninstall|status [--scope user|project|local] [--project <dir>] [--help] [--json]
@@ -557,6 +608,8 @@ func printCmdHelp(stdout, stderr io.Writer, cmd string, args []string) bool {
 				fmt.Fprint(stdout, helpDoctor)
 			case "report":
 				fmt.Fprint(stdout, helpReport)
+			case "failures":
+				fmt.Fprint(stdout, helpFailures)
 			case "dashboard":
 				fmt.Fprint(stdout, helpDashboard)
 			case "context":
@@ -567,6 +620,8 @@ func printCmdHelp(stdout, stderr io.Writer, cmd string, args []string) bool {
 				fmt.Fprint(stdout, helpCache)
 			case "fi-status":
 				fmt.Fprint(stdout, helpFIStatus)
+			case "trace":
+				fmt.Fprint(stdout, helpTrace)
 			case "status-line":
 				fmt.Fprint(stdout, helpStatusLine)
 			case "version":

@@ -413,7 +413,7 @@ func renderFIStatusHuman(stdout io.Writer, out fiStatusOutput, details bool, wid
 		fmt.Fprint(stdout, "No model count available")
 	}
 	if out.Monitor.CheckedAt != "" {
-		fmt.Fprintf(stdout, " · checked %s", formatAge(out.Monitor.AgeSeconds))
+		fmt.Fprintf(stdout, " · monitor checked %s", formatAge(out.Monitor.AgeSeconds))
 	}
 	fmt.Fprintln(stdout)
 	if out.Monitor.Status != fiMonitorHealthy {
@@ -438,7 +438,7 @@ func renderFIStatusHuman(stdout io.Writer, out fiStatusOutput, details bool, wid
 		fmt.Fprintln(stdout, "No current problems.")
 	}
 
-	if details {
+	if details && len(out.Models) > 0 {
 		fmt.Fprintln(stdout)
 		fmt.Fprintln(stdout, "Details:")
 		for _, model := range out.Models {

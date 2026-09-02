@@ -1,6 +1,7 @@
 package config
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -21,6 +22,9 @@ func TestLoadDefaultsOnMissingFile(t *testing.T) {
 	}
 	if cfg.SchemaVersion != SchemaVersion {
 		t.Errorf("schema = %d, want %d", cfg.SchemaVersion, SchemaVersion)
+	}
+	if !cfg.Tracing.Enabled {
+		t.Error("tracing should default enabled for Companion launches")
 	}
 }
 
@@ -186,6 +190,9 @@ func TestSetField(t *testing.T) {
 	if err := SetField(&cfg, "reporting.level", "standard"); err != nil {
 		t.Fatal(err)
 	}
+	if err := SetField(&cfg, "tracing.enabled", "false"); err != nil {
+		t.Fatal(err)
+	}
 	if err := Save(&cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -201,6 +208,25 @@ func TestSetField(t *testing.T) {
 	}
 	if loaded.Reporting.Level != "standard" {
 		t.Errorf("reporting level = %q, want standard", loaded.Reporting.Level)
+	}
+	if loaded.Tracing.Enabled {
+		t.Error("tracing.enabled should be false")
+	}
+}
+
+func TestTracingEnvironmentOverride(t *testing.T) {
+	t.Setenv("FI_CONFIG_DIR", t.TempDir())
+	t.Setenv("FI_TRACING", "false")
+	mgr, err := NewManager()
+	if err != nil {
+		t.Fatal(err)
+	}
+	eff, err := mgr.Resolve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eff.Tracing.Enabled.Value || eff.Tracing.Enabled.Source != SourceEnv || !eff.Tracing.Enabled.Valid {
+		t.Fatalf("unexpected tracing effective value: %#v", eff.Tracing.Enabled)
 	}
 }
 
@@ -240,6 +266,46 @@ func TestValidateRejectsCrossFieldThresholds(t *testing.T) {
 	cfg.Cache.WarnThreshold = cfg.Cache.RecoveredThreshold
 	if err := Validate(&cfg); err == nil {
 		t.Fatal("expected invalid cache threshold ordering")
+	}
+}
+
+func TestEffectiveConfigRejectsNonFiniteCacheEnvAndZeroCooldown(t *testing.T) {
+	t.Setenv("FI_CONFIG_DIR", t.TempDir())
+	t.Setenv("FI_CACHE_WARN_THRESHOLD", "NaN")
+	t.Setenv("FI_CACHE_COOLDOWN_MINS", "0")
+	mgr, err := NewManager()
+	if err != nil {
+		t.Fatal(err)
+	}
+	eff, err := mgr.Resolve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eff.Cache.WarnThreshold.Valid || eff.Cache.CooldownMins.Valid {
+		t.Fatalf("invalid effective cache values were accepted: %#v %#v", eff.Cache.WarnThreshold, eff.Cache.CooldownMins)
+	}
+
+	cfg := defaultConfig()
+	cfg.Cache.WarnThreshold = math.Inf(1)
+	if err := Validate(&cfg); err == nil {
+		t.Fatal("Validate accepted positive infinity")
+	}
+}
+
+func TestEffectiveConfigMarksCrossFieldEnvInvariant(t *testing.T) {
+	t.Setenv("FI_CONFIG_DIR", t.TempDir())
+	t.Setenv("FI_WATCH_ENTER", "90")
+	t.Setenv("FI_WARN_ENTER", "80")
+	mgr, err := NewManager()
+	if err != nil {
+		t.Fatal(err)
+	}
+	eff, err := mgr.Resolve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eff.Context.WatchEnter.Valid || eff.Context.WarnEnter.Valid || len(eff.Invalid) == 0 {
+		t.Fatalf("cross-field invariant was not surfaced: %#v", eff)
 	}
 }
 

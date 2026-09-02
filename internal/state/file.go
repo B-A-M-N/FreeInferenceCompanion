@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/b-a-m-n/freeinference-companion/internal/secure"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
 
@@ -156,6 +157,12 @@ func (p Paths) GlobalAccountUsage() string {
 // quota data so unsupported endpoints are not polled indefinitely.
 func (p Paths) GlobalAccountUsageCapability() string {
 	return filepath.Join(p.GlobalDir(), "account-usage-capability.json")
+}
+
+// GlobalPublicStatus returns the path to the unauthenticated public monitor
+// cache. It is separate from provider-authenticated health state.
+func (p Paths) GlobalPublicStatus() string {
+	return filepath.Join(p.GlobalDir(), "public-status.json")
 }
 
 // GlobalCircuitBreakersLock returns the path to the circuit breaker state lock.
@@ -519,6 +526,7 @@ func quarantineSnapshot(path, reason string) {
 // only runs for genuinely unexpected corruption (truncation, mid-write crash,
 // hand-edited files).
 func SaveSnapshot(paths Paths, clientType, sessionID string, s *schema.Snapshot) error {
+	sanitizeSnapshotFailure(s)
 	if err := schema.ValidateSnapshot(s); err != nil {
 		return fmt.Errorf("validate snapshot before save: %w", err)
 	}
@@ -527,6 +535,25 @@ func SaveSnapshot(paths Paths, clientType, sessionID string, s *schema.Snapshot)
 	}
 	path := paths.SessionSnapshot(clientType, sessionID)
 	return WriteJSONAtomically(path, s)
+}
+
+func sanitizeSnapshotFailure(s *schema.Snapshot) {
+	if s == nil || s.LastFailure == nil {
+		return
+	}
+	f := s.LastFailure
+	f.Category = secure.SanitizeField(f.Category)
+	f.Source = secure.SanitizeField(f.Source)
+	f.TransportClass = secure.Redact(secure.SanitizeField(f.TransportClass))
+	f.ProviderErrorType = secure.Redact(secure.SanitizeField(f.ProviderErrorType))
+	f.ErrorOrigin = secure.Redact(secure.SanitizeField(f.ErrorOrigin))
+	f.RequestReference = secure.Redact(secure.SanitizeField(f.RequestReference))
+	if f.HTTPStatus != nil && (*f.HTTPStatus < 400 || *f.HTTPStatus > 599) {
+		f.HTTPStatus = nil
+	}
+	if f.RetryAfterSeconds != nil && (*f.RetryAfterSeconds < 0 || *f.RetryAfterSeconds > 7*24*60*60) {
+		f.RetryAfterSeconds = nil
+	}
 }
 
 // UpdateSnapshot applies a mutation to the per-session snapshot under a
@@ -609,6 +636,9 @@ func LoadGlobal(paths Paths) (*schema.GlobalState, error) {
 	if err := readJSONQuarantine(paths.GlobalAccountUsageCapability(), &gs.AccountUsageCapability, "account-usage-capability"); err != nil {
 		loadErr = err
 	}
+	if err := readJSONQuarantine(paths.GlobalPublicStatus(), &gs.PublicStatus, "public-status"); err != nil {
+		loadErr = err
+	}
 	if err := readJSONQuarantine(paths.GlobalCircuitBreakers(), &gs.CircuitBreakers, "circuit-breakers"); err != nil {
 		loadErr = err
 	}
@@ -672,6 +702,14 @@ func SaveAccountUsageCapability(paths Paths, c *schema.AccountUsageCapability) e
 		return err
 	}
 	return WriteJSONAtomically(paths.GlobalAccountUsageCapability(), c)
+}
+
+// SavePublicStatus writes the unauthenticated public monitor cache atomically.
+func SavePublicStatus(paths Paths, s *schema.PublicStatusCache) error {
+	if err := paths.EnsureDirs(); err != nil {
+		return err
+	}
+	return WriteJSONAtomically(paths.GlobalPublicStatus(), s)
 }
 
 // SaveCircuitBreakers writes the circuit breaker state atomically.

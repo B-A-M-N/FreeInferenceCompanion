@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/b-a-m-n/freeinference-companion/internal/config"
 	"github.com/b-a-m-n/freeinference-companion/internal/runtime"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
+	"github.com/b-a-m-n/freeinference-companion/internal/tracing"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
 
@@ -96,6 +98,81 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 		add("Codex provider", api.CheckResult{State: api.CheckUnknown, Detail: "current Codex provider unverified"})
 	} else {
 		add("Codex provider", api.CheckResult{State: api.CheckUnknown, Detail: "FreeInference is not the selected Codex provider"})
+	}
+
+	// 7. Trace correlation is a launch-time, client-specific feature. These
+	// checks report actual executable, route, and configuration capability
+	// without printing header values.
+	traceEnabled, traceConfigValid, traceConfigErr := effectiveTracing()
+	if traceConfigErr != nil {
+		add("Tracing feature", api.CheckResult{State: api.CheckUnknown, Detail: "configuration unavailable"})
+	} else if !traceConfigValid {
+		add("Tracing feature", api.CheckResult{State: api.CheckFail, Detail: "FI_TRACING is invalid"})
+	} else if traceEnabled {
+		add("Tracing feature", api.CheckResult{State: api.CheckPass, Detail: "enabled for Companion-launched sessions"})
+	} else {
+		add("Tracing feature", api.CheckResult{State: api.CheckWarn, Detail: "disabled by configuration"})
+	}
+	add("Trace header support", api.CheckResult{State: api.CheckPass, Detail: "X-Session-ID supported by FreeInference"})
+	claudeExecutable, claudeExecutableOK := checkClientExecutable("claude")
+	add("Claude executable", claudeExecutable)
+	codexExecutable, codexExecutableOK := checkClientExecutable("codex")
+	add("Codex executable", codexExecutable)
+
+	claudeHeadersOK := false
+	if claudeActivation.Active {
+		if err := tracing.ValidateClaudeCustomHeaders(os.Getenv("ANTHROPIC_CUSTOM_HEADERS")); err != nil {
+			add("Claude trace headers", api.CheckResult{State: api.CheckWarn, Detail: "ANTHROPIC_CUSTOM_HEADERS cannot be safely merged; launch will fail open"})
+		} else {
+			claudeHeadersOK = true
+			add("Claude trace headers", api.CheckResult{State: api.CheckPass, Detail: "custom-header merge available"})
+		}
+	} else {
+		add("Claude trace headers", api.CheckResult{State: api.CheckUnknown, Detail: "Claude Code route unverified"})
+	}
+	claudeLauncherOK := claudeExecutableOK && claudeActivation.Active && claudeHeadersOK
+	add("Claude launcher", traceCapabilityResult(claudeLauncherOK, claudeExecutableOK, claudeActivation.Active, claudeHeadersOK, "claude"))
+
+	codexHeadersOK := false
+	if codexActivation.Active {
+		path, pathErr := runtime.CodexConfigPath()
+		if pathErr != nil {
+			add("Codex trace headers", api.CheckResult{State: api.CheckUnknown, Detail: "Codex config path unavailable"})
+		} else if configured, conflict, inspectErr := runtime.InspectCodexTraceHeader(path, codexActivation.Evidence.ProviderID); inspectErr != nil {
+			add("Codex trace headers", api.CheckResult{State: api.CheckWarn, Detail: "env_http_headers mapping unavailable; run will fail open"})
+		} else if conflict {
+			add("Codex trace headers", api.CheckResult{State: api.CheckWarn, Detail: "X-Session-ID mapping already exists and will not be replaced"})
+		} else if configured {
+			codexHeadersOK = true
+			add("Codex trace headers", api.CheckResult{State: api.CheckPass, Detail: "env_http_headers mapping confirmed"})
+		} else {
+			if codexConfigInstallable(path) {
+				add("Codex trace headers", api.CheckResult{State: api.CheckWarn, Detail: "env_http_headers mapping not configured; run `freeinference trace setup --client codex` first"})
+				add("Codex trace setup", api.CheckResult{State: api.CheckPass, Detail: "selected config is writable; setup is available"})
+			} else {
+				add("Codex trace headers", api.CheckResult{State: api.CheckWarn, Detail: "env_http_headers mapping not configured and config is not writable"})
+			}
+		}
+	} else {
+		add("Codex trace headers", api.CheckResult{State: api.CheckUnknown, Detail: "selected Codex provider unverified"})
+	}
+	codexLauncherOK := codexExecutableOK && codexActivation.Active && codexHeadersOK
+	add("Codex launcher", traceCapabilityResult(codexLauncherOK, codexExecutableOK, codexActivation.Active, codexHeadersOK, "codex"))
+	if claudeLauncherOK && codexLauncherOK {
+		add("Trace client support", api.CheckResult{State: api.CheckPass, Detail: "Claude and Codex launchers verified"})
+	} else {
+		add("Trace client support", api.CheckResult{State: api.CheckWarn, Detail: "one or more client launchers are unavailable or unverified"})
+	}
+	if inherited, ok := tracing.EnvironmentTrace(); ok && (claudeActivation.Active || codexActivation.Active) {
+		add("Trace correlation", api.CheckResult{State: api.CheckPass, Detail: "active for this Companion-launched process"})
+		if tracing.ValidateTraceID(inherited.SessionID) {
+			add("Trace ID format", api.CheckResult{State: api.CheckPass, Detail: "opaque bounded ID format valid"})
+		} else {
+			add("Trace ID format", api.CheckResult{State: api.CheckFail, Detail: "inherited ID format invalid"})
+		}
+	} else {
+		add("Trace correlation", api.CheckResult{State: api.CheckUnknown, Detail: "no active Companion launch trace"})
+		add("Trace ID format", api.CheckResult{State: api.CheckUnknown, Detail: "no active trace ID"})
 	}
 
 	// 7. Health source configured.
@@ -256,6 +333,50 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 	return 0
 }
 
+func effectiveTracing() (enabled, valid bool, err error) {
+	mgr, err := config.NewManager()
+	if err != nil {
+		return false, false, err
+	}
+	eff, err := mgr.Resolve()
+	if err != nil {
+		return false, false, err
+	}
+	return eff.Tracing.Enabled.Value, eff.Tracing.Enabled.Valid, nil
+}
+
+func checkClientExecutable(name string) (api.CheckResult, bool) {
+	if _, err := exec.LookPath(name); err != nil {
+		return api.CheckResult{State: api.CheckWarn, Detail: "not found on PATH"}, false
+	}
+	return api.CheckResult{State: api.CheckPass, Detail: "found on PATH"}, true
+}
+
+func codexConfigInstallable(path string) bool {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return false
+	}
+	return info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 && info.Mode().Perm()&0200 != 0
+}
+
+func traceCapabilityResult(ready, executable, route, headers bool, name string) api.CheckResult {
+	if ready {
+		return api.CheckResult{State: api.CheckPass, Detail: name + " launcher verified"}
+	}
+	missing := make([]string, 0, 3)
+	if !executable {
+		missing = append(missing, "executable missing")
+	}
+	if !route {
+		missing = append(missing, "FreeInference route unverified")
+	}
+	if !headers {
+		missing = append(missing, "trace header setup unavailable")
+	}
+	return api.CheckResult{State: api.CheckWarn, Detail: strings.Join(missing, "; ")}
+}
+
 func checkCacheDir(paths state.Paths) api.CheckResult {
 	info, err := os.Stat(paths.CacheDir)
 	if err != nil || !info.IsDir() {
@@ -293,7 +414,7 @@ func checkStateReadable(paths state.Paths) api.CheckResult {
 	if loadErr != nil {
 		// Check if the load produced partial state (some resources OK).
 		allNil := gs.Health == nil && gs.Models == nil &&
-			gs.AccountUsage == nil && len(gs.CircuitBreakers) == 0
+			gs.AccountUsage == nil && gs.PublicStatus == nil && len(gs.CircuitBreakers) == 0
 		if allNil {
 			return api.CheckResult{State: api.CheckFail, Detail: "global state files present but unreadable"}
 		}
@@ -333,6 +454,9 @@ func checkConfigValid() api.CheckResult {
 	}
 	eff, err := mgr.Resolve()
 	if err != nil {
+		if eff != nil && eff.LoadError != "" {
+			return api.CheckResult{State: api.CheckWarn, Detail: "config load: " + eff.LoadError}
+		}
 		return api.CheckResult{State: api.CheckWarn, Detail: "config resolve: " + err.Error()}
 	}
 	// Count invalid settings
@@ -349,11 +473,19 @@ func checkConfigValid() api.CheckResult {
 		{"warn_leave", eff.Context.WarnLeave.Valid, eff.Context.WarnLeave.Error},
 		{"critical_leave", eff.Context.CriticalLeave.Valid, eff.Context.CriticalLeave.Error},
 		{"output_reserve", eff.Context.OutputReserve.Valid, eff.Context.OutputReserve.Error},
+		{"cache.warn_threshold", eff.Cache.WarnThreshold.Valid, eff.Cache.WarnThreshold.Error},
+		{"cache.recovered_threshold", eff.Cache.RecoveredThreshold.Valid, eff.Cache.RecoveredThreshold.Error},
+		{"cache.cooldown_mins", eff.Cache.CooldownMins.Valid, eff.Cache.CooldownMins.Error},
+		{"refresh.interval_mins", eff.Refresh.IntervalMins.Valid, eff.Refresh.IntervalMins.Error},
+		{"refresh.stale_mins", eff.Refresh.StaleMins.Valid, eff.Refresh.StaleMins.Error},
+		{"reporting.level", eff.Reporting.Level.Valid, eff.Reporting.Level.Error},
+		{"tracing.enabled", eff.Tracing.Enabled.Valid, eff.Tracing.Enabled.Error},
 	} {
 		if !v.valid {
 			invalid = append(invalid, v.name+": "+v.err)
 		}
 	}
+	invalid = append(invalid, eff.Invalid...)
 	if len(invalid) > 0 {
 		detail := fmt.Sprintf("%d invalid settings: ", len(invalid))
 		for i, s := range invalid {

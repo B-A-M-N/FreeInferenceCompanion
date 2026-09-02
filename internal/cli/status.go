@@ -16,6 +16,7 @@ import (
 	"github.com/b-a-m-n/freeinference-companion/internal/runtime"
 	"github.com/b-a-m-n/freeinference-companion/internal/secure"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
+	"github.com/b-a-m-n/freeinference-companion/internal/tracing"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
 
@@ -117,7 +118,7 @@ func cmdStatus(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 			if clientType == "" {
 				clientType = schema.ClientClaudeCode
 			}
-			_ = adapters.NewClaudeAdapter(paths).HandleStatusLineUpdateWith(&statusInput, sessionID, activation)
+			_ = adapters.NewClaudeAdapter(paths).HandleStatusLineUpdateWithTrace(&statusInput, sessionID, activation, environmentTraceInfo(schema.ClientClaudeCode, activation))
 
 			snap, err := state.LoadSnapshot(paths, schema.ClientClaudeCode, sessionID)
 			if err != nil || snap == nil {
@@ -179,7 +180,7 @@ func cmdStatus(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 				return 0
 			}
 			fmt.Fprintln(stdout, "Historical session — FreeInference is not currently active.")
-			printFullStatus(stdout, resolved.Snap, gs, reveal)
+			printFullStatus(stdout, resolved.Snap, gs, reveal, false)
 			return 0
 		}
 		// Identity failure in interactive mode: report sanitized error
@@ -195,7 +196,7 @@ func cmdStatus(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 			return 0
 		}
 		fmt.Fprintln(stdout, "Historical session — not a current live surface.")
-		printFullStatus(stdout, resolved.Snap, gs, reveal)
+		printFullStatus(stdout, resolved.Snap, gs, reveal, false)
 		return 0
 	}
 	rc := renderConfigWith(args)
@@ -339,6 +340,29 @@ func statusJSON(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalState,
 	if active != nil {
 		obj["active"] = *active
 	}
+	if snap != nil && snap.Provider.Confirmed && snap.Provider.Name == schema.ProviderFreeInference && gs != nil && gs.PublicStatus != nil {
+		for _, metric := range gs.PublicStatus.Models {
+			if metric.ModelID != snap.Model.ID {
+				continue
+			}
+			monitor := map[string]any{
+				"model":        secure.SanitizeField(metric.ModelID),
+				"uptime_ratio": metric.UptimeRatio,
+			}
+			if metric.Latest != nil {
+				monitor["ok"] = metric.Latest.OK
+				monitor["checked_at"] = metric.Latest.CheckedAt.UTC().Format(time.RFC3339)
+				monitor["latency_ms"] = metric.Latest.LatencyMs
+				monitor["ttft_ms"] = metric.Latest.TTFTMs
+				monitor["throughput_tps"] = metric.Latest.ThroughputTps
+				if metric.Latest.Error != "" {
+					monitor["error"] = secure.SanitizeField(metric.Latest.Error)
+				}
+			}
+			obj["model_monitor"] = monitor
+			break
+		}
+	}
 	if len(historical) > 0 {
 		reason := "historical_snapshot"
 		if active != nil && !*active {
@@ -347,13 +371,32 @@ func statusJSON(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalState,
 		obj["historical"] = true
 		obj["reason"] = reason
 	}
+	if active != nil && *active && snap != nil && snap.Trace != nil && snap.Trace.Enabled && snap.Trace.Verified && snap.Provider.Confirmed && snap.Provider.Name == schema.ProviderFreeInference &&
+		snap.Trace.Provider == schema.ProviderFreeInference && (snap.Trace.Client == "" || snap.Trace.Client == snap.Client.Type) &&
+		snap.Trace.Header == tracing.SessionHeader && snap.Trace.Source != schema.TraceSourceNone && tracing.ValidateTraceID(snap.Trace.SessionID) {
+		obj["trace"] = map[string]any{
+			"enabled":  true,
+			"active":   true,
+			"client":   snap.Trace.Client,
+			"trace_id": secure.MaskSessionID(snap.Trace.SessionID),
+			"header":   snap.Trace.Header,
+			"provider": snap.Trace.Provider,
+			"source":   snap.Trace.Source,
+			"started_at": func() string {
+				if snap.Trace.StartedAt.IsZero() {
+					return ""
+				}
+				return snap.Trace.StartedAt.UTC().Format(time.RFC3339)
+			}(),
+		}
+	}
 
 	enc := json.NewEncoder(stdout)
 	enc.SetIndent("", "  ")
 	enc.Encode(obj)
 }
 
-func printFullStatus(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalState, reveal bool) {
+func printFullStatus(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalState, reveal bool, showTrace ...bool) {
 	fmt.Fprintf(stdout, "FreeInference Companion %s\n", Version)
 	fmt.Fprintf(stdout, "Session:  %s (%s)\n", displaySessionID(snap.Session.ID, reveal), snap.Session.Status)
 	fmt.Fprintf(stdout, "Client:   %s\n", snap.Client.Type)
@@ -362,6 +405,12 @@ func printFullStatus(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalS
 		provider = "unknown (unconfirmed)"
 	}
 	fmt.Fprintf(stdout, "Provider: %s (source: %s)\n", provider, snap.Provider.Source)
+	traceVisible := len(showTrace) == 0 || showTrace[0]
+	if traceVisible && snap.Trace != nil && snap.Trace.Enabled && snap.Trace.Verified && snap.Provider.Confirmed && snap.Provider.Name == schema.ProviderFreeInference &&
+		snap.Trace.Provider == schema.ProviderFreeInference && (snap.Trace.Client == "" || snap.Trace.Client == snap.Client.Type) &&
+		snap.Trace.Header == tracing.SessionHeader && snap.Trace.Source != schema.TraceSourceNone && tracing.ValidateTraceID(snap.Trace.SessionID) {
+		fmt.Fprintln(stdout, "Tracing:  active (X-Session-ID)")
+	}
 	if snap.Model.ContextLength != nil {
 		fmt.Fprintf(stdout, "Model:    %s (%s context)\n", snap.Model.ID, formatTokenCount(*snap.Model.ContextLength))
 	} else {

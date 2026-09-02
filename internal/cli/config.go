@@ -103,6 +103,8 @@ func cmdConfigShow(args []string, stdout, stderr io.Writer) int {
 
 	fmt.Fprintln(stdout, "\nPrivacy:")
 	printField("  diagnostic_probes", fmt.Sprintf("%t", eff.Privacy.DiagnosticProbes.Value), string(eff.Privacy.DiagnosticProbes.Source), boolStr(eff.Privacy.DiagnosticProbes.Valid), eff.Privacy.DiagnosticProbes.Error)
+	fmt.Fprintln(stdout, "\nTracing:")
+	printField("  enabled", fmt.Sprintf("%t", eff.Tracing.Enabled.Value), string(eff.Tracing.Enabled.Source), boolStr(eff.Tracing.Enabled.Valid), eff.Tracing.Enabled.Error)
 
 	return 0
 }
@@ -131,7 +133,7 @@ func cmdConfigSet(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "Keys: context.watch_enter, context.warn_enter, context.critical_enter,")
 		fmt.Fprintln(stderr, "      context.watch_leave, context.warn_leave, context.critical_leave,")
 		fmt.Fprintln(stderr, "      context.output_reserve, cache.warn_threshold, cache.recovered_threshold, cache.cooldown_mins,")
-		fmt.Fprintln(stderr, "      refresh.interval_mins, reporting.level, privacy.diagnostic_probes")
+		fmt.Fprintln(stderr, "      refresh.interval_mins, reporting.level, privacy.diagnostic_probes, tracing.enabled")
 		return 2
 	}
 

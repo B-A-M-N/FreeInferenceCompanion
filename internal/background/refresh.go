@@ -1,6 +1,7 @@
 package background
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -9,6 +10,8 @@ import (
 	"time"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/api"
+	"github.com/b-a-m-n/freeinference-companion/internal/failures"
+	"github.com/b-a-m-n/freeinference-companion/internal/secure"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
@@ -18,6 +21,7 @@ const (
 	WorkerModels       = "models"
 	WorkerHealth       = "health"
 	WorkerAccountUsage = "account-usage"
+	WorkerPublicStatus = "public-status"
 )
 
 // Cache TTLs.
@@ -25,6 +29,7 @@ const (
 	ModelsTTL       = 6 * time.Hour
 	HealthTTL       = 120 * time.Second
 	AccountUSageTTL = 60 * time.Minute
+	PublicStatusTTL = 20 * time.Minute
 )
 
 // Backoff intervals for consecutive failures: 2 → 5 → 15 → 30 minutes.
@@ -41,6 +46,7 @@ type RefreshResult struct {
 	ModelsRefreshed        bool   `json:"models_refreshed"`
 	HealthRefreshed        bool   `json:"health_refreshed"`
 	AccountUsageRefreshed  bool   `json:"account_usage_refreshed"`
+	PublicStatusRefreshed  bool   `json:"public_status_refreshed"`
 	AccountUsageCapability string `json:"account_usage_capability,omitempty"`
 	Skipped                bool   `json:"skipped"`
 	SkipReason             string `json:"skip_reason,omitempty"`
@@ -53,6 +59,9 @@ type Refresher struct {
 	Client    *api.Client
 	Paths     state.Paths
 	HealthURL string
+	// PublicStatusFetch is injectable for tests. Production callers leave it
+	// nil, which uses the unauthenticated public monitor endpoint.
+	PublicStatusFetch func(context.Context) (*api.PublicStatusResponse, error)
 }
 
 // NewRefresher creates a new Refresher.
@@ -73,7 +82,7 @@ func NewRefresher(client *api.Client, paths state.Paths, healthURL string) *Refr
 func (r *Refresher) WorkerRefresh(worker string) *RefreshResult {
 	result := &RefreshResult{Worker: worker}
 
-	if worker != WorkerModels && worker != WorkerHealth && worker != WorkerAccountUsage {
+	if worker != WorkerModels && worker != WorkerHealth && worker != WorkerAccountUsage && worker != WorkerPublicStatus {
 		result.Skipped = true
 		result.SkipReason = "unknown worker"
 		return result
@@ -144,6 +153,13 @@ func (r *Refresher) WorkerRefresh(worker string) *RefreshResult {
 			return result
 		}
 		r.refreshAccountUsage(result, now)
+	case WorkerPublicStatus:
+		if !publicStatusStale(gs, now) {
+			result.Skipped = true
+			result.SkipReason = "cache fresh"
+			return result
+		}
+		r.refreshPublicStatus(result, now)
 	}
 	return result
 }
@@ -184,6 +200,13 @@ func (r *Refresher) RefreshIfStale() *RefreshResult {
 			}
 		}
 	}
+	if publicStatusStale(gs, now) && !breakerOpen(gs, WorkerPublicStatus, now) {
+		res := r.WorkerRefresh(WorkerPublicStatus)
+		result.PublicStatusRefreshed = res.PublicStatusRefreshed
+		if res.Error != "" && result.Error == "" {
+			result.Error = res.Error
+		}
+	}
 	return result
 }
 
@@ -201,6 +224,7 @@ func (r *Refresher) ForceRefresh() *RefreshResult {
 	if r.Client != nil && r.Client.APIKey() != "" && accountUsageCapabilityRefreshable(gs) {
 		r.forceRefreshAccountUsage(result, now)
 	}
+	r.forceRefreshPublicStatus(result, now)
 	return result
 }
 
@@ -230,6 +254,9 @@ func StaleWorkersWithClient(paths state.Paths, healthURL string, apiKey string) 
 		if accountUsageStale(gs, now) {
 			stale = append(stale, WorkerAccountUsage)
 		}
+	}
+	if publicStatusStale(gs, now) && !breakerOpen(gs, WorkerPublicStatus, now) {
+		stale = append(stale, WorkerPublicStatus)
 	}
 	return stale
 }
@@ -288,6 +315,20 @@ func healthStale(gs *schema.GlobalState, now time.Time) bool {
 	}
 	fetched := schema.SanitizeTimestamp(gs.Health.FetchedAt, now)
 	return now.Sub(fetched) > HealthTTL
+}
+
+func publicStatusStale(gs *schema.GlobalState, now time.Time) bool {
+	if gs == nil || gs.PublicStatus == nil || gs.PublicStatus.FetchedAt.IsZero() {
+		return true
+	}
+	fetched := schema.SanitizeTimestamp(gs.PublicStatus.FetchedAt, now)
+	if now.Sub(fetched) > PublicStatusTTL {
+		return true
+	}
+	if !gs.PublicStatus.CheckedAt.IsZero() && now.Sub(schema.SanitizeTimestamp(gs.PublicStatus.CheckedAt, now)) > api.PublicStatusStaleAfter {
+		return true
+	}
+	return false
 }
 
 func breakerOpen(gs *schema.GlobalState, endpoint string, now time.Time) bool {
@@ -379,6 +420,133 @@ func (r *Refresher) refreshHealth(result *RefreshResult, now time.Time) {
 	}
 	result.HealthRefreshed = true
 	r.resetCircuitBreaker(WorkerHealth)
+}
+
+func (r *Refresher) refreshPublicStatus(result *RefreshResult, now time.Time) {
+	fetch := r.PublicStatusFetch
+	if fetch == nil {
+		fetch = api.FetchPublicStatus
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	status, err := fetch(ctx)
+	if err != nil {
+		r.recordFailure(WorkerPublicStatus, err, now)
+		r.recordPublicStatusFailure(now, failures.Normalize(err.Error()).Category)
+		result.Error = "public status fetch failed"
+		return
+	}
+	cache, err := publicStatusCache(status, now)
+	if err != nil {
+		r.recordFailure(WorkerPublicStatus, err, now)
+		r.recordPublicStatusFailure(now, failures.Normalize(err.Error()).Category)
+		result.Error = "public status validation failed"
+		return
+	}
+	if err := state.SavePublicStatus(r.Paths, cache); err != nil {
+		result.Error = "save public status"
+		return
+	}
+	result.PublicStatusRefreshed = true
+	r.resetCircuitBreaker(WorkerPublicStatus)
+}
+
+func publicStatusCache(status *api.PublicStatusResponse, now time.Time) (*schema.PublicStatusCache, error) {
+	if status == nil {
+		return nil, errors.New("public status response is nil")
+	}
+	if err := status.Validate(); err != nil {
+		return nil, err
+	}
+	if status.Cycle.ValidationError != "" {
+		return nil, errors.New("public status cycle is invalid")
+	}
+	checkedAt, err := time.Parse(time.RFC3339Nano, status.Cycle.CheckedAt)
+	if err != nil {
+		return nil, errors.New("public status cycle timestamp is invalid")
+	}
+	cache := &schema.PublicStatusCache{
+		FetchedAt:  now.UTC(),
+		CheckedAt:  checkedAt.UTC(),
+		Source:     api.PublicStatusSource,
+		Total:      status.Total,
+		Healthy:    status.Healthy,
+		Unhealthy:  status.Unhealthy,
+		CycleOK:    status.Cycle.OK,
+		CycleError: publicStatusText(status.Cycle.Error),
+	}
+	const maxCachedModels = 256
+	for i, model := range status.Models {
+		if i >= maxCachedModels {
+			break
+		}
+		if model.ValidationError != "" {
+			continue
+		}
+		entry := schema.PublicStatusModelCache{
+			ModelID:     secure.SanitizeField(model.ModelID),
+			UptimeRatio: model.UptimeRatio,
+		}
+		if model.Latest != nil {
+			latestAt, parseErr := time.Parse(time.RFC3339Nano, model.Latest.CheckedAt)
+			if parseErr != nil {
+				continue
+			}
+			entry.Latest = &schema.PublicStatusSampleCache{
+				OK:               model.Latest.OK,
+				CheckedAt:        latestAt.UTC(),
+				LatencyMs:        model.Latest.LatencyMs,
+				TTFTMs:           model.Latest.TTFTMs,
+				CompletionTokens: model.Latest.CompletionTokens,
+				ThroughputTps:    model.Latest.ThroughputTps,
+				Error:            publicStatusText(model.Latest.Error),
+			}
+		}
+		cache.Models = append(cache.Models, entry)
+	}
+	if len(cache.Models) == 0 {
+		return nil, errors.New("public status contains no valid model metrics")
+	}
+	return cache, nil
+}
+
+func publicStatusText(value string) string {
+	value = secure.Redact(secure.SanitizeField(value))
+	if len(value) > 200 {
+		return value[:200] + "..."
+	}
+	return value
+}
+
+func (r *Refresher) recordPublicStatusFailure(now time.Time, category string) {
+	gs, _ := state.LoadGlobal(r.Paths)
+	if gs == nil {
+		gs = &schema.GlobalState{}
+	}
+	cache := gs.PublicStatus
+	if cache == nil {
+		cache = &schema.PublicStatusCache{Source: api.PublicStatusSource}
+	}
+	cache.ConsecutiveFailure++
+	cache.LastError = publicStatusText(category)
+	for _, cb := range gs.CircuitBreakers {
+		if cb.Endpoint == WorkerPublicStatus {
+			cache.NextRetryAt = cb.NextRetryAt
+			break
+		}
+	}
+	if cache.NextRetryAt == nil {
+		index := cache.ConsecutiveFailure - 1
+		if index < 0 {
+			index = 0
+		}
+		if index >= len(backoffIntervals) {
+			index = len(backoffIntervals) - 1
+		}
+		next := now.Add(backoffIntervals[index])
+		cache.NextRetryAt = &next
+	}
+	_ = state.SavePublicStatus(r.Paths, cache)
 }
 
 // recordFailure opens the circuit breaker with escalating backoff.
@@ -545,4 +713,19 @@ func (r *Refresher) forceRefreshAccountUsage(result *RefreshResult, now time.Tim
 	}
 	defer fl.Release()
 	r.refreshAccountUsage(result, now)
+}
+
+func (r *Refresher) forceRefreshPublicStatus(result *RefreshResult, now time.Time) {
+	fl := state.NewFileLock(r.Paths.RefreshLock(WorkerPublicStatus))
+	if err := fl.Acquire(); err != nil {
+		if state.IsLockBusy(err) {
+			result.Skipped = true
+			result.SkipReason = "another worker running"
+		} else {
+			result.Error = "acquire lock"
+		}
+		return
+	}
+	defer fl.Release()
+	r.refreshPublicStatus(result, now)
 }

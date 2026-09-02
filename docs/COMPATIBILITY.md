@@ -16,6 +16,11 @@ reported as unavailable or unknown rather than inferred.
 - FreeInference runtime routes: Claude uses `/anthropic`; Codex uses the
   OpenAI-compatible `/v1` route. Automatic state requires client-specific
   route and credential evidence.
+- Trace correlation: Claude requires the documented newline-separated
+  `ANTHROPIC_CUSTOM_HEADERS` variable. Codex requires the selected provider's
+  `env_http_headers` mapping to `FI_TRACE_SESSION_ID`; the launcher can add
+  that mapping surgically. An off-host provider, OpenAI/Anthropic provider,
+  or unverified Codex profile receives no trace injection.
 - Public service status: `freeinference fi-status` performs an unauthenticated
   GET to `https://status.freeinference.org/api/status`; it is separate from
   provider health, account usage, and session telemetry. Its versioned JSON

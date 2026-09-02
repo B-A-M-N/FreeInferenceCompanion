@@ -30,6 +30,17 @@ type codexConfig struct {
 // disk. The provider's env_key must name the environment variable Codex uses;
 // a coincidental FREEINFERENCE_API_KEY is not enough.
 func ResolveCodexProviderConfiguration() (ClientEvidence, error) {
+	return resolveCodexProviderConfiguration(strings.TrimSpace(os.Getenv("CODEX_PROFILE")))
+}
+
+// ResolveCodexProviderConfigurationForProfile resolves the provider selected
+// by an explicit `codex --profile` launcher argument. It avoids mutating the
+// caller's environment while preserving the same verification rules.
+func ResolveCodexProviderConfigurationForProfile(profile string) (ClientEvidence, error) {
+	return resolveCodexProviderConfiguration(strings.TrimSpace(profile))
+}
+
+func resolveCodexProviderConfiguration(profile string) (ClientEvidence, error) {
 	home, err := codexHome()
 	if err != nil {
 		return ClientEvidence{}, err
@@ -49,7 +60,7 @@ func ResolveCodexProviderConfiguration() (ClientEvidence, error) {
 	// child commands. If an embedding environment supplies CODEX_PROFILE, honor
 	// it; otherwise the top-level model_provider is the only selection we can
 	// establish. A profile's provider table is inherited from config.toml.
-	if profile := strings.TrimSpace(os.Getenv("CODEX_PROFILE")); profile != "" {
+	if profile != "" {
 		if !validCodexName(profile) {
 			return ClientEvidence{}, errors.New("invalid CODEX_PROFILE name")
 		}
@@ -136,6 +147,17 @@ func codexHome() (string, error) {
 		return "", fmt.Errorf("Codex home: %w", err)
 	}
 	return filepath.Join(home, ".codex"), nil
+}
+
+// CodexConfigPath returns the selected Codex user's config path without
+// reading it. Launch-time header preparation uses the same path resolver as
+// activation so it cannot silently edit a different profile directory.
+func CodexConfigPath() (string, error) {
+	home, err := codexHome()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, "config.toml"), nil
 }
 
 func loadCodexConfig(path string) (codexConfig, error) {

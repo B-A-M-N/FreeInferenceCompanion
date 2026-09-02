@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/engine"
+	"github.com/b-a-m-n/freeinference-companion/internal/failures"
 	"github.com/b-a-m-n/freeinference-companion/internal/runtime"
 	"github.com/b-a-m-n/freeinference-companion/internal/secure"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
@@ -111,6 +112,12 @@ func claudeActivation() runtime.Activation {
 // HandleSessionStartWith is the activation-aware variant. The caller must have
 // already gated on activation.Active — this method does NOT re-check.
 func (a *ClaudeAdapter) HandleSessionStartWith(input *schema.ClaudeHookInput, activation runtime.Activation) error {
+	return a.HandleSessionStartWithTrace(input, activation, nil)
+}
+
+// HandleSessionStartWithTrace associates validated launch metadata with the
+// session without recording a trace event or any raw header values.
+func (a *ClaudeAdapter) HandleSessionStartWithTrace(input *schema.ClaudeHookInput, activation runtime.Activation, trace *schema.TraceInfo) error {
 	sessionID := input.SessionID
 	if sessionID == "" {
 		return nil
@@ -128,6 +135,10 @@ func (a *ClaudeAdapter) HandleSessionStartWith(input *schema.ClaudeHookInput, ac
 			snap.Session.EndedAt = nil
 			snap.Provider = provider
 			snap.ActivationID = a.Paths.ActivationID
+			if trace != nil && trace.Verified {
+				copy := *trace
+				snap.Trace = &copy
+			}
 			// Only fill in the model if we don't already know a better one.
 			if input.Model != "" && (snap.Model.ID == "" || snap.Model.ID == "unknown") {
 				snap.Model.ID = secure.SanitizeField(input.Model)
@@ -157,6 +168,13 @@ func (a *ClaudeAdapter) HandleStatusLineUpdate(input *schema.ClaudeStatusLineInp
 // HandleStatusLineUpdateWith is the activation-aware variant. The caller must
 // have already gated on activation.Active — this method does NOT re-check.
 func (a *ClaudeAdapter) HandleStatusLineUpdateWith(input *schema.ClaudeStatusLineInput, sessionID string, activation runtime.Activation) error {
+	return a.HandleStatusLineUpdateWithTrace(input, sessionID, activation, nil)
+}
+
+// HandleStatusLineUpdateWithTrace also carries the launch trace inherited by
+// a Claude status-line child. The status-line output itself remains compact
+// and never displays the raw trace ID.
+func (a *ClaudeAdapter) HandleStatusLineUpdateWithTrace(input *schema.ClaudeStatusLineInput, sessionID string, activation runtime.Activation, trace *schema.TraceInfo) error {
 	if sessionID == "" {
 		return nil
 	}
@@ -168,6 +186,10 @@ func (a *ClaudeAdapter) HandleStatusLineUpdateWith(input *schema.ClaudeStatusLin
 		},
 		func(snap *schema.Snapshot) error {
 			now := time.Now().UTC()
+			if trace != nil && trace.Verified && (snap.Trace == nil || !snap.Trace.Enabled) {
+				copy := *trace
+				snap.Trace = &copy
+			}
 
 			// Stamp the activation identity so the render layer can gate
 			// visibility on activation match.
@@ -841,27 +863,49 @@ func (a *ClaudeAdapter) HandlePostCompact(input *schema.ClaudeHookInput, session
 
 // HandleStopFailure records a structured failure from the StopFailure hook.
 func (a *ClaudeAdapter) HandleStopFailure(input *schema.ClaudeHookInput, sessionID string) error {
-	if sessionID == "" || input.Error == "" {
+	if sessionID == "" || input == nil || input.Error == "" {
 		return nil
 	}
-	category := sanitizeFailureCategory(input.Error)
+	metadata := failures.Normalize(input.Error)
 	now := time.Now().UTC()
+	var model, provider string
 	err := state.UpdateSnapshot(a.Paths, schema.ClientClaudeCode, sessionID, nil,
 		func(snap *schema.Snapshot) error {
 			inactive := false
 			snap.Activity.TurnActive = &inactive
 			snap.Activity.TurnEndedAt = &now
+			model = snap.Model.ID
+			provider = snap.Provider.Name
 			snap.LastFailure = &schema.FailureRecord{
-				Category:   category,
-				ObservedAt: now,
-				Source:     "claude_stop_failure",
+				Category:          metadata.Category,
+				ObservedAt:        now,
+				Source:            "claude_stop_failure",
+				HTTPStatus:        metadata.HTTPStatus,
+				Retryable:         metadata.Retryable,
+				TransportClass:    metadata.TransportClass,
+				ProviderErrorType: metadata.ProviderErrorType,
+				ErrorOrigin:       metadata.ErrorOrigin,
+				RetryAfterSeconds: metadata.RetryAfterSeconds,
+				RequestReference:  metadata.RequestReference,
 			}
 			snap.Session.LastEventAt = now
 			return nil
 		})
 	if err == nil {
 		appendEventBestEffort(a.Paths, schema.ClientClaudeCode, sessionID,
-			state.Event{Type: state.EventTurnFailed, Detail: category})
+			state.Event{
+				Type:              state.EventTurnFailed,
+				Model:             model,
+				Provider:          provider,
+				Detail:            metadata.Category,
+				HTTPStatus:        metadata.HTTPStatus,
+				Retryable:         metadata.Retryable,
+				TransportClass:    metadata.TransportClass,
+				ProviderErrorType: metadata.ProviderErrorType,
+				ErrorOrigin:       metadata.ErrorOrigin,
+				RetryAfterSeconds: metadata.RetryAfterSeconds,
+				RequestReference:  metadata.RequestReference,
+			})
 	}
 	return err
 }
@@ -944,25 +988,7 @@ func (a *ClaudeAdapter) HandleStop(sessionID string) error {
 // sanitizeFailureCategory maps a raw StopFailure.Error string to a short,
 // shareable category. The raw error is never persisted — only the category.
 func sanitizeFailureCategory(raw string) string {
-	raw = strings.ToLower(strings.TrimSpace(raw))
-	switch {
-	case strings.Contains(raw, "rate") && strings.Contains(raw, "limit"):
-		return "rate_limit"
-	case strings.Contains(raw, "overload"):
-		return "overloaded"
-	case strings.Contains(raw, "auth") || strings.Contains(raw, "unauthor") || strings.Contains(raw, "api key"):
-		return "authentication_failed"
-	case strings.Contains(raw, "not found") || strings.Contains(raw, "model_not_found"):
-		return "model_not_found"
-	case strings.Contains(raw, "max_output") || strings.Contains(raw, "max tokens"):
-		return "max_output_tokens"
-	case strings.Contains(raw, "invalid"):
-		return "invalid_request"
-	case strings.Contains(raw, "server") || strings.Contains(raw, "503") || strings.Contains(raw, "500"):
-		return "server_error"
-	}
-	// Unknown failures get a generic bucket so the raw text is never stored.
-	return "unknown"
+	return failures.Classify(raw)
 }
 
 func deref(p *int64) int64 {

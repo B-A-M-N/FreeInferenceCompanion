@@ -19,13 +19,20 @@ import (
 // internally; the hashed ID in the event record is sufficient for correlation
 // during incident response.
 type Event struct {
-	Type      string    `json:"type"`
-	At        time.Time `json:"at"`
-	Client    string    `json:"client,omitempty"`
-	SessionID string    `json:"session_id,omitempty"`
-	Model     string    `json:"model,omitempty"`
-	Provider  string    `json:"provider,omitempty"`
-	Detail    string    `json:"detail,omitempty"`
+	Type              string    `json:"type"`
+	At                time.Time `json:"at"`
+	Client            string    `json:"client,omitempty"`
+	SessionID         string    `json:"session_id,omitempty"`
+	Model             string    `json:"model,omitempty"`
+	Provider          string    `json:"provider,omitempty"`
+	Detail            string    `json:"detail,omitempty"`
+	HTTPStatus        *int      `json:"http_status,omitempty"`
+	Retryable         *bool     `json:"retryable,omitempty"`
+	TransportClass    string    `json:"transport_class,omitempty"`
+	ProviderErrorType string    `json:"provider_error_type,omitempty"`
+	ErrorOrigin       string    `json:"error_origin,omitempty"`
+	RetryAfterSeconds *int64    `json:"retry_after_seconds,omitempty"`
+	RequestReference  string    `json:"request_reference,omitempty"`
 }
 
 // Allowed event types. Anything else is rejected.
@@ -108,6 +115,16 @@ func AppendEvent(paths Paths, clientType, sessionID string, ev Event) error {
 	ev.SessionID = sessionKey(sessionID)
 	ev.Model = secure.SanitizeField(ev.Model)
 	ev.Provider = secure.SanitizeField(ev.Provider)
+	ev.TransportClass = sanitizeEventField(ev.TransportClass)
+	ev.ProviderErrorType = sanitizeEventField(ev.ProviderErrorType)
+	ev.ErrorOrigin = sanitizeEventField(ev.ErrorOrigin)
+	ev.RequestReference = sanitizeEventField(ev.RequestReference)
+	if ev.HTTPStatus != nil && (*ev.HTTPStatus < 400 || *ev.HTTPStatus > 599) {
+		ev.HTTPStatus = nil
+	}
+	if ev.RetryAfterSeconds != nil && (*ev.RetryAfterSeconds < 0 || *ev.RetryAfterSeconds > 7*24*60*60) {
+		ev.RetryAfterSeconds = nil
+	}
 	ev.At = time.Now().UTC()
 	if ev.Client == "" {
 		ev.Client = secure.SanitizeField(clientType)
@@ -384,8 +401,13 @@ func splitLines(b []byte) [][]byte {
 // detail field. It is a defensive last-mile cleaner; callers must already
 // pass sanitized data. Applies both length-bounding and secret-shape redaction.
 func SanitizeForEvent(s string) string {
+	s = secure.SanitizeField(s)
 	if len(s) > MaxDetailLen {
 		s = s[:MaxDetailLen] + "..."
 	}
 	return secure.Redact(s)
+}
+
+func sanitizeEventField(s string) string {
+	return secure.Redact(secure.SanitizeField(s))
 }

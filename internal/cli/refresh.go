@@ -71,8 +71,12 @@ func cmdRefresh(paths state.Paths, args []string, stdout, stderr io.Writer) int 
 
 	client, err := newAPIClient()
 	if err != nil {
-		fmt.Fprintln(stderr, "error: "+endpointFailDetail(err))
-		return 1
+		// The public monitor is unauthenticated and must remain usable even
+		// when provider credentials or endpoint configuration are broken.
+		if worker != background.WorkerPublicStatus && !detach {
+			fmt.Fprintln(stderr, "error: "+endpointFailDetail(err))
+			return 1
+		}
 	}
 	refresher := background.NewRefresher(client, paths, os.Getenv("FI_HEALTH_URL"))
 
@@ -81,7 +85,7 @@ func cmdRefresh(paths state.Paths, args []string, stdout, stderr io.Writer) int 
 		result := refresher.WorkerRefresh(worker)
 		if result.Skipped {
 			if result.SkipReason == "unknown worker" {
-				fmt.Fprintf(stderr, "error: unknown worker %q (valid: models, health, account-usage)\n", worker)
+				fmt.Fprintf(stderr, "error: unknown worker %q (valid: models, health, account-usage, public-status)\n", worker)
 				return 2
 			}
 			// Another worker is running — not an error, but report it.
@@ -97,6 +101,9 @@ func cmdRefresh(paths state.Paths, args []string, stdout, stderr io.Writer) int 
 		if result.AccountUsageRefreshed {
 			fmt.Fprintln(stdout, "Account usage refreshed.")
 		}
+		if result.PublicStatusRefreshed {
+			fmt.Fprintln(stdout, "Public status refreshed.")
+		}
 		if result.AccountUsageCapability != "" && !result.AccountUsageRefreshed {
 			fmt.Fprintf(stdout, "Account usage capability: %s.\n", result.AccountUsageCapability)
 		}
@@ -109,11 +116,23 @@ func cmdRefresh(paths state.Paths, args []string, stdout, stderr io.Writer) int 
 
 	// Detached mode: spawn workers and return immediately.
 	if detach {
-		stale := background.StaleWorkersWithClient(paths, os.Getenv("FI_HEALTH_URL"), client.APIKey())
+		apiKey := ""
+		if client != nil {
+			apiKey = client.APIKey()
+		}
+		stale := []string{background.WorkerPublicStatus}
+		if client != nil {
+			stale = background.StaleWorkersWithClient(paths, os.Getenv("FI_HEALTH_URL"), apiKey)
+		}
 		if !ifStale {
-			stale = []string{background.WorkerModels}
-			if os.Getenv("FI_HEALTH_URL") != "" {
-				stale = append(stale, background.WorkerHealth)
+			if client == nil {
+				stale = []string{background.WorkerPublicStatus}
+			} else {
+				stale = []string{background.WorkerModels}
+				if os.Getenv("FI_HEALTH_URL") != "" {
+					stale = append(stale, background.WorkerHealth)
+				}
+				stale = append(stale, background.WorkerPublicStatus)
 			}
 		}
 		if len(stale) == 0 {
@@ -149,6 +168,7 @@ func cmdRefresh(paths state.Paths, args []string, stdout, stderr io.Writer) int 
 			"models_refreshed":        result.ModelsRefreshed,
 			"health_refreshed":        result.HealthRefreshed,
 			"account_usage_refreshed": result.AccountUsageRefreshed,
+			"public_status_refreshed": result.PublicStatusRefreshed,
 		}
 		if result.Error != "" {
 			r["error"] = result.Error
@@ -172,6 +192,9 @@ func cmdRefresh(paths state.Paths, args []string, stdout, stderr io.Writer) int 
 	}
 	if result.AccountUsageRefreshed {
 		fmt.Fprintln(stdout, "Account usage refreshed.")
+	}
+	if result.PublicStatusRefreshed {
+		fmt.Fprintln(stdout, "Public status refreshed.")
 	}
 	if result.AccountUsageCapability != "" && !result.AccountUsageRefreshed {
 		fmt.Fprintf(stdout, "Account usage capability: %s.\n", result.AccountUsageCapability)

@@ -38,6 +38,7 @@ type Config struct {
 	Reporting     ReportingConfig `json:"reporting"`
 	Provider      ProviderConfig  `json:"provider"`
 	Privacy       PrivacyConfig   `json:"privacy"`
+	Tracing       TracingConfig   `json:"tracing"`
 }
 
 type ContextConfig struct {
@@ -75,6 +76,13 @@ type PrivacyConfig struct {
 	DiagnosticProbes bool `json:"diagnostic_probes"`
 }
 
+// TracingConfig controls Companion's launch-time support correlation. It is
+// intentionally separate from diagnostic probes: tracing adds only a random
+// per-launch X-Session-ID and never sends X-Probe or X-Request-ID.
+type TracingConfig struct {
+	Enabled bool `json:"enabled"`
+}
+
 func defaultConfig() Config {
 	return Config{
 		SchemaVersion: SchemaVersion,
@@ -104,6 +112,10 @@ func defaultConfig() Config {
 		Privacy: PrivacyConfig{
 			DiagnosticProbes: true,
 		},
+		// Trace correlation is enabled for explicit Companion-launched clients.
+		// Non-Companion launches are unaffected because the launcher is the only
+		// component that injects the header.
+		Tracing: TracingConfig{Enabled: true},
 	}
 }
 
@@ -135,7 +147,11 @@ type EffectiveConfig struct {
 	Privacy struct {
 		DiagnosticProbes EffectiveValue[bool]
 	}
-	Invalid []string
+	Tracing struct {
+		Enabled EffectiveValue[bool]
+	}
+	Invalid   []string `json:"invalid,omitempty"`
+	LoadError string   `json:"load_error,omitempty"`
 }
 
 func envFloat(key string, def float64) (float64, bool, error) {
@@ -389,6 +405,12 @@ func SetField(cfg *Config, key, value string) error {
 			return err
 		}
 		cfg.Privacy.DiagnosticProbes = v
+	case "tracing.enabled":
+		v, err := parseBool()
+		if err != nil {
+			return err
+		}
+		cfg.Tracing.Enabled = v
 	case "refresh.stale_mins":
 		v, err := parseInt()
 		if err != nil {
@@ -427,7 +449,7 @@ func Validate(cfg *Config) error {
 		return fmt.Errorf("context.output_reserve must be in [1,1000000]")
 	}
 	cache := cfg.Cache
-	if math.IsNaN(cache.WarnThreshold) || math.IsNaN(cache.RecoveredThreshold) || cache.WarnThreshold < 0 || cache.RecoveredThreshold > 1 || cache.WarnThreshold >= cache.RecoveredThreshold {
+	if math.IsNaN(cache.WarnThreshold) || math.IsInf(cache.WarnThreshold, 0) || math.IsNaN(cache.RecoveredThreshold) || math.IsInf(cache.RecoveredThreshold, 0) || cache.WarnThreshold < 0 || cache.RecoveredThreshold > 1 || cache.WarnThreshold >= cache.RecoveredThreshold {
 		return fmt.Errorf("cache thresholds must satisfy 0 <= warn_threshold < recovered_threshold <= 1")
 	}
 	if cache.CooldownMins <= 0 || cfg.Refresh.IntervalMins <= 0 || cfg.Refresh.StaleMins <= 0 {
@@ -451,6 +473,7 @@ type Manager struct {
 	cfg       *Config
 	cfgLoaded bool
 	path      string
+	loadErr   error
 }
 
 func NewManager() (*Manager, error) {
@@ -461,7 +484,7 @@ func NewManager() (*Manager, error) {
 		d := defaultConfig()
 		cfg = &d
 	}
-	m := &Manager{cfg: cfg, cfgLoaded: cfgLoaded}
+	m := &Manager{cfg: cfg, cfgLoaded: cfgLoaded, loadErr: err}
 	m.path, _ = ConfigPath()
 	return m, nil
 }
@@ -470,6 +493,7 @@ func (m *Manager) Resolve() (*EffectiveConfig, error) {
 	m.mu.RLock()
 	cfg := m.cfg
 	cfgLoaded := m.cfgLoaded
+	loadErr := m.loadErr
 	m.mu.RUnlock()
 
 	if cfg == nil {
@@ -535,20 +559,20 @@ func (m *Manager) Resolve() (*EffectiveConfig, error) {
 		return nil
 	})
 	eff.Cache.WarnThreshold = resolveFloat("FI_CACHE_WARN_THRESHOLD", cfg.Cache.WarnThreshold, cfgLoaded, resolveSrc, envFloat, func(v float64) error {
-		if v < 0 || v > 1 {
+		if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 1 {
 			return fmt.Errorf("must be in [0,1], got %v", v)
 		}
 		return nil
 	})
 	eff.Cache.RecoveredThreshold = resolveFloat("FI_CACHE_RECOVERED_THRESHOLD", cfg.Cache.RecoveredThreshold, cfgLoaded, resolveSrc, envFloat, func(v float64) error {
-		if v < 0 || v > 1 {
+		if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 1 {
 			return fmt.Errorf("must be in [0,1], got %v", v)
 		}
 		return nil
 	})
 	eff.Cache.CooldownMins = resolveInt("FI_CACHE_COOLDOWN_MINS", cfg.Cache.CooldownMins, cfgLoaded, resolveSrc, envInt, func(v int) error {
-		if v < 0 {
-			return fmt.Errorf("must be >= 0, got %d", v)
+		if v < 1 {
+			return fmt.Errorf("must be >= 1, got %d", v)
 		}
 		return nil
 	})
@@ -571,9 +595,67 @@ func (m *Manager) Resolve() (*EffectiveConfig, error) {
 		return nil
 	})
 	eff.Privacy.DiagnosticProbes = resolveBool("FI_DIAGNOSTIC_PROBES", cfg.Privacy.DiagnosticProbes, cfgLoaded, resolveSrc, envBool, nil)
+	eff.Tracing.Enabled = resolveBool("FI_TRACING", cfg.Tracing.Enabled, cfgLoaded, resolveSrc, envBool, nil)
 	eff.Provider.AllowInsecureLocalhost = resolveBool("FI_ALLOW_INSECURE_LOCALHOST", cfg.Provider.AllowInsecureLocalhost, cfgLoaded, resolveSrc, envBool, nil)
 
+	validateEffective(eff)
+	if loadErr != nil {
+		eff.LoadError = loadErr.Error()
+		return eff, loadErr
+	}
 	return eff, nil
+}
+
+func validateEffective(eff *EffectiveConfig) {
+	if eff == nil {
+		return
+	}
+	if eff.Context.WatchEnter.Valid && eff.Context.WarnEnter.Valid && eff.Context.CriticalEnter.Valid &&
+		!(eff.Context.WatchEnter.Value < eff.Context.WarnEnter.Value && eff.Context.WarnEnter.Value < eff.Context.CriticalEnter.Value) {
+		markEffectiveInvalid(&eff.Context.WatchEnter, "context enter thresholds must be ordered watch < warn < critical", &eff.Invalid, "context thresholds")
+		markEffectiveInvalid(&eff.Context.WarnEnter, "context enter thresholds must be ordered watch < warn < critical", &eff.Invalid, "context thresholds")
+		markEffectiveInvalid(&eff.Context.CriticalEnter, "context enter thresholds must be ordered watch < warn < critical", &eff.Invalid, "context thresholds")
+	}
+	if eff.Context.WatchLeave.Valid && eff.Context.WarnLeave.Valid && eff.Context.CriticalLeave.Valid &&
+		!(eff.Context.WatchLeave.Value < eff.Context.WarnLeave.Value && eff.Context.WarnLeave.Value < eff.Context.CriticalLeave.Value) {
+		markEffectiveInvalid(&eff.Context.WatchLeave, "context leave thresholds must be ordered watch < warn < critical", &eff.Invalid, "context thresholds")
+		markEffectiveInvalid(&eff.Context.WarnLeave, "context leave thresholds must be ordered watch < warn < critical", &eff.Invalid, "context thresholds")
+		markEffectiveInvalid(&eff.Context.CriticalLeave, "context leave thresholds must be ordered watch < warn < critical", &eff.Invalid, "context thresholds")
+	}
+	if eff.Context.WatchEnter.Valid && eff.Context.WatchLeave.Valid && eff.Context.WatchEnter.Value-eff.Context.WatchLeave.Value < 3 {
+		markEffectiveInvalid(&eff.Context.WatchEnter, "matching context thresholds must differ by at least 3", &eff.Invalid, "context hysteresis")
+		markEffectiveInvalid(&eff.Context.WatchLeave, "matching context thresholds must differ by at least 3", &eff.Invalid, "context hysteresis")
+	}
+	if eff.Context.WarnEnter.Valid && eff.Context.WarnLeave.Valid && eff.Context.WarnEnter.Value-eff.Context.WarnLeave.Value < 3 {
+		markEffectiveInvalid(&eff.Context.WarnEnter, "matching context thresholds must differ by at least 3", &eff.Invalid, "context hysteresis")
+		markEffectiveInvalid(&eff.Context.WarnLeave, "matching context thresholds must differ by at least 3", &eff.Invalid, "context hysteresis")
+	}
+	if eff.Context.CriticalEnter.Valid && eff.Context.CriticalLeave.Valid && eff.Context.CriticalEnter.Value-eff.Context.CriticalLeave.Value < 3 {
+		markEffectiveInvalid(&eff.Context.CriticalEnter, "matching context thresholds must differ by at least 3", &eff.Invalid, "context hysteresis")
+		markEffectiveInvalid(&eff.Context.CriticalLeave, "matching context thresholds must differ by at least 3", &eff.Invalid, "context hysteresis")
+	}
+	if eff.Cache.WarnThreshold.Valid && eff.Cache.RecoveredThreshold.Valid && eff.Cache.WarnThreshold.Value >= eff.Cache.RecoveredThreshold.Value {
+		markEffectiveInvalid(&eff.Cache.WarnThreshold, "cache warn_threshold must be below recovered_threshold", &eff.Invalid, "cache thresholds")
+		markEffectiveInvalid(&eff.Cache.RecoveredThreshold, "cache warn_threshold must be below recovered_threshold", &eff.Invalid, "cache thresholds")
+	}
+}
+
+func markEffectiveInvalid[T any](value *EffectiveValue[T], message string, invalid *[]string, name string) {
+	if value == nil {
+		return
+	}
+	value.Valid = false
+	if value.Error == "" {
+		value.Error = message
+	}
+	if invalid != nil {
+		for _, existing := range *invalid {
+			if existing == name {
+				return
+			}
+		}
+		*invalid = append(*invalid, name)
+	}
 }
 
 func resolveFloat(envKey string, fileVal float64, cfgLoaded bool, resolveSrc func() ValueSource, readEnv func(string, float64) (float64, bool, error), validate func(float64) error) EffectiveValue[float64] {

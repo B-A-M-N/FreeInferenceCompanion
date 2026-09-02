@@ -47,11 +47,38 @@ type Snapshot struct {
 	Warnings            WarningState    `json:"warnings"`
 	LastFailure         *FailureRecord  `json:"last_failure"`
 	Compaction          CompactionState `json:"compaction"`
+	// Trace records only launch-level correlation metadata. It never contains
+	// requests, responses, raw headers, credentials, or working-directory data.
+	Trace *TraceInfo `json:"trace,omitempty"`
 	// ActivationID is the provider-level identity under which this session
 	// was recorded. Rendering only uses data from this snapshot when the
 	// current runtime activation produces the same ActivationID.
 	ActivationID string `json:"activation_id,omitempty"`
 }
+
+// TraceInfo describes the opt-in support correlation attached to one
+// Companion-launched client process. SessionID is intentionally opaque and is
+// validated before it is persisted or displayed.
+type TraceInfo struct {
+	Enabled        bool      `json:"enabled"`
+	Verified       bool      `json:"verified"`
+	SessionID      string    `json:"session_id"`
+	Source         string    `json:"source"` // companion_generated, existing_client_header, none
+	StartedAt      time.Time `json:"started_at"`
+	Provider       string    `json:"provider"`
+	Client         string    `json:"client"`
+	Header         string    `json:"header"`
+	EndpointOrigin string    `json:"endpoint_origin,omitempty"`
+}
+
+const (
+	TraceSourceCompanionGenerated      = "companion_generated"
+	TraceSourceExistingHeader          = "existing_client_header"
+	TraceSourceNone                    = "none"
+	TraceHeaderSessionID               = "X-Session-ID"
+	TraceProvenanceReceiptVerified     = "receipt_verified"
+	TraceProvenanceInheritedUnverified = "inherited_unverified"
+)
 
 // ClientInfo identifies the coding-agent client.
 type ClientInfo struct {
@@ -217,9 +244,16 @@ type WarningState struct {
 
 // FailureRecord stores the last failure from StopFailure hooks.
 type FailureRecord struct {
-	Category   string    `json:"category"` // "rate_limit", "overloaded", "authentication_failed", "invalid_request", "model_not_found", "server_error", "max_output_tokens"
-	ObservedAt time.Time `json:"observed_at"`
-	Source     string    `json:"source"` // "claude_stop_failure"
+	Category          string    `json:"category"`
+	ObservedAt        time.Time `json:"observed_at"`
+	Source            string    `json:"source"`
+	HTTPStatus        *int      `json:"http_status,omitempty"`
+	Retryable         *bool     `json:"retryable,omitempty"`
+	TransportClass    string    `json:"transport_class,omitempty"`
+	ProviderErrorType string    `json:"provider_error_type,omitempty"`
+	ErrorOrigin       string    `json:"error_origin,omitempty"`
+	RetryAfterSeconds *int64    `json:"retry_after_seconds,omitempty"`
+	RequestReference  string    `json:"request_reference,omitempty"`
 }
 
 // CompactionState tracks pending and completed compaction operations.
@@ -352,7 +386,42 @@ type GlobalState struct {
 	Models                 *ModelsCache            `json:"models"`
 	AccountUsage           *AccountUsage           `json:"account_usage"`
 	AccountUsageCapability *AccountUsageCapability `json:"account_usage_capability"`
+	PublicStatus           *PublicStatusCache      `json:"public_status"`
 	CircuitBreakers        []CircuitBreaker        `json:"circuit_breakers"`
+}
+
+// PublicStatusCache stores the last validated unauthenticated service-status
+// response. It intentionally contains only public monitor metrics and bounded
+// refresh bookkeeping; credentials and provider request data never enter it.
+type PublicStatusCache struct {
+	FetchedAt          time.Time                `json:"fetched_at"`
+	CheckedAt          time.Time                `json:"checked_at"`
+	Source             string                   `json:"source"`
+	Total              int                      `json:"total"`
+	Healthy            int                      `json:"healthy"`
+	Unhealthy          int                      `json:"unhealthy"`
+	CycleOK            *bool                    `json:"cycle_ok,omitempty"`
+	CycleError         string                   `json:"cycle_error,omitempty"`
+	Models             []PublicStatusModelCache `json:"models,omitempty"`
+	ConsecutiveFailure int                      `json:"consecutive_failures,omitempty"`
+	LastError          string                   `json:"last_error,omitempty"`
+	NextRetryAt        *time.Time               `json:"next_retry_at,omitempty"`
+}
+
+type PublicStatusModelCache struct {
+	ModelID     string                   `json:"model_id"`
+	Latest      *PublicStatusSampleCache `json:"latest,omitempty"`
+	UptimeRatio *float64                 `json:"uptime_ratio,omitempty"`
+}
+
+type PublicStatusSampleCache struct {
+	OK               *bool     `json:"ok,omitempty"`
+	CheckedAt        time.Time `json:"checked_at"`
+	LatencyMs        *int64    `json:"latency_ms,omitempty"`
+	TTFTMs           *int64    `json:"ttft_ms,omitempty"`
+	CompletionTokens *int64    `json:"completion_tokens,omitempty"`
+	ThroughputTps    *float64  `json:"throughput_tps,omitempty"`
+	Error            string    `json:"error,omitempty"`
 }
 
 // HealthCache caches provider health information.

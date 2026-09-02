@@ -139,7 +139,7 @@ func cmdSnapshot(paths state.Paths, args []string, stdin io.Reader, stdout, stde
 			if aidErr != nil {
 				return 0
 			}
-			_ = adapters.NewClaudeAdapter(paths).HandleStatusLineUpdateWith(&statusInput, statusInput.SessionID, activation)
+			_ = adapters.NewClaudeAdapter(paths).HandleStatusLineUpdateWithTrace(&statusInput, statusInput.SessionID, activation, environmentTraceInfo(schema.ClientClaudeCode, activation))
 			snap, _ := state.LoadSnapshot(paths, schema.ClientClaudeCode, statusInput.SessionID)
 			if snap != nil {
 				return printSnapshot(stdout, stderr, snap, loadGlobal(paths), jsonOut, aid, aidErr, reveal, false)
@@ -357,7 +357,7 @@ func updateFromStdinStatus(paths state.Paths, stdin io.Reader) (*schema.Snapshot
 		return nil, true
 	}
 	adapter := adapters.NewClaudeAdapter(paths)
-	_ = adapter.HandleStatusLineUpdateWith(&statusInput, statusInput.SessionID, activation)
+	_ = adapter.HandleStatusLineUpdateWithTrace(&statusInput, statusInput.SessionID, activation, environmentTraceInfo(schema.ClientClaudeCode, activation))
 	snap, _ := state.LoadSnapshot(paths, schema.ClientClaudeCode, statusInput.SessionID)
 	return snap, true
 }

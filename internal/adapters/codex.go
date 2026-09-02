@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"strings"
 	"time"
 
+	"github.com/b-a-m-n/freeinference-companion/internal/failures"
 	"github.com/b-a-m-n/freeinference-companion/internal/runtime"
 	"github.com/b-a-m-n/freeinference-companion/internal/secure"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
@@ -79,6 +79,12 @@ func (a *CodexAdapter) HandleSessionStart(input *schema.CodexHookInput) error {
 // HandleSessionStartWith is the activation-aware variant. The caller must
 // have already gated on activation.Active.
 func (a *CodexAdapter) HandleSessionStartWith(input *schema.CodexHookInput, activation runtime.Activation) error {
+	return a.HandleSessionStartWithTrace(input, activation, nil)
+}
+
+// HandleSessionStartWithTrace associates validated launch metadata with the
+// session without recording a trace event or raw header values.
+func (a *CodexAdapter) HandleSessionStartWithTrace(input *schema.CodexHookInput, activation runtime.Activation, trace *schema.TraceInfo) error {
 	sessionID := input.SessionID
 	if sessionID == "" {
 		return nil
@@ -96,6 +102,10 @@ func (a *CodexAdapter) HandleSessionStartWith(input *schema.CodexHookInput, acti
 			snap.Session.EndedAt = nil
 			snap.Provider = provider
 			snap.ActivationID = a.Paths.ActivationID
+			if trace != nil && trace.Verified {
+				copy := *trace
+				snap.Trace = &copy
+			}
 			if modelID != "" && (snap.Model.ID == "" || snap.Model.ID == "unknown") {
 				snap.Model.ID = modelID
 				snap.Model.MetadataSource = "client_hook"
@@ -249,26 +259,48 @@ func (a *CodexAdapter) HandlePostCompact(input *schema.CodexHookInput, sessionID
 // HandleStopFailure records a structured failure from the StopFailure hook.
 // The raw reason text is never persisted — only a sanitized category.
 func (a *CodexAdapter) HandleStopFailure(input *schema.CodexHookInput, sessionID string) error {
-	if sessionID == "" || input.Reason == "" {
+	if sessionID == "" || input == nil || input.Reason == "" {
 		return nil
 	}
-	category := sanitizeCodexFailureCategory(input.Reason)
+	metadata := failures.Normalize(input.Reason)
 	now := time.Now().UTC()
+	var model, provider string
 	err := state.UpdateSnapshot(a.Paths, schema.ClientCodex, sessionID, nil,
 		func(snap *schema.Snapshot) error {
 			inactive := false
 			snap.Activity.TurnActive = &inactive
 			snap.Activity.TurnEndedAt = &now
+			model = snap.Model.ID
+			provider = snap.Provider.Name
 			snap.LastFailure = &schema.FailureRecord{
-				Category:   category,
-				ObservedAt: now,
-				Source:     "codex_stop_failure",
+				Category:          metadata.Category,
+				ObservedAt:        now,
+				Source:            "codex_stop_failure",
+				HTTPStatus:        metadata.HTTPStatus,
+				Retryable:         metadata.Retryable,
+				TransportClass:    metadata.TransportClass,
+				ProviderErrorType: metadata.ProviderErrorType,
+				ErrorOrigin:       metadata.ErrorOrigin,
+				RetryAfterSeconds: metadata.RetryAfterSeconds,
+				RequestReference:  metadata.RequestReference,
 			}
 			snap.Session.LastEventAt = now
 			return nil
 		})
 	if err == nil {
-		appendCodexEvent(a.Paths, sessionID, state.Event{Type: state.EventTurnFailed, Detail: category})
+		appendCodexEvent(a.Paths, sessionID, state.Event{
+			Type:              state.EventTurnFailed,
+			Model:             model,
+			Provider:          provider,
+			Detail:            metadata.Category,
+			HTTPStatus:        metadata.HTTPStatus,
+			Retryable:         metadata.Retryable,
+			TransportClass:    metadata.TransportClass,
+			ProviderErrorType: metadata.ProviderErrorType,
+			ErrorOrigin:       metadata.ErrorOrigin,
+			RetryAfterSeconds: metadata.RetryAfterSeconds,
+			RequestReference:  metadata.RequestReference,
+		})
 	}
 	return err
 }
@@ -290,22 +322,5 @@ func appendCodexEvent(paths state.Paths, sessionID string, ev state.Event) {
 // shareable category. Same scheme as the Claude adapter so reports are
 // consistent across clients.
 func sanitizeCodexFailureCategory(raw string) string {
-	raw = strings.ToLower(strings.TrimSpace(raw))
-	switch {
-	case strings.Contains(raw, "rate") && strings.Contains(raw, "limit"):
-		return "rate_limit"
-	case strings.Contains(raw, "overload"):
-		return "overloaded"
-	case strings.Contains(raw, "auth") || strings.Contains(raw, "unauthor") || strings.Contains(raw, "api key"):
-		return "authentication_failed"
-	case strings.Contains(raw, "not found") || strings.Contains(raw, "model_not_found"):
-		return "model_not_found"
-	case strings.Contains(raw, "max_output") || strings.Contains(raw, "max tokens"):
-		return "max_output_tokens"
-	case strings.Contains(raw, "invalid"):
-		return "invalid_request"
-	case strings.Contains(raw, "server") || strings.Contains(raw, "503") || strings.Contains(raw, "500"):
-		return "server_error"
-	}
-	return "unknown"
+	return failures.Classify(raw)
 }
