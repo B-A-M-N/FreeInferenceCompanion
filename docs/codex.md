@@ -41,9 +41,6 @@ only verifies the mapping and fails open when setup is absent:
 ```toml
 [model_providers.freeinference.env_http_headers]
 "X-Session-ID" = "FI_TRACE_SESSION_ID"
-"X-FI-Client" = "FI_TRACE_CLIENT"
-"X-FI-Companion-Version" = "FI_TRACE_COMPANION_VERSION"
-"X-FI-Workload" = "FI_TRACE_WORKLOAD"
 ```
 
 Use the reversible lifecycle commands:
@@ -55,10 +52,9 @@ freeinference trace uninstall codex
 
 The equivalent `--client codex` form is also accepted.
 
-Setup creates a one-time backup, preserves unrelated configuration, refuses
-conflicts, and uninstall restores the backup only when the mappings are still
-unchanged. The static metadata identifies only Codex, the Companion release,
-and the generic coding-agent workload.
+Setup uses a one-time recovery backup, preserves unrelated configuration,
+refuses conflicts, and uninstall removes the Companion-owned mapping only
+when it is still unchanged.
 
 ## 2. Add model profiles
 

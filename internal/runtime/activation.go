@@ -754,14 +754,7 @@ func (a Activation) ManagementBaseURL() string {
 // hostnames that may receive a runtime credential. Exposed so other layers
 // (api client, install) share one definition.
 func IsFreeInferenceHost(host string) bool {
-	host = strings.ToLower(strings.TrimSpace(host))
-	if host == "" {
-		return false
-	}
-	if host == "freeinference.org" {
-		return true
-	}
-	return strings.HasSuffix(host, ".freeinference.org")
+	return api.IsApprovedCredentialHost(strings.TrimSpace(host))
 }
 
 // ProviderInfo converts an activation result into the persisted schema form.

@@ -227,7 +227,7 @@ func cmdTraceCodexLifecycle(operation string, args []string, stdout, stderr io.W
 		if jsonOut {
 			fmt.Fprintf(stdout, "{\"operation\":\"setup\",\"client\":%q,\"ready\":%t,\"modified\":%t}\n", clientType, mapping.Ready, mapping.Modified)
 		} else if mapping.Modified {
-			fmt.Fprintln(stdout, "Codex trace mappings installed. Backup retained for uninstall.")
+			fmt.Fprintln(stdout, "Codex trace mappings installed. Ownership recorded for uninstall.")
 		} else {
 			fmt.Fprintln(stdout, "Codex trace mappings already installed.")
 		}
@@ -346,5 +346,5 @@ func sessionIDFromArgs(args []string) string {
 func printTraceUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage: freeinference trace [status|setup|uninstall] [codex] [--json] [--client claude-code|codex] [--session <id>]")
 	fmt.Fprintln(w, "Show the current per-launch trace correlation metadata and Codex mapping state.")
-	fmt.Fprintln(w, "Codex lifecycle: `trace setup codex` (or `--client codex`) installs a reversible mapping; `trace uninstall codex` restores the backup.")
+	fmt.Fprintln(w, "Codex lifecycle: `trace setup codex` (or `--client codex`) installs a reversible mapping; `trace uninstall codex` removes the Companion-owned mapping.")
 }

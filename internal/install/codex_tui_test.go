@@ -85,6 +85,24 @@ func TestCodexTUIInstallRefusesDrift(t *testing.T) {
 	}
 }
 
+func TestCodexTUIUninstallRefusesDifferentConfigPath(t *testing.T) {
+	home := t.TempDir()
+	configPath := filepath.Join(home, ".codex", "config.toml")
+	otherPath := filepath.Join(home, ".codex", "other.toml")
+	if err := InstallCodexTUI(home, configPath, io.Discard); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if err := os.WriteFile(otherPath, []byte("[tui]\nstatus_line = [\"model\"]\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := UninstallCodexTUI(home, otherPath, io.Discard); err == nil {
+		t.Fatal("uninstall must reject a configuration path different from metadata")
+	}
+	if _, err := os.Stat(configPath); err != nil {
+		t.Fatalf("mismatched uninstall changed the installed config: %v", err)
+	}
+}
+
 func TestCodexTUIInstallCreatesNativeFooterWhenMissing(t *testing.T) {
 	home := t.TempDir()
 	configPath := filepath.Join(home, ".codex", "config.toml")

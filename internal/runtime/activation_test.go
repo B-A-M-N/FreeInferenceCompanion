@@ -435,7 +435,7 @@ func TestIsFreeInferenceHost(t *testing.T) {
 	}{
 		{"freeinference.org", true},
 		{"api.freeinference.org", true},
-		{"sub.api.freeinference.org", true},
+		{"sub.api.freeinference.org", false},
 		{"FREEINFERENCE.ORG", true}, // case-insensitive
 		{"evilfreeinference.org", false},
 		{"freeinference.org.evil.com", false},

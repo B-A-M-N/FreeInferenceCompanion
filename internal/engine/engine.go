@@ -3,8 +3,6 @@ package engine
 import (
 	"fmt"
 	"math"
-	"os"
-	"strconv"
 	"sync"
 	"time"
 
@@ -198,32 +196,6 @@ func ContextWarnEnterThreshold() float64 { return lazyThresholds().WarnEnterThre
 
 // ContextWatchEnterThreshold returns the configured watch enter threshold.
 func ContextWatchEnterThreshold() float64 { return lazyThresholds().WatchEnterThreshold() }
-
-// Deprecated: Use internal/config.Manager.Resolve() for configuration.
-// These functions silently default on parse errors, which is unsafe for
-// operational thresholds. The config package returns proper diagnostics.
-// The threshold accessors (lazyThresholds) now read from the config system.
-func getEnvFloat(key string, def float64) float64 {
-	if v := os.Getenv(key); v != "" {
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
-			return f
-		}
-	}
-	return def
-}
-
-// Deprecated: Use internal/config.Manager.Resolve() for configuration.
-// These functions silently default on parse errors, which is unsafe for
-// operational thresholds. The config package returns proper diagnostics.
-// The threshold accessors (lazyThresholds) now read from the config system.
-func getEnvInt(key string, def int) int {
-	if v := os.Getenv(key); v != "" {
-		if i, err := strconv.Atoi(v); err == nil {
-			return i
-		}
-	}
-	return def
-}
 
 // ============================================================
 // Pressure state machine

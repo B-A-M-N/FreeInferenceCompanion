@@ -985,12 +985,6 @@ func (a *ClaudeAdapter) HandleStop(sessionID string) error {
 	return err
 }
 
-// sanitizeFailureCategory maps a raw StopFailure.Error string to a short,
-// shareable category. The raw error is never persisted — only the category.
-func sanitizeFailureCategory(raw string) string {
-	return failures.Classify(raw)
-}
-
 func deref(p *int64) int64 {
 	if p == nil {
 		return 0

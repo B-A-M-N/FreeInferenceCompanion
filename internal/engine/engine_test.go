@@ -172,6 +172,9 @@ func TestClassifyPressure(t *testing.T) {
 	if state != schema.PressureRecovering {
 		t.Errorf("expected recovering, got %s", state)
 	}
+	if reason == nil {
+		t.Error("expected non-nil reason for recovering state")
+	}
 
 	// No reason for healthy state
 	state, reason = ClassifyPressure(30.0, schema.PressureHealthy)

@@ -3,7 +3,6 @@ package installer
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -23,6 +22,13 @@ type Paths struct {
 	// CodexMarketplaceDir is the local marketplace root used to register the
 	// bundled Codex plugin with Codex's native plugin manager.
 	CodexMarketplaceDir string
+	// ShimPath is the PATH-facing executable owned by the installer.
+	ShimPath string
+	// ClaudePluginPath is the installed Companion Claude plugin directory.
+	ClaudePluginPath string
+	// CodexPluginPath is the installed Companion Codex plugin directory.
+	CodexPluginPath string
+	metadataPath    string
 }
 
 // DefaultPaths returns Paths using standard locations.
@@ -39,13 +45,20 @@ func DefaultPaths() (Paths, error) {
 		codexHome = filepath.Join(home, ".codex")
 	}
 
+	claudePluginDir := filepath.Join(home, ".claude", "plugins")
+	claudePluginPath := filepath.Join(claudePluginDir, "freeinference-companion")
+	codexPluginPath := filepath.Join(codexHome, "plugins", "freeinference-companion")
 	return Paths{
 		InstallDir:          installDir,
 		BinaryPath:          filepath.Join(installDir, "bin", "freeinference"),
 		LocalBin:            localBin,
-		ClaudePluginDir:     filepath.Join(home, ".claude", "plugins"),
+		ClaudePluginDir:     claudePluginDir,
 		CodexPluginDir:      filepath.Join(codexHome, "plugins"),
 		CodexMarketplaceDir: filepath.Join(codexHome, "plugins", "freeinference-companion-marketplace"),
+		ShimPath:            filepath.Join(localBin, "freeinference"),
+		ClaudePluginPath:    claudePluginPath,
+		CodexPluginPath:     codexPluginPath,
+		metadataPath:        installationMetadataPath(home),
 	}, nil
 }
 
@@ -109,23 +122,3 @@ func PathIsOnPath(dir string) bool {
 	}
 	return false
 }
-
-// OpenInBrowser opens a URL in the user's default browser. If the command
-// fails (e.g. no $BROWSER), the error is returned.
-func OpenInBrowser(u string) error {
-	var cmd *exec.Cmd
-	switch runtimeGOOS() {
-	case "darwin":
-		cmd = exec.Command("open", u)
-	case "windows":
-		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", u)
-	default:
-		cmd = exec.Command("xdg-open", u)
-	}
-	return cmd.Run()
-}
-
-// runtimeGOOS is an indirection that tests can override.
-var runtimeGOOS = func() string { return goos() }
-
-func goos() string { return os.Getenv("GOOS_FALLBACK") }

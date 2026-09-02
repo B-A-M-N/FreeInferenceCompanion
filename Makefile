@@ -1,4 +1,4 @@
-.PHONY: build test test-race vet fmt-check plugin-syntax-check plugin-validate trace-contract-check check release release-check checksums marketplace clean install lint tidy tidy-check mod-verify clean-tree-check security-scan smoke bench bench-ci run package package-smoke plugin-clean-install sbom provenance
+.PHONY: build test test-race vet staticcheck fmt-check plugin-syntax-check plugin-validate trace-contract-check check release release-check checksums marketplace clean install lint tidy tidy-check mod-verify clean-tree-check security-scan smoke bench bench-ci run package package-smoke plugin-clean-install sbom provenance
 
 BINARY=freeinference
 BUILD_DIR=build
@@ -45,7 +45,7 @@ build-all: build-linux-amd64 build-linux-arm64 build-darwin-amd64 build-darwin-a
 # release-check is the authoritative quality gate for both CI and local
 # releases. Every gate listed here MUST pass or the release stops. This is the
 # single source of truth — the tag workflow depends on this exact target.
-release-check: clean-tree-check fmt-check vet mod-verify tidy-check test test-race security-scan bench-ci plugin-syntax-check trace-contract-check build-all build
+release-check: clean-tree-check fmt-check vet staticcheck mod-verify tidy-check test test-race security-scan bench-ci plugin-syntax-check trace-contract-check build-all build
 	@if file $(BUILD_DIR)/$(BINARY) 2>&1 | grep -q "statically linked"; then \
 		echo "static binary verified"; \
 	else \
@@ -55,7 +55,7 @@ release-check: clean-tree-check fmt-check vet mod-verify tidy-check test test-ra
 
 # release runs the full quality gate, packages distributable artifacts, and
 # validates those exact archives from a clean extraction before succeeding.
-release: package release-check package-smoke plugin-clean-install
+release: release-check package package-smoke plugin-clean-install
 	@echo ""
 	@echo "release $(VERSION) packaged in $(RELEASE_DIR)/"
 	@ls -la $(RELEASE_DIR)/
@@ -90,7 +90,7 @@ checksums:
 #   .codex-plugin/plugin.json, hooks/, scripts/, skills/, bin/<plat>/freeinference
 # The version is patched only on the staged copy; source manifests are
 # never mutated.
-package: build-all plugin-bin
+package: build-all
 	@if echo "$(VERSION)" | grep -qE 'dirty'; then \
 		echo "error: refusing to package a dirty version ($(VERSION)); commit and tag first"; \
 		exit 1; \
@@ -100,6 +100,7 @@ package: build-all plugin-bin
 		exit 1; \
 	fi
 	@REL_VERSION=$$(echo "$(VERSION)" | sed 's/^v//' | sed 's/-.*//'); \
+	epoch="$(SOURCE_DATE_EPOCH)"; \
 	staging="$$(mktemp -d "$${TMPDIR:-/tmp}/freeinference-release-stage.XXXXXX")"; \
 	trap 'rm -rf "$$staging"' EXIT; \
 	rm -rf $(RELEASE_DIR); \
@@ -114,7 +115,7 @@ package: build-all plugin-bin
 		install -m 0755 $(BUILD_DIR)/$(BINARY)-$$p "$$stage_dir/$(BINARY)"; \
 		cp LICENSE README.md "$$stage_dir/"; \
 		archive="$(RELEASE_DIR)/$$archive_name.tar.gz"; \
-		tar -czf "$$archive" -C "$$staging" "$$archive_name"; \
+		tar --sort=name --mtime="@$$epoch" --owner=0 --group=0 --numeric-owner --use-compress-program='gzip -n' -cf "$$archive" -C "$$staging" "$$archive_name"; \
 		echo "packaged $$archive"; \
 	done; \
 	\
@@ -126,7 +127,8 @@ package: build-all plugin-bin
 		cp -R plugins/codex/.codex-plugin plugins/codex/hooks plugins/codex/scripts plugins/codex/skills "$$bundle_dir/plugins/codex/"; \
 		install -m 0755 $(BUILD_DIR)/$(BINARY)-$$p "$$bundle_dir/plugins/claude-code/bin/$$p/$(BINARY)"; \
 		install -m 0755 $(BUILD_DIR)/$(BINARY)-$$p "$$bundle_dir/plugins/codex/bin/$$p/$(BINARY)"; \
-		(cd "$$bundle_dir" && zip -q -r "$(CURDIR)/$(RELEASE_DIR)/freeinference-companion-$$REL_VERSION-$$p.zip" .); \
+		find "$$bundle_dir" -exec touch -h -d "@$$epoch" {} +; \
+		(cd "$$bundle_dir" && find . -type f -print | LC_ALL=C sort | zip -q -X -@ "$(CURDIR)/$(RELEASE_DIR)/freeinference-companion-$$REL_VERSION-$$p.zip"); \
 		echo "packaged installer archive for $$p"; \
 	done; \
 	\
@@ -138,9 +140,11 @@ package: build-all plugin-bin
 	cp -R plugins/claude-code/hooks \
 		plugins/claude-code/scripts \
 		plugins/claude-code/skills \
-		plugins/claude-code/bin \
 		"$$stage_claude/"; \
-	(cd "$$stage_claude" && zip -q -r "$(CURDIR)/$(RELEASE_DIR)/freeinference-companion-claude_$$REL_VERSION.zip" .) && \
+	mkdir -p "$$stage_claude/bin"; \
+	for p in $(PLATFORMS); do mkdir -p "$$stage_claude/bin/$$p"; install -m 0755 "$(BUILD_DIR)/$(BINARY)-$$p" "$$stage_claude/bin/$$p/$(BINARY)"; done; \
+	find "$$stage_claude" -exec touch -h -d "@$$epoch" {} +; \
+	(cd "$$stage_claude" && find . -type f -print | LC_ALL=C sort | zip -q -X -@ "$(CURDIR)/$(RELEASE_DIR)/freeinference-companion-claude_$$REL_VERSION.zip") && \
 	echo "packaged Claude plugin bundle"; \
 	\
 	stage_codex="$$staging/codex"; \
@@ -151,9 +155,11 @@ package: build-all plugin-bin
 	cp -R plugins/codex/hooks \
 		plugins/codex/scripts \
 		plugins/codex/skills \
-		plugins/codex/bin \
 		"$$stage_codex/"; \
-	(cd "$$stage_codex" && zip -q -r "$(CURDIR)/$(RELEASE_DIR)/freeinference-companion-codex_$$REL_VERSION.zip" .) && \
+	mkdir -p "$$stage_codex/bin"; \
+	for p in $(PLATFORMS); do mkdir -p "$$stage_codex/bin/$$p"; install -m 0755 "$(BUILD_DIR)/$(BINARY)-$$p" "$$stage_codex/bin/$$p/$(BINARY)"; done; \
+	find "$$stage_codex" -exec touch -h -d "@$$epoch" {} +; \
+	(cd "$$stage_codex" && find . -type f -print | LC_ALL=C sort | zip -q -X -@ "$(CURDIR)/$(RELEASE_DIR)/freeinference-companion-codex_$$REL_VERSION.zip") && \
 	echo "packaged Codex plugin bundle"; \
 	\
 	cp LICENSE README.md $(RELEASE_DIR)/; \
@@ -249,6 +255,8 @@ package-smoke:
 		test -x "$$idir/$(BINARY)" || { echo "FAIL: $$p installer missing executable"; exit 1; }; \
 		test -f "$$idir/plugins/claude-code/.claude-plugin/plugin.json" || { echo "FAIL: $$p installer missing Claude plugin"; exit 1; }; \
 		test -f "$$idir/plugins/codex/.codex-plugin/plugin.json" || { echo "FAIL: $$p installer missing Codex plugin"; exit 1; }; \
+		test -f "$$idir/plugins/claude-code/hooks/hooks.json" || { echo "FAIL: $$p installer missing Claude hooks"; exit 1; }; \
+		test -x "$$idir/plugins/claude-code/scripts/run-hook.sh" || { echo "FAIL: $$p installer missing executable Claude hook runner"; exit 1; }; \
 		test -f "$$idir/plugins/codex/hooks/hooks.json" || { echo "FAIL: $$p installer missing Codex hooks"; exit 1; }; \
 		test -x "$$idir/plugins/codex/scripts/run-hook.sh" || { echo "FAIL: $$p installer missing executable Codex hook runner"; exit 1; }; \
 		test -x "$$idir/plugins/codex/bin/$$p/$(BINARY)" || { echo "FAIL: $$p installer missing bundled Codex binary"; exit 1; }; \
@@ -356,8 +364,8 @@ sbom:
 # Lists every release artifact as a subject with its SHA-256 digest.
 # For signed provenance, install cosign (https://github.com/sigstore/cosign).
 provenance:
-	@go run ./cmd/provenancegen "$(VERSION)" "$(COMMIT)" "$(RELEASE_DIR)" "$(RELEASE_DIR)/provenance.intoto.jsonl"
-	@echo "provenance written to $(RELEASE_DIR)/provenance.intoto.jsonl"
+	@go run ./cmd/provenancegen "$(VERSION)" "$(COMMIT)" "$(RELEASE_DIR)" "$(RELEASE_DIR)/provenance.unsigned.intoto.jsonl"
+	@echo "unsigned provenance written to $(RELEASE_DIR)/provenance.unsigned.intoto.jsonl"
 
 install: build
 	install -d -m 755 "$${HOME}/.local/bin"
@@ -375,7 +383,16 @@ test-race:
 vet:
 	go vet ./...
 
-lint: vet
+lint: vet staticcheck
+
+# staticcheck is pinned so the release gate is reproducible across runners.
+staticcheck:
+	@STATICCHECK_VERSION=2026.1.0; \
+	if ! command -v staticcheck >/dev/null 2>&1; then \
+		echo "installing staticcheck $$STATICCHECK_VERSION..."; \
+		go install honnef.co/go/tools/cmd/staticcheck@$$STATICCHECK_VERSION; \
+	fi
+	staticcheck ./...
 
 fmt-check:
 	@test -z "$$(gofmt -l .)" || (echo "unformatted files:"; gofmt -l .; exit 1)
@@ -458,7 +475,7 @@ security-scan:
 	fi
 	govulncheck ./...
 
-check: fmt-check vet test test-race plugin-syntax-check trace-contract-check mod-verify tidy-check
+check: fmt-check vet staticcheck test test-race plugin-syntax-check trace-contract-check mod-verify tidy-check
 	@git diff --check
 	@echo "all checks passed"
 

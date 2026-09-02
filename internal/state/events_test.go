@@ -45,6 +45,33 @@ func TestAppendEventRejectsUnknownType(t *testing.T) {
 	}
 }
 
+func TestEventPathsRejectUnknownClientWithoutCreatingDirectories(t *testing.T) {
+	paths := testPaths(t)
+	if err := AppendEvent(paths, "attacker", "s1", Event{Type: EventSessionStarted}); err == nil {
+		t.Fatal("unknown client must be rejected")
+	}
+	if err := RotateEvents(paths, "attacker", "s1"); err == nil {
+		t.Fatal("unknown client rotation must be rejected")
+	}
+	if _, err := os.Stat(paths.CacheDir + "/sessions"); !os.IsNotExist(err) {
+		t.Fatalf("invalid client created cache directories: %v", err)
+	}
+}
+
+func TestReadEventsRejectsOversizedLog(t *testing.T) {
+	paths := testPaths(t)
+	if err := paths.EnsureSessionDir(schema.ClientClaudeCode, "s1"); err != nil {
+		t.Fatal(err)
+	}
+	path := paths.SessionEvents(schema.ClientClaudeCode, "s1")
+	if err := os.WriteFile(path, make([]byte, MaxEventBytesPerSession+1), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadEvents(paths, schema.ClientClaudeCode, "s1", 0); err == nil {
+		t.Fatal("oversized event log must be rejected")
+	}
+}
+
 func TestReadEventsReturnsChronological(t *testing.T) {
 	paths := testPaths(t)
 	if err := paths.EnsureSessionDir(schema.ClientClaudeCode, "s1"); err != nil {

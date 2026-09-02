@@ -1,8 +1,10 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -28,7 +30,10 @@ type EffectiveValue[T any] struct {
 	Error    string      `json:"error,omitempty"`
 }
 
-const SchemaVersion = 1
+const (
+	SchemaVersion  = 1
+	maxConfigBytes = 64 << 10
+)
 
 type Config struct {
 	SchemaVersion int             `json:"schema_version"`
@@ -78,8 +83,7 @@ type PrivacyConfig struct {
 
 // TracingConfig controls Companion's launch-time support correlation. It is
 // intentionally separate from diagnostic probes: tracing adds one random
-// per-launch X-Session-ID plus fixed client/version/workload classifications,
-// and never sends X-Probe or X-Request-ID.
+// per-launch X-Session-ID and never sends X-Probe or X-Request-ID.
 type TracingConfig struct {
 	Enabled bool `json:"enabled"`
 }
@@ -242,25 +246,57 @@ func Load() (*Config, error) {
 	if err != nil {
 		return &cfg, err
 	}
-	f, err := os.Open(path)
+	info, err := os.Lstat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return &cfg, nil
 		}
-		return &cfg, fmt.Errorf("open config: %w", err)
+		return &cfg, fmt.Errorf("stat config: %w", err)
 	}
-	defer f.Close()
-	if err := json.NewDecoder(f).Decode(&cfg); err != nil {
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return &cfg, fmt.Errorf("config is not a regular file")
+	}
+	if info.Size() > maxConfigBytes {
+		return &cfg, fmt.Errorf("config exceeds the supported size limit")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return &cfg, fmt.Errorf("read config: %w", err)
+	}
+	if len(data) > maxConfigBytes || bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return &cfg, fmt.Errorf("config is invalid")
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	if err := dec.Decode(&cfg); err != nil {
 		return &cfg, fmt.Errorf("decode config: %w", err)
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return &cfg, fmt.Errorf("config contains multiple JSON values")
+		}
+		return &cfg, fmt.Errorf("config contains trailing data: %w", err)
 	}
 	if cfg.SchemaVersion == 0 {
 		cfg.SchemaVersion = SchemaVersion
+	}
+	if cfg.SchemaVersion != SchemaVersion {
+		return &cfg, fmt.Errorf("unsupported config schema %d", cfg.SchemaVersion)
+	}
+	if err := Validate(&cfg); err != nil {
+		return &cfg, fmt.Errorf("validate config: %w", err)
 	}
 	return &cfg, nil
 }
 
 func Save(cfg *Config) error {
+	if cfg == nil {
+		return fmt.Errorf("config is nil")
+	}
 	cfg.SchemaVersion = SchemaVersion
+	if err := Validate(cfg); err != nil {
+		return fmt.Errorf("validate config: %w", err)
+	}
 	path, err := ConfigPath()
 	if err != nil {
 		return err
@@ -433,6 +469,12 @@ func SetField(cfg *Config, key, value string) error {
 // Validate checks cross-field invariants before a configuration is persisted
 // or consumed by the warning state machines.
 func Validate(cfg *Config) error {
+	if cfg == nil {
+		return fmt.Errorf("config is nil")
+	}
+	if cfg.SchemaVersion != SchemaVersion {
+		return fmt.Errorf("unsupported config schema %d", cfg.SchemaVersion)
+	}
 	c := cfg.Context
 	values := map[string]float64{"watch_enter": c.WatchEnter, "warn_enter": c.WarnEnter, "critical_enter": c.CriticalEnter, "watch_leave": c.WatchLeave, "warn_leave": c.WarnLeave, "critical_leave": c.CriticalLeave}
 	for name, value := range values {

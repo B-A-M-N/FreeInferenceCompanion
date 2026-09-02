@@ -91,6 +91,12 @@ func createTestZIP(t *testing.T, version string) ([]byte, string) {
 	f.Write([]byte("mock-binary-" + version))
 
 	// Mock plugin directories.
+	f, _ = w.Create("plugins/claude-code/.claude-plugin/plugin.json")
+	f.Write([]byte(`{"name":"freeinference-companion"}`))
+	f, _ = w.Create("plugins/claude-code/hooks/hooks.json")
+	f.Write([]byte(`{"hooks":{}}`))
+	f, _ = w.Create("plugins/claude-code/scripts/run-hook.sh")
+	f.Write([]byte("#!/usr/bin/env bash\nexit 0\n"))
 	f, _ = w.Create("plugins/claude-code/package.json")
 	f.Write([]byte(`{"name":"freeinference-companion"}`))
 
@@ -137,7 +143,6 @@ func TestInstallFresh(t *testing.T) {
 		Platform:        "linux-amd64",
 		ExistingVersion: "",
 		DryRun:          false,
-		NoBrowser:       true,
 	}, stdout, stderr)
 	if err != nil {
 		t.Fatalf("install: %v", err)
@@ -188,6 +193,60 @@ func TestInstallChecksumMismatch(t *testing.T) {
 	}
 }
 
+func TestInstallRefusesToOverwriteUnownedBinary(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.BinaryPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.BinaryPath, []byte("user-owned-binary"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	manifestURL, _, server := testServer(t, "v0.2.0", "linux-amd64")
+	defer server.Close()
+	if _, err := Install(Options{ManifestURL: manifestURL, Platform: "linux-amd64"}, io.Discard, io.Discard); err == nil {
+		t.Fatal("installer must refuse to overwrite a binary without ownership metadata")
+	}
+	data, err := os.ReadFile(paths.BinaryPath)
+	if err != nil || string(data) != "user-owned-binary" {
+		t.Fatalf("unowned binary changed: %q, %v", data, err)
+	}
+}
+
+func TestUninstallPreservesTargetsNotOwnedByPartialInstall(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.BinaryPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.BinaryPath, []byte("user-owned-binary"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	manifestURL, _, server := testServer(t, "v0.2.0", "linux-amd64")
+	defer server.Close()
+	if _, err := Install(Options{ManifestURL: manifestURL, Platform: "linux-amd64", NoBin: true}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("partial install: %v", err)
+	}
+	if err := Uninstall(paths, io.Discard, io.Discard); err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	data, err := os.ReadFile(paths.BinaryPath)
+	if err != nil || string(data) != "user-owned-binary" {
+		t.Fatalf("unowned binary removed or changed: %q, %v", data, err)
+	}
+	if _, err := os.Stat(paths.ClaudePluginPath); !os.IsNotExist(err) {
+		t.Fatalf("owned Claude plugin survived uninstall: %v", err)
+	}
+}
+
 func TestRegisterCodexMarketplaceUsesNativePluginManager(t *testing.T) {
 	home := t.TempDir()
 	fakeBin := filepath.Join(home, "bin")
@@ -223,6 +282,22 @@ func TestRegisterCodexMarketplaceUsesNativePluginManager(t *testing.T) {
 }
 
 func TestUpdateSkipsWhenLatest(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.BinaryPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.BinaryPath, []byte("existing"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	metadata := metadataForPaths(paths, "v0.1.0", "https://example.test", strings.Repeat("a", 64), "v0.1.0")
+	if err := SaveInstallationMetadata(paths.MetadataPath(), metadata); err != nil {
+		t.Fatal(err)
+	}
 	manifestURL, _, server := testServer(t, "v0.1.0", "linux-amd64")
 	defer server.Close()
 
@@ -230,10 +305,8 @@ func TestUpdateSkipsWhenLatest(t *testing.T) {
 	stderr := &strings.Builder{}
 
 	result, err := Update(Options{
-		ManifestURL:     manifestURL,
-		Platform:        "linux-amd64",
-		ExistingVersion: "v0.1.0",
-		NoBrowser:       true,
+		ManifestURL: manifestURL,
+		Platform:    "linux-amd64",
 	}, stdout, stderr)
 	if err != nil {
 		t.Fatalf("update: %v", err)
@@ -246,17 +319,29 @@ func TestUpdateSkipsWhenLatest(t *testing.T) {
 func TestUpdateDownloadsNewVersion(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.BinaryPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.BinaryPath, []byte("existing"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	metadata := metadataForPaths(paths, "v0.1.0", "https://example.test", strings.Repeat("a", 64), "v0.1.0")
+	if err := SaveInstallationMetadata(paths.MetadataPath(), metadata); err != nil {
+		t.Fatal(err)
+	}
 	manifestURL, _, server := testServer(t, "v0.3.0", "linux-amd64")
 	defer server.Close()
 
 	stdout := &strings.Builder{}
 	stderr := &strings.Builder{}
 
-	_, err := Update(Options{
-		ManifestURL:     manifestURL,
-		Platform:        "linux-amd64",
-		ExistingVersion: "v0.1.0",
-		NoBrowser:       true,
+	_, err = Update(Options{
+		ManifestURL: manifestURL,
+		Platform:    "linux-amd64",
 	}, stdout, stderr)
 	if err != nil {
 		t.Fatalf("update: %v", err)
@@ -270,12 +355,11 @@ func TestUninstallRemovesBinaryAndPlugins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DefaultPaths: %v", err)
 	}
-
-	// Create the files that Uninstall would remove.
-	os.MkdirAll(filepath.Dir(paths.BinaryPath), 0755)
-	os.WriteFile(paths.BinaryPath, []byte("test"), 0755)
-	os.MkdirAll(filepath.Join(paths.ClaudePluginDir, "freeinference-companion"), 0755)
-	os.MkdirAll(filepath.Join(paths.CodexPluginDir, "freeinference-companion"), 0755)
+	manifestURL, _, server := testServer(t, "v0.2.0", "linux-amd64")
+	defer server.Close()
+	if _, err := Install(Options{ManifestURL: manifestURL, Platform: "linux-amd64"}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("install fixture: %v", err)
+	}
 
 	stdout := &strings.Builder{}
 	stderr := &strings.Builder{}
@@ -315,8 +399,8 @@ func TestExtractZIPPathTraversal(t *testing.T) {
 
 	destDir := t.TempDir()
 	err := extractZIP(tmpZip, destDir)
-	if err != nil {
-		t.Fatalf("extractZIP: %v", err)
+	if err == nil {
+		t.Fatal("expected path traversal archive to be rejected")
 	}
 
 	// The traversal file should not have been extracted outside destDir.
@@ -420,7 +504,6 @@ func TestInstallDryRun(t *testing.T) {
 		Platform:        "linux-amd64",
 		ExistingVersion: "",
 		DryRun:          true,
-		NoBrowser:       true,
 	}, stdout, stderr)
 	if err != nil {
 		t.Fatalf("dry-run install: %v", err)
@@ -469,7 +552,6 @@ func TestUpdateDryRunDoesNotMutate(t *testing.T) {
 		Platform:        "linux-amd64",
 		ExistingVersion: "v0.1.0",
 		DryRun:          true,
-		NoBrowser:       true,
 	}, stdout, &strings.Builder{})
 	if err != nil {
 		t.Fatalf("dry-run update: %v", err)

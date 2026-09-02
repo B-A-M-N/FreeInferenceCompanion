@@ -52,9 +52,8 @@ The `freeinference` CLI provides the following commands. Run any command with `-
 
 Use `freeinference run codex` for explicit per-process support correlation.
 The launcher uses the selected verified provider's `env_http_headers` mapping
-for the opaque `X-Session-ID` plus fixed client/version/workload
-classification headers; it does not proxy traffic or replace an existing
-mapping.
+for the opaque `X-Session-ID`; it does not proxy traffic or replace an
+existing mapping.
 
 ```bash
 freeinference run codex
@@ -300,9 +299,6 @@ unrelated Codex configuration:
 ```toml
 [model_providers.freeinference.env_http_headers]
 "X-Session-ID" = "FI_TRACE_SESSION_ID"
-"X-FI-Client" = "FI_TRACE_CLIENT"
-"X-FI-Companion-Version" = "FI_TRACE_COMPANION_VERSION"
-"X-FI-Workload" = "FI_TRACE_WORKLOAD"
 ```
 
 Create a profile per model, for example `~/.codex/glm.config.toml` with

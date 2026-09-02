@@ -20,106 +20,30 @@ import (
 )
 
 const (
-	TraceIDPrefix            = "fic-v1-"
-	TraceIDLength            = len(TraceIDPrefix) + 26
-	TraceSessionEnv          = "FI_TRACE_SESSION_ID"
-	TraceManagedEnv          = "FI_TRACE_MANAGED"
-	TraceSourceEnv           = "FI_TRACE_SOURCE"
-	TraceClientEnv           = "FI_TRACE_CLIENT"
-	TraceCompanionVersionEnv = "FI_TRACE_COMPANION_VERSION"
-	TraceWorkloadEnv         = "FI_TRACE_WORKLOAD"
-	TraceReceiptEnv          = "FI_TRACE_RECEIPT"
-	SessionHeader            = "X-Session-ID"
-	ClientHeader             = "X-FI-Client"
-	CompanionVersionHeader   = "X-FI-Companion-Version"
-	WorkloadHeader           = "X-FI-Workload"
-	WorkloadCodingAgent      = "coding-agent"
-	maxHeaderBlockBytes      = 64 << 10
-	maxHeaderLineBytes       = 8 << 10
-	maxReceiptBytes          = 16 << 10
+	TraceIDPrefix       = "fic-v1-"
+	TraceIDLength       = len(TraceIDPrefix) + 26
+	TraceSessionEnv     = "FI_TRACE_SESSION_ID"
+	TraceManagedEnv     = "FI_TRACE_MANAGED"
+	TraceSourceEnv      = "FI_TRACE_SOURCE"
+	TraceClientEnv      = "FI_TRACE_CLIENT"
+	TraceReceiptEnv     = "FI_TRACE_RECEIPT"
+	SessionHeader       = "X-Session-ID"
+	maxHeaderBlockBytes = 64 << 10
+	maxHeaderLineBytes  = 8 << 10
+	maxReceiptBytes     = 16 << 10
 )
 
-// HeaderMapping describes the environment-backed header mapping Codex uses
-// for direct requests to the selected provider.
+// HeaderMapping describes the environment-backed session-header mapping Codex
+// uses for direct requests to the selected provider.
 type HeaderMapping struct {
 	Header string
 	Env    string
 }
 
-// CodexHeaderMappings returns the bounded, static metadata headers installed
-// in a selected Codex provider. The values are all Companion-owned launch
-// environment variables; no prompt, path, session, or credential data is
-// mapped.
+// CodexHeaderMappings returns the documented mapping installed in a selected
+// Codex provider. Only the opaque per-launch session ID is mapped.
 func CodexHeaderMappings() []HeaderMapping {
-	return []HeaderMapping{
-		{Header: SessionHeader, Env: TraceSessionEnv},
-		{Header: ClientHeader, Env: TraceClientEnv},
-		{Header: CompanionVersionHeader, Env: TraceCompanionVersionEnv},
-		{Header: WorkloadHeader, Env: TraceWorkloadEnv},
-	}
-}
-
-// CorrelationMetadata is the small static classification attached to normal
-// inference requests when a client is launched through Companion.
-type CorrelationMetadata struct {
-	Client           string
-	CompanionVersion string
-	Workload         string
-}
-
-// NewCorrelationMetadata validates the only non-random values Companion may
-// attach to an inference request.
-func NewCorrelationMetadata(client, companionVersion string) (CorrelationMetadata, error) {
-	metadata := CorrelationMetadata{
-		Client:           client,
-		CompanionVersion: companionVersion,
-		Workload:         WorkloadCodingAgent,
-	}
-	if err := metadata.validate(); err != nil {
-		return CorrelationMetadata{}, err
-	}
-	return metadata, nil
-}
-
-func (m CorrelationMetadata) validate() error {
-	if m.Client != "claude-code" && m.Client != "codex" {
-		return errors.New("invalid correlation client")
-	}
-	if !validMetadataToken(m.CompanionVersion, 64) {
-		return errors.New("invalid Companion version")
-	}
-	if m.Workload != WorkloadCodingAgent {
-		return errors.New("invalid correlation workload")
-	}
-	return nil
-}
-
-func validMetadataToken(value string, max int) bool {
-	if value == "" || len(value) > max || !validHeaderValue(value) {
-		return false
-	}
-	for _, r := range value {
-		if !(r >= 'a' && r <= 'z') &&
-			!(r >= 'A' && r <= 'Z') &&
-			!(r >= '0' && r <= '9') &&
-			!strings.ContainsRune(".-_+", r) {
-			return false
-		}
-	}
-	return true
-}
-
-type requestHeader struct {
-	Name  string
-	Value string
-}
-
-func (m CorrelationMetadata) requestHeaders() []requestHeader {
-	return []requestHeader{
-		{Name: ClientHeader, Value: m.Client},
-		{Name: CompanionVersionHeader, Value: m.CompanionVersion},
-		{Name: WorkloadHeader, Value: m.Workload},
-	}
+	return []HeaderMapping{{Header: SessionHeader, Env: TraceSessionEnv}}
 }
 
 type Source string
@@ -156,44 +80,26 @@ func validSource(source Source) bool {
 	return source == SourceCompanionGenerated || source == SourceExistingHeader || source == SourceNone
 }
 
-// ComposeClaudeCustomHeaders preserves the caller's header block and injects
-// only the per-launch session ID. It remains as a compatibility wrapper for
-// callers that do not need static request classification.
+// ComposeClaudeCustomHeaders preserves the caller's header block byte-for-
+// byte. A valid existing X-Session-ID is never replaced. Invalid blocks fail
+// open to the caller, which should launch the client without Companion trace
+// injection.
 func ComposeClaudeCustomHeaders(existing, generatedID string) (string, string, Source, error) {
-	return ComposeClaudeCustomHeadersWithMetadata(existing, generatedID, CorrelationMetadata{})
-}
-
-// ComposeClaudeCustomHeadersWithMetadata preserves caller-owned headers,
-// refuses conflicting Companion metadata, and appends only the bounded static
-// classification for a verified Companion launch. A valid existing
-// X-Session-ID is never replaced.
-func ComposeClaudeCustomHeadersWithMetadata(existing, generatedID string, metadata CorrelationMetadata) (string, string, Source, error) {
 	if len(existing) > maxHeaderBlockBytes {
 		return existing, "", SourceNone, errors.New("ANTHROPIC_CUSTOM_HEADERS is too large")
 	}
 	if generatedID != "" && !ValidateTraceID(generatedID) {
 		return existing, "", SourceNone, errors.New("invalid generated trace id")
 	}
-	hasMetadata := metadata != (CorrelationMetadata{})
-	if hasMetadata {
-		if err := metadata.validate(); err != nil {
-			return existing, "", SourceNone, err
-		}
-	}
 	if existing == "" {
 		if generatedID == "" {
 			return "", "", SourceNone, nil
 		}
-		composed := SessionHeader + ": " + generatedID
-		if hasMetadata {
-			composed = appendMissingMetadata(composed, metadata.requestHeaders(), nil)
-		}
-		return composed, generatedID, SourceCompanionGenerated, nil
+		return SessionHeader + ": " + generatedID, generatedID, SourceCompanionGenerated, nil
 	}
 
 	lines := strings.Split(existing, "\n")
 	var existingID string
-	seenMetadata := make(map[string]bool)
 	for i, line := range lines {
 		if line == "" && i == len(lines)-1 {
 			continue
@@ -216,35 +122,12 @@ func ComposeClaudeCustomHeadersWithMetadata(existing, generatedID string, metada
 			}
 			existingID = value
 		}
-		if hasMetadata {
-			for _, header := range metadata.requestHeaders() {
-				if !strings.EqualFold(name, header.Name) {
-					continue
-				}
-				key := strings.ToLower(header.Name)
-				if seenMetadata[key] {
-					return existing, "", SourceNone, errors.New("duplicate Companion correlation header")
-				}
-				if value != header.Value {
-					return existing, "", SourceNone, fmt.Errorf("existing %s conflicts with Companion metadata", header.Name)
-				}
-				seenMetadata[key] = true
-				break
-			}
-		}
 	}
 	if existingID != "" {
 		if !ValidateTraceID(existingID) {
 			return existing, "", SourceNone, errors.New("existing X-Session-ID is not a valid Companion trace ID")
 		}
-		composed := existing
-		if hasMetadata {
-			composed = appendMissingMetadata(composed, metadata.requestHeaders(), seenMetadata)
-		}
-		if len(composed) > maxHeaderBlockBytes {
-			return existing, "", SourceNone, errors.New("composed custom header block is too large")
-		}
-		return composed, existingID, SourceExistingHeader, nil
+		return existing, existingID, SourceExistingHeader, nil
 	}
 	if generatedID == "" {
 		return existing, "", SourceNone, nil
@@ -254,33 +137,10 @@ func ComposeClaudeCustomHeadersWithMetadata(existing, generatedID string, metada
 		separator = ""
 	}
 	composed := existing + separator + SessionHeader + ": " + generatedID
-	if hasMetadata {
-		composed = appendMissingMetadata(composed, metadata.requestHeaders(), seenMetadata)
-	}
 	if len(composed) > maxHeaderBlockBytes {
 		return existing, "", SourceNone, errors.New("composed custom header block is too large")
 	}
 	return composed, generatedID, SourceCompanionGenerated, nil
-}
-
-func appendMissingMetadata(existing string, headers []requestHeader, seen map[string]bool) string {
-	if seen == nil {
-		seen = make(map[string]bool)
-	}
-	composed := existing
-	for _, header := range headers {
-		key := strings.ToLower(header.Name)
-		if seen[key] {
-			continue
-		}
-		separator := "\n"
-		if strings.HasSuffix(composed, "\n") {
-			separator = ""
-		}
-		composed += separator + header.Name + ": " + header.Value
-		seen[key] = true
-	}
-	return composed
 }
 
 func validHeaderName(name string) bool {

@@ -163,9 +163,9 @@ func makePackage(spdxID string, m module) pkg {
 		LicenseDeclared:  "NOASSERTION",
 		Copyright:        "NOASSERTION",
 	}
-	// Go module hashes are base64-encoded h1 hashes prefixed with "h1:".
-	// SPDX expects algorithm + checksum value. Decode to verify and
-	// emit as SHA-256 (the underlying hash). If decoding fails, omit.
+	// Go module hashes are base64-encoded SHA-256 h1 hashes prefixed with
+	// "h1:". SPDX expects the digest as hexadecimal SHA-256, so decode the
+	// base64 bytes and emit those bytes as hex. If decoding fails, omit.
 	if m.Hash != "" {
 		if algo, hexsum, ok := decodeGoHash(m.Hash); ok {
 			p.Checksums = []map[string]string{{"algorithm": algo, "checksumValue": hexsum}}

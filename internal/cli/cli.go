@@ -63,6 +63,9 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int
 	if cmd == "update" {
 		return cmdUpdate(state.Paths{}, rest, stdout, stderr)
 	}
+	if cmd == "uninstall" {
+		return cmdUninstall(rest, stdout, stderr)
+	}
 	if cmd == "codex-footer" {
 		return cmdCodexFooter(rest, stdout, stderr)
 	}
@@ -333,6 +336,7 @@ Usage:
   freeinference dashboard
   freeinference install [--manifest <url>] [--platform <key>] [--dry-run] [--no-plugin] [--force]
   freeinference update [--manifest <url>] [--platform <key>] [--dry-run] [--force]
+  freeinference uninstall [--help]
   freeinference context [--client <type>] [--session <id>] [--help]
   freeinference cache [--client <type>] [--session <id>] [--help]
   freeinference refresh [--force|--if-stale] [--detach]
@@ -390,20 +394,6 @@ Flags:
   --include-identifiers  Show full session IDs (default: masked)
   --json                 Output machine-readable JSON
   --help                 Show this help message
-`
-
-	helpCompanion = `Usage: freeinference companion status|enable|disable [--json] [--help]
-
-Inspect or change the persistent companion enabled state.
-
-Subcommands:
-  status   Show enabled, configured, runtime-active, and disable-source state
-  enable   Remove the persistent disable marker
-  disable  Create the persistent disable marker
-
-Flags:
-  --json    Output machine-readable JSON
-  --help    Show this help message
 `
 
 	helpSnapshot = `Usage: freeinference snapshot --json [--client <type>] [--session <id>] [--include-identifiers] [--help]

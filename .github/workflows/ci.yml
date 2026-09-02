@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   lint-and-test:
-    name: Lint, vet, test, race, vulnerability scan
+    name: Lint, staticcheck, vet, test, race, vulnerability scan
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -36,6 +36,9 @@ jobs:
 
       - name: go vet
         run: make vet
+
+      - name: staticcheck
+        run: make staticcheck
 
       - name: go mod verify
         run: make mod-verify
@@ -70,7 +73,7 @@ jobs:
         run: npm install --global @anthropic-ai/claude-code@${{ matrix.claude_version }}
       - name: Claude Code vendor plugin validation
         run: claude plugin validate --strict plugins/claude-code
-      - name: Codex manifest schema validation
+      - name: Codex manifest and lifecycle hook validation
         run: |
           python3 -c "
           import json, sys
@@ -80,9 +83,6 @@ jobs:
               assert key in m, f'missing top-level {key}'
           # Skills path must be present.
           assert 'skills' in m, 'missing skills path'
-          # Codex support is intentionally skill-only. Lifecycle hooks are not
-          # part of this plugin bundle because plugin-local hooks are not a
-          # supported installation contract.
           allowed_top = {'name', 'version', 'description', 'author', 'skills', 'interface'}
           unsupported = set(m.keys()) - allowed_top
           assert not unsupported, f'unsupported top-level field(s): {unsupported}'
@@ -95,7 +95,12 @@ jobs:
               assert key in iface, f'missing interface.{key}'
           assert isinstance(iface['capabilities'], list) and len(iface['capabilities']) > 0, 'capabilities must be a non-empty list'
           assert isinstance(iface['defaultPrompt'], list) and len(iface['defaultPrompt']) > 0, 'defaultPrompt must be a non-empty list'
-          print('Codex skill-only manifest is internally consistent.')
+          hooks = json.load(open('plugins/codex/hooks/hooks.json'))
+          required_events = {'SessionStart', 'SessionEnd', 'UserPromptSubmit', 'PreCompact', 'PostCompact', 'Stop'}
+          assert set(hooks.get('hooks', {})) == required_events, 'Codex lifecycle hook event set drifted'
+          assert all(isinstance(groups, list) and groups for groups in hooks['hooks'].values()), 'Codex hook groups must be non-empty'
+          assert __import__('os').access('plugins/codex/scripts/run-hook.sh', __import__('os').X_OK), 'Codex hook runner must be executable'
+          print('Codex manifest and lifecycle hooks are internally consistent.')
           "
 
   bench:
@@ -161,6 +166,22 @@ jobs:
           path: build/freeinference-${{ matrix.target }}
           if-no-files-found: error
 
+  macos-runtime:
+    name: macOS runtime tests
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run runtime tests
+        run: go test ./internal/runtime ./internal/tracing ./internal/state
+      - name: Build native macOS binary
+        run: CGO_ENABLED=0 go build -trimpath -o /tmp/freeinference ./cmd/fi
+
   pr-packaging:
     name: Packaging (PR validation)
     needs:
@@ -184,7 +205,7 @@ jobs:
           done
           # SBOM and provenance must be generated
           test -f release/sbom.spdx.json
-          test -f release/provenance.intoto.jsonl
+          test -f release/provenance.unsigned.intoto.jsonl
       - name: Upload artifacts
         uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
         with:
@@ -239,6 +260,7 @@ jobs:
     needs:
       - lint-and-test
       - plugin-validity
+      - macos-runtime
       - build-static
       - cross-build
       - bench
@@ -276,7 +298,7 @@ jobs:
           set -euo pipefail
           ls -la release/
           test -f release/sbom.spdx.json || { echo 'missing SBOM'; exit 1; }
-          test -f release/provenance.intoto.jsonl || { echo 'missing provenance'; exit 1; }
+          test -f release/provenance.unsigned.intoto.jsonl || { echo 'missing unsigned provenance'; exit 1; }
           test -f release/checksums.txt || { echo 'missing checksums'; exit 1; }
           test -f release/marketplace.json || { echo 'missing marketplace manifest'; exit 1; }
           shopt -s nullglob

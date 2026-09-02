@@ -14,7 +14,6 @@ import (
 	"github.com/b-a-m-n/freeinference-companion/internal/secure"
 	"github.com/b-a-m-n/freeinference-companion/internal/tracing"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
-	"github.com/b-a-m-n/freeinference-companion/pkg/version"
 )
 
 // cmdRun is the preferred Companion launch boundary. It does not proxy or
@@ -125,10 +124,6 @@ func prepareLaunch(client string, env []string, startedAt time.Time, selectedPro
 		source     tracing.Source
 		newEnv     = env
 	)
-	metadata, metadataErr := tracing.NewCorrelationMetadata(client, version.Version)
-	if metadataErr != nil {
-		return launchPreparation{Env: env}, metadataErr
-	}
 	switch client {
 	case schema.ClientClaudeCode:
 		activation = runtime.EvaluateForClient(runtime.ClientClaudeCode)
@@ -139,7 +134,7 @@ func prepareLaunch(client string, env []string, startedAt time.Time, selectedPro
 		if genErr != nil {
 			return launchPreparation{Env: env}, genErr
 		}
-		composed, id, composedSource, composeErr := tracing.ComposeClaudeCustomHeadersWithMetadata(lookupEnv(env, "ANTHROPIC_CUSTOM_HEADERS"), generated, metadata)
+		composed, id, composedSource, composeErr := tracing.ComposeClaudeCustomHeaders(lookupEnv(env, "ANTHROPIC_CUSTOM_HEADERS"), generated)
 		if composeErr != nil || id == "" || composedSource == tracing.SourceNone {
 			return launchPreparation{Env: env}, composeErr
 		}
@@ -173,10 +168,10 @@ func prepareLaunch(client string, env []string, startedAt time.Time, selectedPro
 			return launchPreparation{Env: env}, mappingErr
 		}
 		if len(mapping.Conflicts) > 0 {
-			return launchPreparation{Env: env}, fmt.Errorf("Codex trace mapping conflicts with Companion metadata")
+			return launchPreparation{Env: env}, fmt.Errorf("codex trace mapping conflicts with companion metadata")
 		}
 		if !mapping.Ready {
-			return launchPreparation{Env: env}, fmt.Errorf("Codex trace setup required; run freeinference trace setup --client codex")
+			return launchPreparation{Env: env}, fmt.Errorf("codex trace setup required; run freeinference trace setup --client codex")
 		}
 		traceID, err = tracing.GenerateTraceID()
 		if err != nil {
@@ -202,13 +197,11 @@ func prepareLaunch(client string, env []string, startedAt time.Time, selectedPro
 		return launchPreparation{Env: env}, err
 	}
 	newEnv = tracing.ReplaceEnv(newEnv, map[string]string{
-		tracing.TraceSessionEnv:          traceID,
-		tracing.TraceManagedEnv:          "1",
-		tracing.TraceSourceEnv:           string(source),
-		tracing.TraceClientEnv:           client,
-		tracing.TraceCompanionVersionEnv: metadata.CompanionVersion,
-		tracing.TraceWorkloadEnv:         metadata.Workload,
-		tracing.TraceReceiptEnv:          receiptPath,
+		tracing.TraceSessionEnv: traceID,
+		tracing.TraceManagedEnv: "1",
+		tracing.TraceSourceEnv:  string(source),
+		tracing.TraceClientEnv:  client,
+		tracing.TraceReceiptEnv: receiptPath,
 	})
 	if client == schema.ClientCodex {
 		if profile := codexProfileArgFromPreparation(selectedProfile); profile != "" {

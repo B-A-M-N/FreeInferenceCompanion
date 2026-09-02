@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/b-a-m-n/freeinference-companion/pkg/version"
 )
 
 // PublicStatusURL is the unauthenticated service-status endpoint. It is kept
@@ -92,7 +94,7 @@ func FetchPublicStatusWithClient(ctx context.Context, client *http.Client) (*Pub
 		return nil, fmt.Errorf("build public status request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "freeinference-companion")
+	req.Header.Set("User-Agent", "FreeInference-Companion/"+version.Version)
 
 	resp, err := client.Do(req)
 	if err != nil {

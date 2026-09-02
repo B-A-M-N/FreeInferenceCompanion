@@ -138,10 +138,10 @@ Codex activation is established from the selected provider in
 
 Trace correlation is explicit and launch-scoped. `freeinference run claude`
 uses Claude's `ANTHROPIC_CUSTOM_HEADERS`; `freeinference run codex` uses the
-selected provider's `env_http_headers` mapping. It adds only the opaque
-`X-Session-ID` and fixed client/version/workload classifications—never
-`X-Request-ID`, `X-Probe`, prompts, paths, or credentials. See [Trace
-correlation](docs/TRACING.md) for privacy, opt-out, and compatibility details.
+selected provider's `env_http_headers` mapping. It adds only the documented
+opaque `X-Session-ID`—never `X-Request-ID`, `X-Probe`, prompts, paths, or
+credentials. See [Trace correlation](docs/TRACING.md) for privacy, opt-out,
+and compatibility details.
 
 ## Configure Claude Code and Codex
 

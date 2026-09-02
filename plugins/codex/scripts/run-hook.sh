@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # FreeInference Companion — hook runner for Codex.
-# Resolves the freeinference binary from PATH or the plugin-bundled bin/.
+# Resolves the plugin-bundled freeinference binary before considering PATH.
 # Always exits 0 — hooks must never block Codex.
 set -u
 
@@ -9,11 +9,6 @@ if [[ "${FI_DISABLED:-}" == "1" ]]; then
 fi
 
 event="${1:-}"
-
-if type -P freeinference >/dev/null 2>&1; then
-    freeinference hook codex "$event" || true
-    exit 0
-fi
 
 # Codex provides PLUGIN_ROOT. CLAUDE_PLUGIN_ROOT is accepted for compatibility
 # with shared test/install tooling and older plugin runners.
@@ -33,6 +28,11 @@ if [[ -n "$plugin_root" ]]; then
             exit 0
         fi
     done
+fi
+
+if type -P freeinference >/dev/null 2>&1; then
+    freeinference hook codex "$event" || true
+    exit 0
 fi
 
 exit 0

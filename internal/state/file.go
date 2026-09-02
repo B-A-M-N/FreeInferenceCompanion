@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -111,6 +112,16 @@ func (p Paths) SessionDir(clientType, sessionID string) string {
 		return filepath.Join(p.CacheDir, "sessions", "invalid-client-type", sessionKey(sessionID))
 	}
 	return filepath.Join(p.CacheDir, "sessions", clientType, sessionKey(sessionID))
+}
+
+// SessionDirFor is the error-returning form used by mutating callers. It
+// prevents an invalid client value from being turned into a writable fallback
+// directory.
+func (p Paths) SessionDirFor(clientType, sessionID string) (string, error) {
+	if err := validateClientType(clientType); err != nil {
+		return "", err
+	}
+	return filepath.Join(p.CacheDir, "sessions", clientType, sessionKey(sessionID)), nil
 }
 
 // SessionSnapshot returns the path to the per-session snapshot.json.
@@ -247,7 +258,10 @@ func (p Paths) EnsureGlobalDir() error {
 // Creates the full path tree (sessions/<clientType>/<sessionKey>) and validates
 // every component against symlinks and hostile entries.
 func (p Paths) EnsureSessionDir(clientType, sessionID string) error {
-	dir := p.SessionDir(clientType, sessionID)
+	dir, err := p.SessionDirFor(clientType, sessionID)
+	if err != nil {
+		return err
+	}
 	if err := ensureSecureDirAll(dir); err != nil {
 		return err
 	}
@@ -467,11 +481,14 @@ func ReadJSON(path string, v any) error {
 	if err := dec.Decode(v); err != nil {
 		return err
 	}
-	// Verify there is no trailing non-whitespace content. A truncated file
-	// or one with appended garbage from a failed write would otherwise
-	// decode successfully on the prefix and silently drop the corruption.
-	if dec.More() {
-		return fmt.Errorf("trailing data after JSON value in %s", path)
+	// Verify there is no second value or trailing garbage. A truncated file or
+	// appended data would otherwise decode successfully on the valid prefix.
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return fmt.Errorf("multiple JSON values in %s", path)
+		}
+		return fmt.Errorf("trailing data after JSON value in %s: %w", path, err)
 	}
 	return nil
 }

@@ -17,6 +17,7 @@ import (
 
 	"github.com/b-a-m-n/freeinference-companion/internal/secure"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
+	"github.com/b-a-m-n/freeinference-companion/pkg/version"
 )
 
 const (
@@ -158,14 +159,27 @@ func isLoopbackHost(host string) bool {
 	return false
 }
 
-// isApprovedCredentialHost reports whether host is one of the approved
-// FreeInference hostnames that may receive the configured API key.
-func isApprovedCredentialHost(host string) bool {
+// IsApprovedCredentialHost reports whether host is one of the explicitly
+// approved FreeInference API hostnames. Arbitrary subdomains are not trusted
+// because DNS or a provider-side routing change must not widen credential
+// delivery implicitly.
+func IsApprovedCredentialHost(host string) bool {
 	host = strings.ToLower(host)
-	if host == "freeinference.org" {
+	switch host {
+	case "freeinference.org", "api.freeinference.org":
 		return true
+	default:
+		return false
 	}
-	return strings.HasSuffix(host, ".freeinference.org")
+}
+
+func isApprovedCredentialHost(host string) bool { return IsApprovedCredentialHost(host) }
+
+func isApprovedCredentialURL(u *url.URL) bool {
+	if u == nil || !isApprovedCredentialHost(u.Hostname()) {
+		return false
+	}
+	return u.Scheme == "https" && (u.Port() == "" || u.Port() == "443")
 }
 
 // CredentialError is returned when a credential would be sent to a host that
@@ -280,7 +294,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		baseURL:          normalized,
 		endpointIdentity: &EndpointIdentity{Host: extractHost(normalized), Origin: extractOrigin(normalized), RequestURL: normalized, IsFI: isApprovedCredentialHost(extractHost(normalized))},
 		apiKey:           cfg.APIKey,
-		version:          "dev",
+		version:          version.Version,
 		customEndpoint:   customCfg,
 		httpClient: &http.Client{
 			Timeout: cfg.Timeout,
@@ -346,7 +360,7 @@ func approvedBaseURL(rawURL string, apiKey string, customCfg *CustomEndpointConf
 		if err != nil {
 			return "", fmt.Errorf("invalid base URL: %w", err)
 		}
-		if !isApprovedCredentialHost(u.Hostname()) {
+		if !isApprovedCredentialURL(u) {
 			return "", &CredentialError{
 				Host: u.Hostname(),
 			}
@@ -358,11 +372,13 @@ func approvedBaseURL(rawURL string, apiKey string, customCfg *CustomEndpointConf
 	// being sent to a custom endpoint while allowing a user to configure
 	// their own endpoint + key pair.
 	if customCfg != nil {
+		u, err := url.Parse(normalized)
+		if err != nil {
+			return "", fmt.Errorf("invalid base URL: %w", err)
+		}
 		// Verify the configured endpoint matches the requested one
 		if !strings.EqualFold(normalized, customCfg.EndpointIdentity.RequestURL) {
-			return "", &CredentialError{
-				Host: normalized,
-			}
+			return "", &CredentialError{Host: u.Hostname()}
 		}
 		return normalized, nil
 	}
@@ -372,7 +388,7 @@ func approvedBaseURL(rawURL string, apiKey string, customCfg *CustomEndpointConf
 	if err != nil {
 		return "", fmt.Errorf("invalid base URL: %w", err)
 	}
-	if !isApprovedCredentialHost(u.Hostname()) {
+	if !isApprovedCredentialURL(u) {
 		return "", &CredentialError{
 			Host: u.Hostname(),
 		}
@@ -467,7 +483,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body io.Rea
 		// exfiltration to an arbitrary host.
 		// _testMode bypasses this check for httptest server usage in tests.
 		if !c._testMode {
-			if !c.shouldAttachCredential(req.URL.Hostname()) {
+			if !c.shouldAttachCredential(req.URL) {
 				return nil, &CredentialError{Host: req.URL.Hostname()}
 			}
 		}
@@ -478,17 +494,17 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body io.Rea
 
 // shouldAttachCredential determines if the credential should be attached to a request
 // for the given hostname. It checks both the endpoint identity and any custom endpoint.
-func (c *Client) shouldAttachCredential(hostname string) bool {
-	hostname = strings.ToLower(strings.TrimSpace(hostname))
-	if hostname == "" {
+func (c *Client) shouldAttachCredential(target *url.URL) bool {
+	if target == nil || strings.TrimSpace(target.Hostname()) == "" {
 		return false
 	}
 	// If custom endpoint is configured, only attach credential to that exact origin
 	if c.customEndpoint != nil {
-		return strings.EqualFold(hostname, c.customEndpoint.EndpointIdentity.Host)
+		targetOrigin := target.Scheme + "://" + target.Host
+		return strings.EqualFold(targetOrigin, c.customEndpoint.EndpointIdentity.Origin)
 	}
 	// Otherwise, attach credential only to approved FreeInference hosts
-	return isApprovedCredentialHost(hostname)
+	return isApprovedCredentialURL(target)
 }
 
 // HTTPError is a sanitized non-2xx API response. RetryAfter is honored when

@@ -65,79 +65,10 @@ func TestComposeClaudeHeadersPreservesExistingAndUnrelatedHeaders(t *testing.T) 
 	}
 }
 
-func TestComposeClaudeHeadersAddsStaticClassification(t *testing.T) {
-	generated, err := GenerateTraceID()
-	if err != nil {
-		t.Fatal(err)
-	}
-	metadata, err := NewCorrelationMetadata("claude-code", "0.2.0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	composed, got, source, err := ComposeClaudeCustomHeadersWithMetadata("X-Unrelated: retained", generated, metadata)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != generated || source != SourceCompanionGenerated {
-		t.Fatalf("trace = %q, %q", got, source)
-	}
-	for _, want := range []string{
-		"X-Session-ID: " + generated,
-		"X-FI-Client: claude-code",
-		"X-FI-Companion-Version: 0.2.0",
-		"X-FI-Workload: coding-agent",
-	} {
-		if !strings.Contains(composed, want) {
-			t.Fatalf("composed headers missing %q: %q", want, composed)
-		}
-	}
-	for _, forbidden := range []string{"prompt", "cwd", "repository", "api-key", "transcript"} {
-		if strings.Contains(strings.ToLower(composed), forbidden) {
-			t.Fatalf("composed headers contain forbidden metadata %q: %q", forbidden, composed)
-		}
-	}
-}
-
-func TestComposeClaudeHeadersPreservesExistingClassificationAndRejectsConflicts(t *testing.T) {
-	generated, _ := GenerateTraceID()
-	existingID, _ := GenerateTraceID()
-	metadata, err := NewCorrelationMetadata("codex", "0.2.0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	existing := "X-Session-ID: " + existingID + "\nX-FI-Client: codex"
-	composed, got, source, err := ComposeClaudeCustomHeadersWithMetadata(existing, generated, metadata)
-	if err != nil || got != existingID || source != SourceExistingHeader {
-		t.Fatalf("existing classification was not preserved: %q, %q, %q, %v", composed, got, source, err)
-	}
-	if !strings.Contains(composed, "X-FI-Companion-Version: 0.2.0") || !strings.Contains(composed, "X-FI-Workload: coding-agent") {
-		t.Fatalf("missing static metadata after existing trace: %q", composed)
-	}
-
-	conflict := "X-FI-Client: another-client"
-	if _, _, _, err := ComposeClaudeCustomHeadersWithMetadata(conflict, generated, metadata); err == nil {
-		t.Fatal("conflicting static classification must fail open")
-	}
-}
-
-func TestCorrelationMetadataAndCodexMappingsAreBounded(t *testing.T) {
-	if _, err := NewCorrelationMetadata("unknown-client", "0.2.0"); err == nil {
-		t.Fatal("unknown client accepted")
-	}
-	if _, err := NewCorrelationMetadata("codex", "0.2.0;secret"); err == nil {
-		t.Fatal("unsafe version accepted")
-	}
+func TestCodexHeaderMappingUsesOnlyDocumentedSessionHeader(t *testing.T) {
 	mappings := CodexHeaderMappings()
-	if len(mappings) != 4 {
+	if len(mappings) != 1 || mappings[0].Header != SessionHeader || mappings[0].Env != TraceSessionEnv {
 		t.Fatalf("Codex mappings = %#v", mappings)
-	}
-	for _, mapping := range mappings {
-		if strings.Contains(mapping.Header, "Session-ID") && mapping.Env != TraceSessionEnv {
-			t.Fatalf("session mapping = %#v", mapping)
-		}
-		if strings.Contains(mapping.Header, "Companion-Version") && mapping.Env != TraceCompanionVersionEnv {
-			t.Fatalf("version mapping = %#v", mapping)
-		}
 	}
 }
 

@@ -65,31 +65,15 @@ func TestInspectCodexTraceHeaderIsReadOnly(t *testing.T) {
 	}
 }
 
-func TestInspectCodexTraceHeadersReportsIncompleteMapping(t *testing.T) {
+func TestInspectCodexTraceHeadersReportsMissingMapping(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
-	contents := "[model_providers.freeinference.env_http_headers]\n\"X-Session-ID\" = \"FI_TRACE_SESSION_ID\"\n"
+	contents := "[model_providers.freeinference.env_http_headers]\n\"X-Other\" = \"OTHER_ENV\"\n"
 	if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
 		t.Fatal(err)
 	}
 	mapping, err := InspectCodexTraceHeaders(path, "freeinference")
-	if err != nil || mapping.Ready || len(mapping.Missing) != 3 || len(mapping.Conflicts) != 0 {
+	if err != nil || mapping.Ready || len(mapping.Missing) != 1 || len(mapping.Conflicts) != 0 {
 		t.Fatalf("incomplete mapping = %#v, err=%v", mapping, err)
-	}
-}
-
-func TestEnsureCodexTraceHeadersRejectsStaticConflict(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.toml")
-	contents := "[model_providers.freeinference.env_http_headers]\n\"X-Session-ID\" = \"FI_TRACE_SESSION_ID\"\n\"X-FI-Client\" = \"other\"\n"
-	if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
-		t.Fatal(err)
-	}
-	mapping, err := EnsureCodexTraceHeaders(path, "freeinference")
-	if err == nil || mapping.Ready || len(mapping.Conflicts) != 1 || mapping.Conflicts[0] != tracing.ClientHeader {
-		t.Fatalf("static conflict = %#v, err=%v", mapping, err)
-	}
-	updated, _ := os.ReadFile(path)
-	if string(updated) != contents {
-		t.Fatal("conflicting Codex mapping was modified")
 	}
 }
 
@@ -99,11 +83,8 @@ func TestCodexTraceBackupRestoreIsReversible(t *testing.T) {
 	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := BackupCodexTraceConfig(path); err != nil {
-		t.Fatal(err)
-	}
-	if mapping, err := EnsureCodexTraceHeader(path, "freeinference"); err != nil || !mapping.Ready {
-		t.Fatalf("ensure = %#v, %v", mapping, err)
+	if mapping, err := SetupCodexTraceConfig(path, "freeinference"); err != nil || !mapping.Ready {
+		t.Fatalf("setup = %#v, %v", mapping, err)
 	}
 	if err := RestoreCodexTraceConfig(path, "freeinference"); err != nil {
 		t.Fatal(err)
@@ -117,7 +98,7 @@ func TestCodexTraceBackupRestoreIsReversible(t *testing.T) {
 	}
 }
 
-func TestCodexTraceRestoreRefusesChangedStaticMapping(t *testing.T) {
+func TestCodexTraceRestorePreservesUnrelatedChanges(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	original := "model_provider = \"freeinference\"\n[model_providers.freeinference]\nbase_url=\"https://freeinference.org/v1\"\n"
 	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
@@ -130,18 +111,19 @@ func TestCodexTraceRestoreRefusesChangedStaticMapping(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	changed := strings.Replace(string(updated), `"X-FI-Client" = "FI_TRACE_CLIENT"`, `"X-FI-Client" = "USER_CLIENT"`, 1)
+	changed := string(updated) + "\n[tui]\nstatus_line = [\"model\"]\n"
 	if changed == string(updated) {
-		t.Fatal("test fixture did not change static mapping")
+		t.Fatal("test fixture did not change")
 	}
 	if err := os.WriteFile(path, []byte(changed), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := RestoreCodexTraceConfig(path, "freeinference"); err == nil {
-		t.Fatal("restore replaced a changed static mapping")
+	if err := RestoreCodexTraceConfig(path, "freeinference"); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Stat(path + codexTraceBackupSuffix); err != nil {
-		t.Fatalf("backup was removed after refused restore: %v", err)
+	restored, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(restored), "status_line = [\"model\"]") || strings.Contains(string(restored), "X-Session-ID") {
+		t.Fatalf("unrelated Codex changes were not preserved: %q, %v", restored, err)
 	}
 }
 

@@ -97,9 +97,6 @@ func claudeDir(home string) string { return filepath.Join(home, ".claude") }
 func settingsPath(home string) string {
 	return filepath.Join(claudeDir(home), "settings.json")
 }
-func settingsLocalPath(home string) string {
-	return filepath.Join(claudeDir(home), "settings.local.json")
-}
 func wrapperPath(home string) string { return filepath.Join(claudeDir(home), wrapperName) }
 
 // metadataPath returns the path to the installation metadata file for a given

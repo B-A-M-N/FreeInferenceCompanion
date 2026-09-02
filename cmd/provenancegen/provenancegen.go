@@ -1,5 +1,5 @@
-// Command provenancegen generates an in-toto attestation-style provenance
-// file describing the FreeInference Companion release build. It scans the
+// Command provenancegen generates an unsigned in-toto provenance statement
+// envelope describing the FreeInference Companion release build. It scans the
 // release directory for all artifacts and lists each as a subject with its
 // SHA-256 digest.
 //

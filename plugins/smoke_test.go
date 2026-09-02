@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -715,8 +716,50 @@ func runHook(t *testing.T, script, event string, env []string, stdin string) (st
 	return "", "", -1
 }
 
+func bundledPluginFixture(t *testing.T, name, binary string) string {
+	t.Helper()
+	root := t.TempDir()
+	sourceScript := filepath.Join(pluginDir(name), "scripts", "run-hook.sh")
+	script, err := os.ReadFile(sourceScript)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "scripts"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "scripts", "run-hook.sh"), script, 0755); err != nil {
+		t.Fatal(err)
+	}
+	platform := runtime.GOOS + "-" + runtime.GOARCH
+	binDir := filepath.Join(root, "bin", platform)
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "freeinference"), data, 0755); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func shadowBinaryFixture(t *testing.T) (string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "path-binary-used")
+	script := "#!/bin/sh\nprintf used > " + marker + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "freeinference"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	return dir, marker
+}
+
 func TestClaudeCodeHookCreatesSessionState(t *testing.T) {
 	bin := buildTestBinary(t)
+	bundle := bundledPluginFixture(t, "claude-code", bin)
+	shadowDir, shadowMarker := shadowBinaryFixture(t)
 	tmpHome := t.TempDir()
 	cacheDir := filepath.Join(tmpHome, "cache")
 	script := filepath.Join(pluginDir("claude-code"), "scripts", "run-hook.sh")
@@ -733,8 +776,8 @@ func TestClaudeCodeHookCreatesSessionState(t *testing.T) {
 		"FREEINFERENCE_BASE_URL=",
 		"ANTHROPIC_AUTH_TOKEN=test-key-hyi",
 		"ANTHROPIC_BASE_URL=https://freeinference.org/anthropic",
-		"PATH="+filepath.Dir(bin)+":/usr/bin:/bin",
-		"CLAUDE_PLUGIN_ROOT=",
+		"PATH="+shadowDir+":/usr/bin:/bin",
+		"CLAUDE_PLUGIN_ROOT="+bundle,
 	)
 
 	// Feed a realistic SessionStart hook payload via stdin.
@@ -742,6 +785,9 @@ func TestClaudeCodeHookCreatesSessionState(t *testing.T) {
 	stdout, _, exitCode := runHook(t, script, "SessionStart", env, payload)
 	if exitCode != 0 {
 		t.Fatalf("hook exited %d, want 0; stdout: %s", exitCode, stdout)
+	}
+	if _, err := os.Stat(shadowMarker); !os.IsNotExist(err) {
+		t.Fatalf("hook used PATH binary instead of bundled binary: %v", err)
 	}
 
 	// Verify a session state file was created.
@@ -767,6 +813,8 @@ func TestClaudeCodeHookCreatesSessionState(t *testing.T) {
 
 func TestCodexHookCreatesSessionState(t *testing.T) {
 	bin := buildTestBinary(t)
+	bundle := bundledPluginFixture(t, "codex", bin)
+	shadowDir, shadowMarker := shadowBinaryFixture(t)
 	tmpHome := t.TempDir()
 	cacheDir := filepath.Join(tmpHome, "cache")
 	codexHome := filepath.Join(tmpHome, "codex")
@@ -797,8 +845,8 @@ wire_api = "responses"
 		"FI_AUTO_REFRESH=0",
 		"FREEINFERENCE_API_KEY=",
 		"FREEINFERENCE_BASE_URL=",
-		"PATH="+filepath.Dir(bin)+":/usr/bin:/bin",
-		"PLUGIN_ROOT=",
+		"PATH="+shadowDir+":/usr/bin:/bin",
+		"PLUGIN_ROOT="+bundle,
 		"CLAUDE_PLUGIN_ROOT=",
 	)
 
@@ -806,6 +854,9 @@ wire_api = "responses"
 	stdout, _, exitCode := runHook(t, script, "SessionStart", env, payload)
 	if exitCode != 0 {
 		t.Fatalf("Codex hook exited %d, want 0; stdout: %s", exitCode, stdout)
+	}
+	if _, err := os.Stat(shadowMarker); !os.IsNotExist(err) {
+		t.Fatalf("Codex hook used PATH binary instead of bundled binary: %v", err)
 	}
 	for _, event := range []string{"UserPromptSubmit", "PreCompact", "PostCompact", "Stop", "SessionEnd"} {
 		payload := `{"session_id":"codex-session-123","hook_event_name":"` + event + `","trigger":"manual","reason":"other"}`

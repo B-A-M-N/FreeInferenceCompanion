@@ -85,8 +85,9 @@ func DroppedEvents() int64 {
 	return atomic.LoadInt64(&droppedEvents)
 }
 
-// AppendEvent appends one sanitized event to the per-session events.jsonl.
-// Rotation/retention runs opportunistically. AppendEvent is best-effort: any
+// AppendEvent appends one sanitized event to the per-session events.jsonl and
+// opportunistically enforces retention while it already owns the event lock.
+// AppendEvent is best-effort: any
 // I/O error returns an error but callers (hooks) should treat it as fail-open.
 // The session directory must already exist (EnsureSessionDir).
 //
@@ -98,6 +99,9 @@ func DroppedEvents() int64 {
 // bytes there, and an event log is a long-lived artifact that may be
 // inspected during incident response.
 func AppendEvent(paths Paths, clientType, sessionID string, ev Event) error {
+	if _, err := paths.SessionDirFor(clientType, sessionID); err != nil {
+		return err
+	}
 	if _, ok := allowedEvents[ev.Type]; !ok {
 		return fmt.Errorf("unknown event type %q", ev.Type)
 	}
@@ -131,6 +135,7 @@ func AppendEvent(paths Paths, clientType, sessionID string, ev Event) error {
 	}
 
 	path := paths.SessionEvents(clientType, sessionID)
+	dir := paths.SessionDir(clientType, sessionID)
 	line, err := json.Marshal(ev)
 	if err != nil {
 		return err
@@ -152,6 +157,11 @@ func AppendEvent(paths Paths, clientType, sessionID string, ev Event) error {
 	}
 	defer fl.Release()
 
+	if info, statErr := os.Lstat(path); statErr == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to follow symlink at %s", path)
+	} else if statErr != nil && !os.IsNotExist(statErr) {
+		return statErr
+	}
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
@@ -160,6 +170,9 @@ func AppendEvent(paths Paths, clientType, sessionID string, ev Event) error {
 	if _, err := f.Write(line); err != nil {
 		return err
 	}
+	// Retention is advisory: a failed rotation must not turn a successful hook
+	// event into a hook failure. The next event or an explicit refresh retries it.
+	_ = rotateEventsLocked(dir, path)
 	return nil
 }
 
@@ -171,6 +184,9 @@ func AppendEvent(paths Paths, clientType, sessionID string, ev Event) error {
 // acquires the same lock so concurrent appends cannot be lost during rotation.
 // Best-effort; errors are returned but callers treat them as advisory.
 func RotateEvents(paths Paths, clientType, sessionID string) error {
+	if _, err := paths.SessionDirFor(clientType, sessionID); err != nil {
+		return err
+	}
 	path := paths.SessionEvents(clientType, sessionID)
 	dir := paths.SessionDir(clientType, sessionID)
 	lockPath := path + ".lock"
@@ -185,12 +201,23 @@ func RotateEvents(paths Paths, clientType, sessionID string) error {
 		return err
 	}
 	defer fl.Release()
+	return rotateEventsLocked(dir, path)
+}
 
-	info, err := os.Stat(path)
-	if err != nil {
+func rotateEventsLocked(dir, path string) error {
+	if info, err := os.Lstat(path); err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
+		return err
+	} else if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to follow symlink at %s", path)
+	} else if !info.Mode().IsRegular() {
+		return fmt.Errorf("event log is not a regular file: %s", path)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
 		return err
 	}
 	if info.Size() <= MaxEventBytesPerSession {
@@ -238,6 +265,10 @@ func writeLines(dir, path string, lines [][]byte) error {
 		os.Remove(tmpPath)
 		return err
 	}
+	if err := os.Chmod(tmpPath, 0600); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
 	return os.Rename(tmpPath, path)
 }
 
@@ -247,7 +278,26 @@ func writeLines(dir, path string, lines [][]byte) error {
 // common case for display and incident response where the latest activity
 // matters most.
 func ReadEvents(paths Paths, clientType, sessionID string, max int) ([]Event, error) {
+	if _, err := paths.SessionDirFor(clientType, sessionID); err != nil {
+		return nil, err
+	}
 	path := paths.SessionEvents(clientType, sessionID)
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("refusing to follow symlink at %s", path)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("event log is not a regular file: %s", path)
+	}
+	if info.Size() > MaxEventBytesPerSession {
+		return nil, fmt.Errorf("event log exceeds %d-byte limit", MaxEventBytesPerSession)
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {

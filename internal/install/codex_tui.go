@@ -17,7 +17,7 @@ const (
 	codexTUIItemMaxCount   = 64
 )
 
-var ErrDriftedCodexTUI = errors.New("Codex tui.status_line was changed after installation; refusing to overwrite the user's customization")
+var ErrDriftedCodexTUI = errors.New("codex tui.status_line was changed after installation; refusing to overwrite the user's customization")
 
 // CodexTUIStatus describes the native Codex footer configuration. It is not
 // a FreeInference telemetry surface: the values are rendered by Codex itself.
@@ -47,13 +47,26 @@ func codexTUILockPath(home string) string {
 	return filepath.Join(home, ".config", "freeinference-companion", "installations", "codex-tui.lock")
 }
 
+func canonicalCodexConfigPath(path string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", errors.New("codex config path is empty")
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve codex config path: %w", err)
+	}
+	return filepath.Clean(abs), nil
+}
+
 // InstallCodexTUI configures Codex's own footer with model/reasoning,
 // remaining-context, and current-directory items. It preserves all existing
 // items, writes atomically, and records ownership so uninstall cannot remove
 // a value the user changed later.
 func InstallCodexTUI(home, configPath string, stdout io.Writer) error {
-	if strings.TrimSpace(configPath) == "" {
-		return errors.New("Codex config path is empty")
+	var err error
+	configPath, err = canonicalCodexConfigPath(configPath)
+	if err != nil {
+		return err
 	}
 	return withInstallerLock(codexTUILockPath(home), func() error {
 		return installCodexTUILocked(home, configPath, stdout)
@@ -74,9 +87,13 @@ func installCodexTUILocked(home, configPath string, stdout io.Writer) error {
 	metaPath := codexTUIMetadataPath(home)
 	existing, haveExisting, err := loadCodexTUIMetadata(metaPath)
 	if err != nil {
-		return fmt.Errorf("read Codex footer metadata: %w", err)
+		return fmt.Errorf("read codex footer metadata: %w", err)
 	}
 	if haveExisting {
+		recordedPath, pathErr := canonicalCodexConfigPath(existing.ConfigPath)
+		if pathErr != nil || recordedPath != configPath {
+			return errors.New("codex footer metadata belongs to a different configuration")
+		}
 		if !found || !sameStrings(current, existing.OwnedItems) {
 			return ErrDriftedCodexTUI
 		}
@@ -97,13 +114,13 @@ func installCodexTUILocked(home, configPath string, stdout io.Writer) error {
 
 	priorBytes, priorMode, priorErr := readFileAndMode(configPath)
 	if priorErr != nil && !os.IsNotExist(priorErr) {
-		return fmt.Errorf("read Codex config for rollback: %w", priorErr)
+		return fmt.Errorf("read codex config for rollback: %w", priorErr)
 	}
 	if priorMode == 0 {
 		priorMode = mode
 	}
 	if err := writeFileAtomic(configPath, []byte(newContents), mode); err != nil {
-		return fmt.Errorf("write Codex config: %w", err)
+		return fmt.Errorf("write codex config: %w", err)
 	}
 
 	meta := &codexTUIMetadata{
@@ -117,11 +134,11 @@ func installCodexTUILocked(home, configPath string, stdout io.Writer) error {
 	metaBytes, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
 		_ = rollbackCodexTUIConfig(configPath, priorBytes, priorMode, priorErr)
-		return fmt.Errorf("encode Codex footer metadata: %w", err)
+		return fmt.Errorf("encode codex footer metadata: %w", err)
 	}
 	if err := writeFileAtomic(metaPath, append(metaBytes, '\n'), 0600); err != nil {
 		_ = rollbackCodexTUIConfig(configPath, priorBytes, priorMode, priorErr)
-		return fmt.Errorf("write Codex footer metadata: %w", err)
+		return fmt.Errorf("write codex footer metadata: %w", err)
 	}
 	if stdout != nil {
 		fmt.Fprintf(stdout, "Configured Codex native footer in %s.\n", configPath)
@@ -133,20 +150,26 @@ func installCodexTUILocked(home, configPath string, stdout io.Writer) error {
 // UninstallCodexTUI restores the pre-install footer when the exact owned value
 // is still present. User edits are never overwritten automatically.
 func UninstallCodexTUI(home, configPath string, stdout io.Writer) error {
-	if strings.TrimSpace(configPath) == "" {
-		return errors.New("Codex config path is empty")
+	var err error
+	configPath, err = canonicalCodexConfigPath(configPath)
+	if err != nil {
+		return err
 	}
 	return withInstallerLock(codexTUILockPath(home), func() error {
 		metaPath := codexTUIMetadataPath(home)
 		meta, found, err := loadCodexTUIMetadata(metaPath)
 		if err != nil {
-			return fmt.Errorf("read Codex footer metadata: %w", err)
+			return fmt.Errorf("read codex footer metadata: %w", err)
 		}
 		if !found {
 			if stdout != nil {
 				fmt.Fprintln(stdout, "Codex native footer is not installed by FreeInference Companion.")
 			}
 			return nil
+		}
+		recordedPath, pathErr := canonicalCodexConfigPath(meta.ConfigPath)
+		if pathErr != nil || recordedPath != configPath {
+			return errors.New("codex footer metadata belongs to a different configuration")
 		}
 		contents, mode, err := readCodexTUIConfig(configPath)
 		if err != nil {
@@ -161,7 +184,7 @@ func UninstallCodexTUI(home, configPath string, stdout io.Writer) error {
 		}
 		priorBytes, priorMode, priorErr := readFileAndMode(configPath)
 		if priorErr != nil {
-			return fmt.Errorf("read Codex config for rollback: %w", priorErr)
+			return fmt.Errorf("read codex config for rollback: %w", priorErr)
 		}
 		if priorMode == 0 {
 			priorMode = mode
@@ -180,11 +203,11 @@ func UninstallCodexTUI(home, configPath string, stdout io.Writer) error {
 			return err
 		}
 		if err := writeFileAtomic(configPath, []byte(restored), mode); err != nil {
-			return fmt.Errorf("restore Codex config: %w", err)
+			return fmt.Errorf("restore codex config: %w", err)
 		}
 		if err := os.Remove(metaPath); err != nil {
 			_ = rollbackCodexTUIConfig(configPath, priorBytes, priorMode, nil)
-			return fmt.Errorf("remove Codex footer metadata: %w", err)
+			return fmt.Errorf("remove codex footer metadata: %w", err)
 		}
 		if stdout != nil {
 			fmt.Fprintf(stdout, "Restored Codex native footer configuration in %s.\n", configPath)
@@ -230,15 +253,20 @@ func InspectCodexTUI(home, configPath string) (CodexTUIStatus, error) {
 }
 
 func readCodexTUIConfig(path string) (string, os.FileMode, error) {
+	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return "", 0, errors.New("refusing to follow symlink for codex config")
+	} else if err != nil && !os.IsNotExist(err) {
+		return "", 0, err
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "", 0600, nil
 		}
-		return "", 0, fmt.Errorf("read Codex config: %w", err)
+		return "", 0, fmt.Errorf("read codex config: %w", err)
 	}
 	if len(data) > codexTUIConfigMaxBytes {
-		return "", 0, errors.New("Codex config exceeds the supported size limit")
+		return "", 0, errors.New("codex config exceeds the supported size limit")
 	}
 	mode := os.FileMode(0600)
 	if info, statErr := os.Stat(path); statErr == nil && info.Mode().Perm() != 0 {
@@ -248,6 +276,19 @@ func readCodexTUIConfig(path string) (string, os.FileMode, error) {
 }
 
 func loadCodexTUIMetadata(path string) (*codexTUIMetadata, bool, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, false, errors.New("codex footer metadata is not a regular file")
+	}
+	if info.Size() > codexTUIConfigMaxBytes {
+		return nil, false, errors.New("codex footer metadata exceeds the supported size limit")
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -256,11 +297,22 @@ func loadCodexTUIMetadata(path string) (*codexTUIMetadata, bool, error) {
 		return nil, false, err
 	}
 	var meta codexTUIMetadata
-	if err := json.Unmarshal(data, &meta); err != nil {
+	dec := json.NewDecoder(strings.NewReader(string(data)))
+	if err := dec.Decode(&meta); err != nil {
 		return nil, false, err
 	}
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return nil, false, errors.New("codex footer metadata contains multiple JSON values")
+		}
+		return nil, false, err
+	}
+	if meta.ConfigPath == "" || meta.InstalledAt.IsZero() {
+		return nil, false, errors.New("codex footer metadata is incomplete")
+	}
 	if len(meta.OwnedItems) == 0 || len(meta.OwnedItems) > codexTUIItemMaxCount {
-		return nil, false, errors.New("Codex footer metadata has invalid owned items")
+		return nil, false, errors.New("codex footer metadata has invalid owned items")
 	}
 	return &meta, true, nil
 }
@@ -285,11 +337,11 @@ func parseCodexTUIStatusLine(contents string) ([]string, bool, error) {
 		}
 		value = strings.TrimSpace(value)
 		if !strings.HasPrefix(value, "[") || !strings.HasSuffix(value, "]") {
-			return nil, false, errors.New("Codex tui.status_line is not a supported single-line string array")
+			return nil, false, errors.New("codex tui.status_line is not a supported single-line string array")
 		}
 		var items []string
 		if err := json.Unmarshal([]byte(value), &items); err != nil {
-			return nil, false, fmt.Errorf("parse Codex tui.status_line: %w", err)
+			return nil, false, fmt.Errorf("parse codex tui.status_line: %w", err)
 		}
 		if err := validateCodexTUIItems(items); err != nil {
 			return nil, false, err
@@ -341,7 +393,7 @@ func restoreCodexTUIStatusLineLine(contents, replacement string) (string, error)
 			return strings.Join(lines, ""), nil
 		}
 	}
-	return "", errors.New("Codex tui.status_line disappeared during uninstall")
+	return "", errors.New("codex tui.status_line disappeared during uninstall")
 }
 
 func setCodexTUIStatusLine(contents string, items []string) (string, error) {
@@ -459,15 +511,15 @@ func splitCodexTOMLComment(line string) (string, string) {
 
 func validateCodexTUIItems(items []string) error {
 	if len(items) > codexTUIItemMaxCount {
-		return errors.New("Codex tui.status_line has too many items")
+		return errors.New("codex tui.status_line has too many items")
 	}
 	for _, item := range items {
 		if len(item) == 0 || len(item) > codexTUIItemMaxLen {
-			return errors.New("Codex tui.status_line contains an invalid item")
+			return errors.New("codex tui.status_line contains an invalid item")
 		}
 		for _, r := range item {
 			if r < 0x20 || r > 0x7e {
-				return errors.New("Codex tui.status_line contains unsafe characters")
+				return errors.New("codex tui.status_line contains unsafe characters")
 			}
 		}
 	}

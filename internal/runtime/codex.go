@@ -66,7 +66,7 @@ func resolveCodexProviderConfiguration(profile string) (ClientEvidence, error) {
 		}
 		profileConfig, profileErr := loadCodexConfig(filepath.Join(home, profile+".config.toml"))
 		if profileErr != nil {
-			return ClientEvidence{}, fmt.Errorf("load Codex profile: %w", profileErr)
+			return ClientEvidence{}, fmt.Errorf("load codex profile: %w", profileErr)
 		}
 		if strings.TrimSpace(profileConfig.ModelProvider) != "" {
 			providerID = strings.TrimSpace(profileConfig.ModelProvider)
@@ -81,7 +81,7 @@ func resolveCodexProviderConfiguration(profile string) (ClientEvidence, error) {
 			ProviderID:                providerID,
 			ProviderSelectionVerified: false,
 			ProviderSelectionSource:   selectionSource,
-		}, errors.New("selected Codex provider definition is unavailable")
+		}, errors.New("selected codex provider definition is unavailable")
 	}
 	if strings.TrimSpace(provider.BaseURL) == "" || strings.TrimSpace(provider.EnvKey) == "" {
 		return ClientEvidence{
@@ -89,7 +89,7 @@ func resolveCodexProviderConfiguration(profile string) (ClientEvidence, error) {
 			ProviderID:                providerID,
 			ProviderSelectionVerified: false,
 			ProviderSelectionSource:   selectionSource,
-		}, errors.New("selected Codex provider lacks base_url or env_key")
+		}, errors.New("selected codex provider lacks base_url or env_key")
 	}
 	if !validCodexName(providerID) || !validEnvName(strings.TrimSpace(provider.EnvKey)) {
 		return ClientEvidence{
@@ -97,7 +97,7 @@ func resolveCodexProviderConfiguration(profile string) (ClientEvidence, error) {
 			ProviderID:                providerID,
 			ProviderSelectionVerified: false,
 			ProviderSelectionSource:   selectionSource,
-		}, errors.New("selected Codex provider contains an invalid identifier")
+		}, errors.New("selected codex provider contains an invalid identifier")
 	}
 
 	credentialSource := CredentialSource(strings.TrimSpace(provider.EnvKey))
@@ -144,7 +144,7 @@ func codexHome() (string, error) {
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", fmt.Errorf("Codex home: %w", err)
+		return "", fmt.Errorf("codex home: %w", err)
 	}
 	return filepath.Join(home, ".codex"), nil
 }
@@ -171,7 +171,7 @@ func loadCodexConfig(path string) (codexConfig, error) {
 		return codexConfig{}, err
 	}
 	if len(body) > maxCodexConfigBytes {
-		return codexConfig{}, errors.New("Codex config exceeds the supported size limit")
+		return codexConfig{}, errors.New("codex config exceeds the supported size limit")
 	}
 	return parseCodexConfig(string(body)), nil
 }

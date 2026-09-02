@@ -16,9 +16,8 @@ The `freeinference` CLI provides the following commands. Run any command with `-
 ### `freeinference run` and `freeinference trace`
 
 Use the explicit launcher when you want a fresh, per-process support
-correlation. It injects the documented `X-Session-ID` plus fixed
-client/version/workload classification headers for a verified FreeInference
-route; ordinary client launches are unaffected.
+correlation. It injects only the documented `X-Session-ID` header for a
+verified FreeInference route; ordinary client launches are unaffected.
 
 ```bash
 freeinference run claude
@@ -27,8 +26,8 @@ freeinference trace --json
 freeinference config set tracing.enabled false
 ```
 
-Trace correlation sends and records no prompts, responses, paths, raw headers,
-or credentials.
+Trace correlation records no prompts, responses, paths, raw headers, or
+credentials.
 
 ### `freeinference fi-status`
 

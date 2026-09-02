@@ -28,15 +28,60 @@ func TestLoadDefaultsOnMissingFile(t *testing.T) {
 	}
 }
 
-func ptrF(v float64) *float64 { return &v }
-func ptrI(v int) *int         { return &v }
-func ptrB(v bool) *bool       { return &v }
+func TestLoadRejectsOversizedTrailingAndFutureConfig(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FI_CONFIG_DIR", dir)
+	path, err := ConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"schema_version":1}`+string(make([]byte, maxConfigBytes))), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(); err == nil {
+		t.Fatal("oversized config must be rejected")
+	}
+	if err := os.WriteFile(path, []byte(`{"schema_version":1} {}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(); err == nil {
+		t.Fatal("trailing config data must be rejected")
+	}
+	if err := os.WriteFile(path, []byte(`{"schema_version":999}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(); err == nil {
+		t.Fatal("future config schema must be rejected")
+	}
+}
+
+func TestLoadRejectsSymlinkWithoutFollowingIt(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FI_CONFIG_DIR", dir)
+	path, err := ConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "outside.json")
+	if err := os.WriteFile(target, []byte(`{"schema_version":1}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := Load(); err == nil {
+		t.Fatal("config symlink must be rejected")
+	}
+}
 
 func TestSaveAndLoad(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("FI_CONFIG_DIR", dir)
 	cfg := defaultConfig()
-	cfg.Context.WatchEnter = 50.0
+	cfg.Context.WatchEnter = 65.0
 	cfg.Context.CriticalEnter = 95.0
 	if err := Save(&cfg); err != nil {
 		t.Fatal(err)
@@ -45,8 +90,8 @@ func TestSaveAndLoad(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Context.WatchEnter != 50.0 {
-		t.Errorf("watch = %f, want 50", loaded.Context.WatchEnter)
+	if loaded.Context.WatchEnter != 65.0 {
+		t.Errorf("watch = %f, want 65", loaded.Context.WatchEnter)
 	}
 	if loaded.Context.CriticalEnter != 95.0 {
 		t.Errorf("critical = %f, want 95", loaded.Context.CriticalEnter)
@@ -132,7 +177,7 @@ func TestResetToDefault(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("FI_CONFIG_DIR", dir)
 	cfg := defaultConfig()
-	cfg.Context.WatchEnter = 99.0
+	cfg.Context.WatchEnter = 75.0
 	if err := Save(&cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -181,6 +226,7 @@ func TestSetField(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("FI_CONFIG_DIR", dir)
 	cfg := defaultConfig()
+	cfg.Context.WatchLeave = 45.0
 	if err := SetField(&cfg, "context.watch_enter", "55.0"); err != nil {
 		t.Fatal(err)
 	}

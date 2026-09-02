@@ -7,8 +7,6 @@ import (
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
 
-func ptrTime(t time.Time) *time.Time { return &t }
-
 func ptrInt(v int) *int { return &v }
 
 // ---------------------------------------------------------------------------
