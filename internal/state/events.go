@@ -37,6 +37,7 @@ const (
 	EventTurnFailed          = "turn_failed"
 	EventCompactionStarted   = "compaction_started"
 	EventCompactionCompleted = "compaction_completed"
+	EventModelSwitch         = "model_switch"
 	EventSessionEnded        = "session_ended"
 	EventWarningShown        = "warning_shown"
 	EventWarningResolved     = "warning_resolved"
@@ -50,6 +51,7 @@ var allowedEvents = map[string]struct{}{
 	EventTurnFailed:          {},
 	EventCompactionStarted:   {},
 	EventCompactionCompleted: {},
+	EventModelSwitch:         {},
 	EventSessionEnded:        {},
 	EventWarningShown:        {},
 	EventWarningResolved:     {},
@@ -120,7 +122,7 @@ func AppendEvent(paths Paths, clientType, sessionID string, ev Event) error {
 
 	// Hold the per-session event lock so concurrent appends don't lose data
 	// during rotation (which replaces the file). The lock is NONBLOCKING
-	// because AppendEvent runs on the hook path (25 ms p95 budget). If the
+	// because AppendEvent runs on the hook path with a tight latency budget. If the
 	// lock is held by another process, we drop the event and increment
 	// droppedEvents rather than stall the hook.
 	lockPath := path + ".lock"

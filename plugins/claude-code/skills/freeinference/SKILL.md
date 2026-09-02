@@ -13,6 +13,16 @@ The `freeinference` CLI provides the following commands. Run any command with `-
 
 ## Commands
 
+### `freeinference fi-status`
+
+Fetch public service health without session state or credentials. In this
+plugin the namespaced slash command is `/freeinference-companion:fi-status`.
+
+```bash
+freeinference fi-status
+freeinference fi-status --json
+```
+
 ### `freeinference status`
 
 Show current session status with context usage, pressure, and cache analysis.
@@ -103,6 +113,10 @@ freeinference context --json
 ### `freeinference cache`
 
 Analyze cache efficiency and provide recommendations.
+
+Automatic context/cache warnings are emitted only on Claude Code's
+`UserPromptSubmit` hook; the status line remains a local display surface
+between prompts.
 
 ```bash
 freeinference cache --json
@@ -202,7 +216,7 @@ Many commands accept `--json` for machine-readable JSON output and `--help` for 
 ## Environment Variables
 
 - `FREEINFERENCE_API_KEY` — API credential for the OpenAI-compatible API
-- `FREEINFERENCE_BASE_URL` — API base URL (default: `https://freeinference.org/v1`)
+- `FREEINFERENCE_BASE_URL` — generic provider API URL; not Claude activation evidence
 - `ANTHROPIC_AUTH_TOKEN` — Claude Code credential for the Anthropic-compatible endpoint
 - `FI_HEALTH_URL` — Health monitoring URL (optional)
 - `FI_CACHE_DIR` — Cache directory (default: `~/.cache/freeinference-companion`)

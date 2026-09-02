@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -65,7 +67,9 @@ func newClaudeSnapshot(sessionID, modelID string, now time.Time) *schema.Snapsho
 			LastEventAt: now,
 			Status:      schema.SessionActive,
 		},
-		Provider: DetectProvider().ToProviderInfo(),
+		// Provider identity is supplied by the activation-aware caller. Keep a
+		// new snapshot unresolved until that evidence is threaded through.
+		Provider: schema.ProviderInfo{Name: schema.ProviderUnknown, Source: "unresolved"},
 		Model: schema.ModelInfo{
 			ID:             secure.SanitizeField(modelID),
 			MetadataSource: "client_hook",
@@ -81,6 +85,12 @@ func newClaudeSnapshot(sessionID, modelID string, now time.Time) *schema.Snapsho
 	}
 }
 
+func newClaudeSnapshotForActivation(sessionID, modelID string, now time.Time, activation runtime.Activation) *schema.Snapshot {
+	snap := newClaudeSnapshot(sessionID, modelID, now)
+	snap.Provider = activation.ProviderInfo()
+	return snap
+}
+
 // HandleSessionStart initializes session state. Existing snapshots (which may
 // already carry status-line telemetry) are preserved — only lifecycle fields
 // and provider detection are refreshed.
@@ -88,14 +98,14 @@ func newClaudeSnapshot(sessionID, modelID string, now time.Time) *schema.Snapsho
 // DEPRECATED: use HandleSessionStartWith, which accepts a runtime.Activation
 // so the caller evaluates activation once and threads it through.
 func (a *ClaudeAdapter) HandleSessionStart(input *schema.ClaudeHookInput) error {
-	return a.HandleSessionStartWith(input, adaptersActivation())
+	return a.HandleSessionStartWith(input, claudeActivation())
 }
 
-// adaptersActivation is the lazy fallback used by deprecated methods that do
-// not receive an activation from their caller. New code should thread the
-// activation through explicitly.
-func adaptersActivation() runtime.Activation {
-	return runtime.Evaluate()
+// claudeActivation is the lazy fallback used by deprecated Claude-only
+// methods that do not receive an activation from their caller. New code
+// should thread the activation through explicitly.
+func claudeActivation() runtime.Activation {
+	return runtime.EvaluateForClient(runtime.ClientClaudeCode)
 }
 
 // HandleSessionStartWith is the activation-aware variant. The caller must have
@@ -110,7 +120,7 @@ func (a *ClaudeAdapter) HandleSessionStartWith(input *schema.ClaudeHookInput, ac
 
 	err := state.UpdateSnapshot(a.Paths, schema.ClientClaudeCode, sessionID,
 		func() *schema.Snapshot {
-			return newClaudeSnapshot(sessionID, input.Model, now)
+			return newClaudeSnapshotForActivation(sessionID, input.Model, now, activation)
 		},
 		func(snap *schema.Snapshot) error {
 			snap.Session.Status = schema.SessionActive
@@ -141,7 +151,7 @@ func (a *ClaudeAdapter) HandleSessionStartWith(input *schema.ClaudeHookInput, ac
 // invoking this method. Status-line updates are the most frequent automatic
 // integration and must be a true no-op for ordinary Claude sessions.
 func (a *ClaudeAdapter) HandleStatusLineUpdate(input *schema.ClaudeStatusLineInput, sessionID string) error {
-	return a.HandleStatusLineUpdateWith(input, sessionID, adaptersActivation())
+	return a.HandleStatusLineUpdateWith(input, sessionID, claudeActivation())
 }
 
 // HandleStatusLineUpdateWith is the activation-aware variant. The caller must
@@ -154,7 +164,7 @@ func (a *ClaudeAdapter) HandleStatusLineUpdateWith(input *schema.ClaudeStatusLin
 	var compactionReductionPct *float64
 	err := state.UpdateSnapshot(a.Paths, schema.ClientClaudeCode, sessionID,
 		func() *schema.Snapshot {
-			return newClaudeSnapshot(sessionID, input.Model.ID, time.Now().UTC())
+			return newClaudeSnapshotForActivation(sessionID, input.Model.ID, time.Now().UTC(), activation)
 		},
 		func(snap *schema.Snapshot) error {
 			now := time.Now().UTC()
@@ -163,12 +173,17 @@ func (a *ClaudeAdapter) HandleStatusLineUpdateWith(input *schema.ClaudeStatusLin
 			// visibility on activation match.
 			snap.ActivationID = a.Paths.ActivationID
 
+			previousModel := snap.Model.ID
 			// Model info from status line (authoritative). The model ID is
 			// client-controlled and sanitized to prevent terminal injection
 			// when the value is later rendered.
 			if input.Model.ID != "" {
 				snap.Model.ID = secure.SanitizeField(input.Model.ID)
 				snap.Model.MetadataSource = "client_statusline"
+			}
+			if input.Version != "" {
+				version := secure.SanitizeField(input.Version)
+				snap.Client.Version = &version
 			}
 			if input.Model.DisplayName != "" {
 				// The display name is client-controlled and could in theory
@@ -183,6 +198,18 @@ func (a *ClaudeAdapter) HandleStatusLineUpdateWith(input *schema.ClaudeStatusLin
 			}
 
 			snap.Provider = activation.ProviderInfo()
+			nowSemantics := ClaudeTokenSemantics(input.Version)
+			if input.Version == "" && snap.LiveContext != nil {
+				nowSemantics = snap.LiveContext.TotalTokenSemantics
+			}
+			if nowSemantics == "" {
+				nowSemantics = schema.TokenSemanticsUnknown
+			}
+			if snap.CacheEpochID == "" {
+				beginCacheEpoch(snap, "session_start", now)
+			} else if previousModel != "" && previousModel != "unknown" && input.Model.ID != "" && previousModel != secure.SanitizeField(input.Model.ID) {
+				beginCacheEpoch(snap, "model_switch", now)
+			}
 
 			// Latest request usage (may be nil before first response or
 			// immediately after compaction).
@@ -237,6 +264,7 @@ func (a *ClaudeAdapter) HandleStatusLineUpdateWith(input *schema.ClaudeStatusLin
 			snap.LiveContext = &schema.LiveContext{
 				Source:              "claude_statusline",
 				ObservedAt:          now,
+				TotalTokenSemantics: nowSemantics,
 				TotalInputTokens:    totalInput,
 				TotalOutputTokens:   totalOutput,
 				ContextWindowSize:   ctxSize,
@@ -249,15 +277,15 @@ func (a *ClaudeAdapter) HandleStatusLineUpdateWith(input *schema.ClaudeStatusLin
 			// refresh rolling cache analysis.
 			newObservation := false
 			if latest != nil {
-				fp, fpSource := engine.ObservationFingerprint(
+				identity := engine.BuildObservationIdentity(
 					snap.Model.ID,
 					input.PromptID,
 					deref(totalInput), deref(totalOutput),
 					latest.FreshInputTokens, latest.CacheReadInputTokens,
 					latest.CacheCreationInputTokens, latest.OutputTokens)
 				obs := schema.UsageObservation{
-					Fingerprint:              fp,
-					FingerprintSource:        fpSource,
+					Fingerprint:              identity.Fingerprint,
+					FingerprintSource:        identity.Source,
 					ObservedAt:               now,
 					ModelID:                  snap.Model.ID,
 					TotalInputTokens:         totalInput,
@@ -266,6 +294,9 @@ func (a *ClaudeAdapter) HandleStatusLineUpdateWith(input *schema.ClaudeStatusLin
 					CacheReadInputTokens:     latest.CacheReadInputTokens,
 					CacheCreationInputTokens: latest.CacheCreationInputTokens,
 					OutputTokens:             latest.OutputTokens,
+					RequestReference:         input.PromptID,
+					EpochID:                  snap.CacheEpochID,
+					EpochReason:              snap.CacheEpochReason,
 				}
 				newObservation = engine.AddObservation(snap, obs)
 			}
@@ -381,51 +412,37 @@ func completeCompaction(snap *schema.Snapshot, now time.Time) {
 }
 
 // ActiveContextTokens returns the best estimate of the current active context
-// size in tokens. This is the INPUT-ONLY context total, matching Claude's
-// documented used_percentage semantics (output tokens are not part of the
-// context-pressure calculation). Used for compaction measurement and
-// pressure-state transitions where the percentage must be mathematically
-// compatible with the token total.
-//
-// Falls back to: latest-request input sum, then used-percentage × window size.
-// Zero means unknown.
+// size in tokens. Current-context totals are authoritative only when the
+// Claude version contract says they are current-context values. Older and
+// unknown versions use used_percentage × context_window_size; their total
+// counters may be cumulative session values and must not drive context or
+// compaction math. Zero means unknown.
 func ActiveContextTokens(snap *schema.Snapshot) int64 {
-	if snap.LiveContext == nil {
+	if snap == nil || snap.LiveContext == nil {
 		return 0
 	}
 	lc := snap.LiveContext
-	if lc.TotalInputTokens != nil && *lc.TotalInputTokens > 0 {
-		return *lc.TotalInputTokens
-	}
-	if lc.LatestRequest != nil {
-		var sum int64
-		lr := lc.LatestRequest
-		if lr.FreshInputTokens != nil {
-			sum += *lr.FreshInputTokens
-		}
-		if lr.CacheReadInputTokens != nil {
-			sum += *lr.CacheReadInputTokens
-		}
-		if lr.CacheCreationInputTokens != nil {
-			sum += *lr.CacheCreationInputTokens
-		}
-		if sum > 0 {
-			return sum
-		}
+	if lc.TotalTokenSemantics == schema.TokenSemanticsCurrentContext && lc.TotalInputTokens != nil {
+		return maxInt64(*lc.TotalInputTokens, 0)
 	}
 	if lc.UsedPercentage != nil && lc.ContextWindowSize != nil {
-		return int64(*lc.UsedPercentage / 100.0 * float64(*lc.ContextWindowSize))
+		return int64(math.Round(*lc.UsedPercentage / 100.0 * float64(*lc.ContextWindowSize)))
 	}
 	return 0
 }
 
-// TotalContextTokens returns the full context footprint including output
-// tokens: total_input_tokens + total_output_tokens. This is a display-only
-// metric for "how many tokens has this session consumed" — it is NOT used
-// for compaction or pressure calculations (those use ActiveContextTokens,
-// which matches Claude's input-based used_percentage).
-func TotalContextTokens(snap *schema.Snapshot) int64 {
-	if snap.LiveContext == nil {
+func maxInt64(value, floor int64) int64 {
+	if value < floor {
+		return floor
+	}
+	return value
+}
+
+// CurrentContextFootprint returns the current input context plus the most
+// recent response output when both current-context semantics and values are
+// available. It is a display metric, not a cumulative session total.
+func CurrentContextFootprint(snap *schema.Snapshot) int64 {
+	if snap == nil || snap.LiveContext == nil || snap.LiveContext.TotalTokenSemantics != schema.TokenSemanticsCurrentContext {
 		return 0
 	}
 	lc := snap.LiveContext
@@ -439,12 +456,78 @@ func TotalContextTokens(snap *schema.Snapshot) int64 {
 	return total
 }
 
+// TotalContextTokens is retained as a compatibility alias. It no longer
+// represents a cumulative session total; use CurrentContextFootprint.
+// Deprecated: use CurrentContextFootprint.
+func TotalContextTokens(snap *schema.Snapshot) int64 {
+	return CurrentContextFootprint(snap)
+}
+
+// ClaudeTokenSemantics maps the Claude Code version boundary that changed
+// total_input_tokens from a cumulative session counter to current context.
+// An absent or malformed version is unknown and therefore fail-closed for
+// token sizing.
+func ClaudeTokenSemantics(version string) schema.TokenSemantics {
+	major, minor, patch, ok := parseClientVersion(version)
+	if !ok {
+		return schema.TokenSemanticsUnknown
+	}
+	if major > 2 || (major == 2 && (minor > 1 || (minor == 1 && patch >= 132))) {
+		return schema.TokenSemanticsCurrentContext
+	}
+	return schema.TokenSemanticsCumulativeSession
+}
+
+func parseClientVersion(version string) (major, minor, patch int, ok bool) {
+	version = strings.TrimSpace(strings.TrimPrefix(version, "v"))
+	parts := strings.SplitN(version, ".", 3)
+	if len(parts) != 3 {
+		return 0, 0, 0, false
+	}
+	var err error
+	if major, err = strconv.Atoi(parts[0]); err != nil {
+		return 0, 0, 0, false
+	}
+	if minor, err = strconv.Atoi(parts[1]); err != nil {
+		return 0, 0, 0, false
+	}
+	patchPart := parts[2]
+	if dash := strings.IndexByte(patchPart, '-'); dash >= 0 {
+		patchPart = patchPart[:dash]
+	}
+	if patch, err = strconv.Atoi(patchPart); err != nil {
+		return 0, 0, 0, false
+	}
+	return major, minor, patch, major >= 0 && minor >= 0 && patch >= 0
+}
+
+func beginCacheEpoch(snap *schema.Snapshot, reason string, now time.Time) {
+	if snap == nil {
+		return
+	}
+	firstEpoch := snap.CacheEpochID == ""
+	snap.CacheEpochID = fmt.Sprintf("epoch-%d", now.UnixNano())
+	snap.CacheEpochReason = reason
+	snap.CacheEpochStartedAt = now
+	// Legacy observations without an epoch can be assigned to the initial
+	// lineage. Once a boundary exists, leave them untagged rather than
+	// accidentally importing pre-boundary history into the new epoch.
+	if firstEpoch {
+		for i := range snap.UsageObservations {
+			if snap.UsageObservations[i].EpochID == "" {
+				snap.UsageObservations[i].EpochID = snap.CacheEpochID
+				snap.UsageObservations[i].EpochReason = reason
+			}
+		}
+	}
+}
+
 // HandleUserPromptSubmit activates the turn and produces warnings.
 // Returns (nil, nil) when there is nothing to show — no stdout output.
 //
 // DEPRECATED: use HandleUserPromptSubmitWith, which accepts a runtime.Activation.
 func (a *ClaudeAdapter) HandleUserPromptSubmit(input *schema.ClaudeHookInput, sessionID string) (*schema.ClaudeWarningOutput, error) {
-	return a.HandleUserPromptSubmitWith(input, sessionID, adaptersActivation())
+	return a.HandleUserPromptSubmitWith(input, sessionID, claudeActivation())
 }
 
 // HandleUserPromptSubmitWith is the activation-aware variant. The caller must
@@ -481,6 +564,7 @@ func (a *ClaudeAdapter) HandleUserPromptSubmitWith(input *schema.ClaudeHookInput
 			snap.Activity.TurnStartedAt = &now
 			snap.Session.Status = schema.SessionActive
 			snap.Session.LastEventAt = now
+			snap.ActivationID = a.Paths.ActivationID
 			snap.Provider = activation.ProviderInfo()
 
 			// Never warn during a non-FreeInference session.
@@ -561,15 +645,10 @@ func (a *ClaudeAdapter) HandleUserPromptSubmitWith(input *schema.ClaudeHookInput
 				events = append(events, state.Event{Type: state.EventWarningShown, Detail: "projection_overflow"})
 			}
 
-			// TTL resolves when the user sends a prompt without an idle gap
-			// (the cache is being actively used again). Uses cacheClock
-			// (derived from CacheTiming when available).
-			// Uses the provider-confirmed TTL when available, fall back to PromptCacheTTL.
-			ttlWindow := engine.PromptCacheTTL
-			if snap.CacheTiming != nil && snap.CacheTiming.CacheTTLSeconds != nil && *snap.CacheTiming.CacheTTLSeconds > 0 {
-				ttlWindow = time.Duration(*snap.CacheTiming.CacheTTLSeconds) * time.Second
-			}
-			if snap.Warnings.CacheTTLWarningActive && !ttlWouldShow && now.Sub(cacheClock) < ttlWindow {
+			// TTL state is only authoritative when the provider supplied a TTL.
+			// Never use a local default timer to infer that the cache recovered.
+			ttlKnown := snap.CacheTiming != nil && snap.CacheTiming.CacheTTLSeconds != nil && *snap.CacheTiming.CacheTTLSeconds > 0
+			if snap.Warnings.CacheTTLWarningActive && !ttlWouldShow && ttlKnown && now.Sub(cacheClock) < time.Duration(*snap.CacheTiming.CacheTTLSeconds)*time.Second {
 				snap.Warnings.CacheTTLWarningActive = false
 				events = append(events, state.Event{Type: state.EventWarningResolved, Detail: "cache_ttl_expiry"})
 			}
@@ -747,6 +826,7 @@ func (a *ClaudeAdapter) HandlePostCompact(input *schema.ClaudeHookInput, session
 	return state.UpdateSnapshot(a.Paths, schema.ClientClaudeCode, sessionID, nil,
 		func(snap *schema.Snapshot) error {
 			snap.Compaction.Pending = false
+			beginCacheEpoch(snap, "compaction", now)
 			if snap.Compaction.PreTokens != nil {
 				snap.Compaction.AwaitingPostObservation = true
 			}
@@ -784,6 +864,38 @@ func (a *ClaudeAdapter) HandleStopFailure(input *schema.ClaudeHookInput, session
 			state.Event{Type: state.EventTurnFailed, Detail: category})
 	}
 	return err
+}
+
+// HandlePostModelSwitch records a model discontinuity and starts a fresh
+// cache-analysis epoch. The hook payload's model is authoritative when it is
+// present; the next status-line observation remains a second line of defense.
+func (a *ClaudeAdapter) HandlePostModelSwitch(input *schema.ClaudeHookInput, sessionID string) error {
+	if sessionID == "" {
+		return nil
+	}
+	now := time.Now().UTC()
+	err := state.UpdateSnapshot(a.Paths, schema.ClientClaudeCode, sessionID, nil,
+		func(snap *schema.Snapshot) error {
+			if input != nil && input.Model != "" {
+				snap.Model.ID = secure.SanitizeField(input.Model)
+				snap.Model.MetadataSource = "client_hook"
+			}
+			beginCacheEpoch(snap, "model_switch", now)
+			snap.Session.LastEventAt = now
+			return nil
+		})
+	if err == nil {
+		appendEventBestEffort(a.Paths, schema.ClientClaudeCode, sessionID,
+			state.Event{Type: state.EventModelSwitch, Model: inputModel(input)})
+	}
+	return err
+}
+
+func inputModel(input *schema.ClaudeHookInput) string {
+	if input == nil {
+		return ""
+	}
+	return secure.SanitizeField(input.Model)
 }
 
 // HandleSessionEnd marks a session as completed.

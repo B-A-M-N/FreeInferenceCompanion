@@ -325,6 +325,7 @@ func TestClaudeCodeHookEventsMatchExpected(t *testing.T) {
 		"UserPromptSubmit": true,
 		"PreCompact":       true,
 		"PostCompact":      true,
+		"PostModelSwitch":  true,
 		"Stop":             true,
 		"StopFailure":      true,
 	}
@@ -557,8 +558,10 @@ func TestClaudeCodeHookCreatesSessionState(t *testing.T) {
 		// SessionStart normally launches detached refresh workers. Keep this
 		// behavioral test self-contained so a child cannot outlive TempDir cleanup.
 		"FI_NO_BACKGROUND=1",
-		"FREEINFERENCE_API_KEY=test-key-hyi",
-		"FREEINFERENCE_BASE_URL=https://freeinference.org/v1",
+		"FREEINFERENCE_API_KEY=",
+		"FREEINFERENCE_BASE_URL=",
+		"ANTHROPIC_AUTH_TOKEN=test-key-hyi",
+		"ANTHROPIC_BASE_URL=https://freeinference.org/anthropic",
 		"PATH="+filepath.Dir(bin)+":/usr/bin:/bin",
 		"CLAUDE_PLUGIN_ROOT=",
 	)
@@ -633,9 +636,10 @@ func TestClaudeCodeSkillsInventory(t *testing.T) {
 	if !hasRouter {
 		t.Errorf("expected router skill 'freeinference' in Claude skills, got: %v", skillNames)
 	}
-	// Verify no old fi-* skills remain.
+	// The public fi-status skill is intentionally namespaced by Claude Code;
+	// older unnamespaced aliases are not part of the plugin.
 	for _, name := range skillNames {
-		if strings.HasPrefix(name, "fi-") {
+		if strings.HasPrefix(name, "fi-") && name != "fi-status" {
 			t.Errorf("old fi-* skill still present: %s — should be removed", name)
 		}
 	}
@@ -663,7 +667,7 @@ func TestCodexSkillsInventory(t *testing.T) {
 		t.Errorf("expected router skill 'freeinference' in Codex skills, got: %v", skillNames)
 	}
 	for _, name := range skillNames {
-		if strings.HasPrefix(name, "fi-") {
+		if strings.HasPrefix(name, "fi-") && name != "fi-status" {
 			t.Errorf("old fi-* skill still present: %s — should be removed", name)
 		}
 	}

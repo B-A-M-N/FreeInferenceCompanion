@@ -50,7 +50,9 @@ func newCodexSnapshot(sessionID, modelID string, now time.Time) *schema.Snapshot
 			LastEventAt: now,
 			Status:      schema.SessionActive,
 		},
-		Provider: DetectProvider().ToProviderInfo(),
+		// Provider identity is supplied by the activation-aware caller. Keep a
+		// new snapshot unresolved until that evidence is threaded through.
+		Provider: schema.ProviderInfo{Name: schema.ProviderUnknown, Source: "unresolved"},
 		Model: schema.ModelInfo{
 			ID:             modelID,
 			MetadataSource: "client_hook",
@@ -71,7 +73,7 @@ func newCodexSnapshot(sessionID, modelID string, now time.Time) *schema.Snapshot
 //
 // DEPRECATED: use HandleSessionStartWith, which accepts a runtime.Activation.
 func (a *CodexAdapter) HandleSessionStart(input *schema.CodexHookInput) error {
-	return a.HandleSessionStartWith(input, runtime.Evaluate())
+	return a.HandleSessionStartWith(input, runtime.EvaluateForClient(runtime.ClientCodex))
 }
 
 // HandleSessionStartWith is the activation-aware variant. The caller must
@@ -111,6 +113,14 @@ func (a *CodexAdapter) HandleSessionStartWith(input *schema.CodexHookInput, acti
 // Codex hooks expose no live token/context snapshot, so no context or cache
 // warnings are ever generated — returns (nil, nil), producing no stdout.
 func (a *CodexAdapter) HandleUserPromptSubmit(input *schema.CodexHookInput, sessionID string) (*schema.CodexWarningOutput, error) {
+	return a.HandleUserPromptSubmitWith(input, sessionID, runtime.EvaluateForClient(runtime.ClientCodex))
+}
+
+// HandleUserPromptSubmitWith is the activation-aware variant. Codex still
+// emits no warning output because it has no cache/context telemetry, but the
+// snapshot retains the selected provider identity when a supported embedding
+// supplies it.
+func (a *CodexAdapter) HandleUserPromptSubmitWith(input *schema.CodexHookInput, sessionID string, activation runtime.Activation) (*schema.CodexWarningOutput, error) {
 	if sessionID == "" {
 		return nil, nil
 	}
@@ -125,6 +135,8 @@ func (a *CodexAdapter) HandleUserPromptSubmit(input *schema.CodexHookInput, sess
 			snap.Activity.TurnStartedAt = &now
 			snap.Session.Status = schema.SessionActive
 			snap.Session.LastEventAt = now
+			snap.ActivationID = a.Paths.ActivationID
+			snap.Provider = activation.ProviderInfo()
 			return nil
 		})
 	if err != nil {

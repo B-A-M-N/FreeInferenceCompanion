@@ -31,6 +31,7 @@ type ClaudeStatusLineInput struct {
 	Model          ModelStatus         `json:"model"`
 	SessionID      string              `json:"session_id"`
 	TranscriptPath string              `json:"transcript_path"`
+	Version        string              `json:"version,omitempty"`
 	ContextWindow  ContextWindowStatus `json:"context_window"`
 	Cost           CostStatus          `json:"cost,omitempty"`
 	RateLimits     RateLimitStatus     `json:"rate_limits,omitempty"`
@@ -48,7 +49,9 @@ type ModelStatus struct {
 // CurrentUsage may be null before the first response and immediately after compaction.
 // TotalInputTokens and TotalOutputTokens are pointers so that an explicit zero
 // (reported by Claude before the first response) is preserved and never collapsed
-// to nil. Null means "not reported"; zero means "explicitly zero".
+// to nil. Their meaning is version-dependent and is persisted separately in
+// schema.LiveContext.TotalTokenSemantics. Null means "not reported"; zero means
+// "explicitly zero".
 type ContextWindowStatus struct {
 	TotalInputTokens    *int64        `json:"total_input_tokens"`
 	TotalOutputTokens   *int64        `json:"total_output_tokens"`
@@ -145,7 +148,8 @@ type CodexWarningOutput struct {
 // Estimated fields (from hooks):
 //   - Prompt length estimates are approximate
 //   - Token counts from UserPromptSubmit are pre-response, not post-response
-//   - No hook provides cumulative session totals
+//   - Claude status-line totals are current-context values in supported modern
+//     clients; older clients may expose cumulative session totals.
 //
 // Unavailable fields:
 //   - Account usage is optional and capability-negotiated; it remains absent

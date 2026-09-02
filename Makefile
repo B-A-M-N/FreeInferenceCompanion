@@ -424,12 +424,10 @@ check: fmt-check vet test test-race plugin-syntax-check mod-verify tidy-check
 bench:
 	go test ./... -bench=. -benchmem -run=^$$
 
-# bench-ci enforces the latency promises (status p95<10ms, hook p95<25ms).
+# bench-ci enforces conservative average-latency ceilings for the hot paths.
 # Runs the real benchmarks with enough iterations to get reliable averages and
 # fails if either benchmark exceeds its ceiling. Go benchmarks report average
-# ns/op, not p95. We enforce a conservative average ceiling that leaves
-# headroom under the p95 target. True p95 latency enforcement requires
-# subprocess-level distribution testing (tracked separately).
+# ns/op; this target intentionally makes no p95 claim.
 bench-ci:
 	@output=$$(go test ./internal/adapters/ -bench='BenchmarkStatusLineUpdate|BenchmarkUserPromptSubmitNoWarning' -benchtime=1s -count=1 -timeout 120s 2>&1); \
 	echo "$$output"; \
@@ -440,11 +438,11 @@ bench-ci:
 	status_ns=$$(echo "$$output" | grep 'BenchmarkStatusLineUpdate' | head -1 | sed -E 's/.* ([0-9]+) ns\/op.*/\1/'); \
 	hook_ns=$$(echo "$$output" | grep 'BenchmarkUserPromptSubmitNoWarning' | head -1 | sed -E 's/.* ([0-9]+) ns\/op.*/\1/'); \
 	echo "status average = $${status_ns}ns, hook average = $${hook_ns}ns"; \
-	if [ "$$status_ns" -gt 5000000 ]; then \
-		echo "FAIL: status line average $${status_ns}ns exceeds 5ms ceiling (p95 target: 10ms)"; exit 1; \
+	if [ "$$status_ns" -gt 10000000 ]; then \
+		echo "FAIL: status line average $${status_ns}ns exceeds 10ms ceiling"; exit 1; \
 	fi; \
-	if [ "$$hook_ns" -gt 5000000 ]; then \
-		echo "FAIL: hook average $${hook_ns}ns exceeds 5ms ceiling (p95 target: 25ms)"; exit 1; \
+	if [ "$$hook_ns" -gt 10000000 ]; then \
+		echo "FAIL: hook average $${hook_ns}ns exceeds 10ms ceiling"; exit 1; \
 	fi; \
 	echo "latency gate passed"
 

@@ -15,6 +15,9 @@ make install
 # Run diagnostics
 freeinference doctor
 
+# Check public service health without credentials or session state
+freeinference fi-status
+
 # Browse available models
 freeinference models --refresh
 
@@ -34,7 +37,7 @@ freeinference CLI (Go, static binary)
   │   │                    # session index, refresh locks
   │   └── sessions/        # Per-session snapshots and advisory locks
   ├── commands: status, sessions, snapshot, render, models, doctor,
-  │             report, dashboard, context, refresh, status-line
+  │             report, dashboard, context, cache, fi-status, refresh, status-line
   └── hook: freeinference hook claude-code <event>
 
 Claude Code plugin → scripts/run-hook.sh → freeinference hook claude-code <event>
@@ -64,8 +67,8 @@ surfaces the user already has:
 
 ### Design principles
 
-- **Status line reads live Claude JSON from stdin + cached health data** — zero network, p95 <10ms target
-- **Hooks do local computation only** — no network, p95 <25ms target, always fail open (exit 0)
+- **Status line reads live Claude JSON from stdin + cached health data** — zero network, average-latency target only
+- **Hooks do local computation only** — no network, average-latency target only, always fail open (exit 0)
 - **Every session mutation holds a cross-process file lock** — concurrent hooks and status lines coordinate writes; lock contention returns immediately (fail-open) and is counted in `state.DroppedMutations()`
 - **Warnings use JSON `systemMessage`** — never plain stdout, never `additionalContext`, never in model context; no warning → no output at all (zero bytes)
 - **Surface eligibility is gated by seven checks** — runtime active, client matches, session matches, session active, activation identity matches, observation fresh, provider confirmed FreeInference; any gate failing produces zero bytes
@@ -88,6 +91,7 @@ surfaces the user already has:
 | `freeinference doctor [--probe --model <name>]` | Diagnose connectivity and configuration |
 | `freeinference report [--client <type>] [--session <id>] [--format markdown\|json]` | Generate a sanitized support report (includes budget projection when the provider capability is available) |
 | `freeinference dashboard [--status] [--print-url]` | Open FreeInference account dashboard (`--status` for service health page) |
+| `freeinference fi-status [--json] [--refresh] [--all]` | Fetch public service status without credentials or local session state |
 | `freeinference context [--session <id>]` | Show context pressure information |
 | `freeinference cache [--session <id>]` | Show cache efficiency pattern classification and likely diagnoses |
 | `freeinference refresh [--force] [--if-stale --detach] [--worker models\|health\|account-usage]` | Refresh cached provider metadata |
@@ -99,7 +103,7 @@ surfaces the user already has:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `FREEINFERENCE_API_KEY` | — | FreeInference API credential |
-| `FREEINFERENCE_BASE_URL` | `https://freeinference.org/v1` | API base URL |
+| `FREEINFERENCE_BASE_URL` | — | Generic provider API URL (API fallback only; not client activation evidence) |
 | `ANTHROPIC_AUTH_TOKEN` | — | FreeInference key for Claude Code's Anthropic-compatible endpoint |
 | `FI_HEALTH_URL` | — | Provider health monitoring URL (optional) |
 | `FI_CACHE_DIR` | `~/.cache/freeinference-companion` | State cache directory |
@@ -107,10 +111,12 @@ surfaces the user already has:
 | `FI_PROVIDER` | — | Set to `freeinference` for attribution metadata only. Does NOT activate the companion. Activation requires a supported endpoint and credential. |
 | `FI_NO_BACKGROUND` | — | Set to `1` to disable detached background refresh |
 
-The companion activates only when an approved FreeInference runtime endpoint
-and its matching credential are both present. It recognizes the documented
-Claude Code pair `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`, as well as
-the FreeInference and OpenAI-compatible environment-variable pairs.
+The companion activates only when the current client has an approved
+FreeInference runtime route and its matching credential. Claude Code uses
+`ANTHROPIC_BASE_URL` plus `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY`.
+Codex activation is established from the selected provider in
+`~/.codex/config.toml` and that provider's `env_key`; a generic
+`FREEINFERENCE_API_KEY` alone is not evidence that either client is using it.
 
 ## Configure Claude Code and Codex
 
@@ -121,7 +127,7 @@ the OpenAI-compatible path.
 | Client | Runtime endpoint | Credential | Protocol |
 |---|---|---|---|
 | Claude Code | `https://freeinference.org/anthropic` | `ANTHROPIC_AUTH_TOKEN` | Anthropic-compatible |
-| Codex | `https://freeinference.org/v1` | `FREEINFERENCE_API_KEY` | OpenAI Responses |
+| Codex | selected `model_providers.<id>.base_url` | selected provider `env_key` | OpenAI Responses |
 
 ### Claude Code
 
@@ -155,13 +161,13 @@ The plugin uses three separate concepts for metrics:
 
 | Source | Authoritative | Description |
 |--------|:---:|-------------|
-| `live_context` | ✓ | Latest status-line snapshot from the coding client (session totals kept separate from latest-request usage) |
-| `usage_observations` | ✗ | Rolling window of up to 20 unique request samples (fingerprint-deduplicated); feeds the 5-sample cache analysis |
+| `live_context` | ✓ | Latest Claude status-line snapshot; total-token semantics are recorded as current-context, cumulative-session, or unknown |
+| `usage_observations` | ✗ | Up to 20 retained observations with request identity/epoch metadata; observed, analyzed, and usable counts are separate |
 | `account_usage` | ✓ when capability is supported | Provider quota data, omitted unless a validated account-usage capability response is available |
 
 Missing fields are `null` — never converted to zero. A zero-token field remains zero; a missing field remains null.
 
-Cache-low warnings fire under these hypothetical conditions: 3+ unique
+Cache-low warnings fire under these hypothetical conditions: 3+ usable
 observations, ≥50K active context, read share <20% for 3 sequential observations, confirmed
 FreeInference provider, and a 30-minute cooldown. They resolve after 3
 sequential observations above 40%. The warning includes likely diagnosis
@@ -256,7 +262,7 @@ remains the stable machine-readable contract.
 Each session has a bounded `events.jsonl` recording only lifecycle event
 types (`session_started`, `status_observed`, `prompt_submitted`,
 `turn_stopped`, `turn_failed`, `compaction_started`, `compaction_completed`,
-`session_ended`, `warning_shown`, `warning_resolved`) and short sanitized
+`model_switch`, `session_ended`, `warning_shown`, `warning_resolved`) and short sanitized
 details. Rotation kicks in past 256 KiB or 1,000 events per session.
 Sessions older than 30 days are cleaned up opportunistically by
 `CleanupStaleSessions`.
@@ -269,7 +275,7 @@ make test       # Run tests
 make test-race  # Run tests with the race detector
 make vet        # Run go vet
 make fmt-check  # Verify gofmt cleanliness
-make bench      # Run performance benchmarks (status p95<10ms, hook p95<25ms targets)
+make bench      # Run performance benchmarks (average latency gate; not p95)
 make check      # fmt + vet + test + race + plugin validation + git diff --check
 make release    # Cross-compile all platforms + checksums
 make smoke      # Quick smoke test

@@ -87,6 +87,27 @@ func jsonFloat(v float64) string {
 	return string(b)
 }
 
+func claudeTestEnv() []string {
+	return []string{
+		"ANTHROPIC_BASE_URL=https://freeinference.org/anthropic",
+		"ANTHROPIC_AUTH_TOKEN=hyi-test-12345",
+	}
+}
+
+func codexTestEnv(t *testing.T) []string {
+	t.Helper()
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(`model_provider = "freeinference"
+
+[model_providers.freeinference]
+base_url = "https://freeinference.org/v1"
+env_key = "FREEINFERENCE_API_KEY"
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return []string{"CODEX_HOME=" + home, "FREEINFERENCE_API_KEY=hyi-test-12345"}
+}
+
 func TestHookMalformedJSONExitsZero(t *testing.T) {
 	dir := t.TempDir()
 	_, _, code := runFI(t, dir, "{not json", nil, "hook", "claude-code", "UserPromptSubmit")
@@ -131,8 +152,8 @@ func TestPersistentDisablePreventsHookStateWrites(t *testing.T) {
 	dir := t.TempDir()
 	configDir := t.TempDir()
 	env := []string{
-		"FREEINFERENCE_BASE_URL=https://freeinference.org/v1",
-		"FREEINFERENCE_API_KEY=hyi-test-12345",
+		"ANTHROPIC_BASE_URL=https://freeinference.org/anthropic",
+		"ANTHROPIC_AUTH_TOKEN=hyi-test-12345",
 		"FI_CONFIG_DIR=" + configDir,
 	}
 	_, stderr, code := runFI(t, dir, "", env, "companion", "disable", "--json")
@@ -158,7 +179,7 @@ func TestHookLockBusyExitsZero(t *testing.T) {
 
 	// Create the session first (needs activation env vars).
 	runFI(t, dir, hookInput(sessionID),
-		[]string{"FREEINFERENCE_BASE_URL=https://freeinference.org/v1", "FREEINFERENCE_API_KEY=hyi-test-12345"},
+		claudeTestEnv(),
 		"hook", "claude-code", "SessionStart")
 
 	// Hold the session lock from the test process.
@@ -178,7 +199,7 @@ func TestHookLockBusyExitsZero(t *testing.T) {
 	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 
 	start := time.Now()
-	_, _, code := runFI(t, dir, hookInput(sessionID), nil, "hook", "claude-code", "UserPromptSubmit")
+	_, _, code := runFI(t, dir, hookInput(sessionID), claudeTestEnv(), "hook", "claude-code", "UserPromptSubmit")
 	if code != 0 {
 		t.Errorf("lock busy must exit 0, got %d", code)
 	}
@@ -194,7 +215,7 @@ func TestHookNoWarningEmptyStdout(t *testing.T) {
 	runFI(t, dir, statusPayload(sessionID, 40, 80000), nil, "status", "--compact", "--client", "claude-code")
 
 	stdout, _, code := runFI(t, dir, hookInput(sessionID),
-		[]string{"FREEINFERENCE_BASE_URL=https://freeinference.org/v1", "FREEINFERENCE_API_KEY=hyi-test-12345"},
+		claudeTestEnv(),
 		"hook", "claude-code", "UserPromptSubmit")
 	if code != 0 {
 		t.Errorf("exit = %d", code)
@@ -209,11 +230,11 @@ func TestHookWarningProducesValidJSON(t *testing.T) {
 	sessionID := "warn-session"
 
 	runFI(t, dir, statusPayload(sessionID, 84, 168000),
-		[]string{"FREEINFERENCE_BASE_URL=https://freeinference.org/v1", "FREEINFERENCE_API_KEY=hyi-test-12345"},
+		claudeTestEnv(),
 		"status", "--compact", "--client", "claude-code")
 
 	stdout, _, code := runFI(t, dir, hookInput(sessionID),
-		[]string{"FREEINFERENCE_BASE_URL=https://freeinference.org/v1", "FREEINFERENCE_API_KEY=hyi-test-12345"},
+		claudeTestEnv(),
 		"hook", "claude-code", "UserPromptSubmit")
 	if code != 0 {
 		t.Errorf("exit = %d", code)
@@ -238,7 +259,7 @@ func TestHookWarningSuppressedOnOtherProvider(t *testing.T) {
 	runFI(t, dir, statusPayload(sessionID, 95, 190000), nil, "status", "--compact", "--client", "claude-code")
 
 	stdout, _, code := runFI(t, dir, hookInput(sessionID),
-		[]string{"FREEINFERENCE_API_KEY=", "ANTHROPIC_BASE_URL=https://api.anthropic.com"},
+		[]string{"ANTHROPIC_AUTH_TOKEN=", "ANTHROPIC_BASE_URL=https://api.anthropic.com"},
 		"hook", "claude-code", "UserPromptSubmit")
 	if code != 0 {
 		t.Errorf("exit = %d", code)
@@ -269,7 +290,7 @@ func TestCodexHookNeverEmitsSuppressOutput(t *testing.T) {
 
 func TestStatusResolvesLatestSession(t *testing.T) {
 	dir := t.TempDir()
-	env := []string{"FREEINFERENCE_BASE_URL=https://freeinference.org/v1", "FREEINFERENCE_API_KEY=hyi-test-12345"}
+	env := claudeTestEnv()
 
 	runFI(t, dir, hookInput("sess-resolve"), env, "hook", "claude-code", "SessionStart")
 
@@ -288,7 +309,7 @@ func TestStatusResolvesLatestSession(t *testing.T) {
 
 func TestStatusWithNoSessionIsHonest(t *testing.T) {
 	dir := t.TempDir()
-	env := []string{"FREEINFERENCE_BASE_URL=https://freeinference.org/v1", "FREEINFERENCE_API_KEY=hyi-test-12345"}
+	env := claudeTestEnv()
 	stdout, _, code := runFI(t, dir, "", env, "status")
 	if code != 0 {
 		t.Errorf("exit = %d", code)
@@ -300,7 +321,7 @@ func TestStatusWithNoSessionIsHonest(t *testing.T) {
 
 func TestReportReadsCodexState(t *testing.T) {
 	dir := t.TempDir()
-	env := []string{"FREEINFERENCE_BASE_URL=https://freeinference.org/v1", "FREEINFERENCE_API_KEY=hyi-test-12345"}
+	env := codexTestEnv(t)
 	input := `{"session_id":"codex-report","hook_event_name":"SessionStart","model":"glm-5.1"}`
 	runFI(t, dir, input, env, "hook", "codex", "SessionStart")
 
@@ -334,7 +355,7 @@ func TestReportReadsCodexState(t *testing.T) {
 
 func TestContextMissingMetricsPrintsUnknown(t *testing.T) {
 	dir := t.TempDir()
-	env := []string{"FREEINFERENCE_BASE_URL=https://freeinference.org/v1", "FREEINFERENCE_API_KEY=hyi-test-12345"}
+	env := claudeTestEnv()
 	runFI(t, dir, hookInput("ctx-unknown"), env, "hook", "claude-code", "SessionStart")
 
 	stdout, _, code := runFI(t, dir, "", env, "context")
@@ -351,7 +372,7 @@ func TestContextMissingMetricsPrintsUnknown(t *testing.T) {
 
 func TestSessionsCommand(t *testing.T) {
 	dir := t.TempDir()
-	env := []string{"FREEINFERENCE_BASE_URL=https://freeinference.org/v1", "FREEINFERENCE_API_KEY=hyi-test-12345"}
+	env := claudeTestEnv()
 	runFI(t, dir, hookInput("sess-list"), env, "hook", "claude-code", "SessionStart")
 
 	stdout, _, code := runFI(t, dir, "", env, "sessions", "--include-identifiers")
@@ -365,7 +386,7 @@ func TestSessionsCommand(t *testing.T) {
 
 func TestSnapshotJSON(t *testing.T) {
 	dir := t.TempDir()
-	env := []string{"FREEINFERENCE_BASE_URL=https://freeinference.org/v1", "FREEINFERENCE_API_KEY=hyi-test-12345"}
+	env := claudeTestEnv()
 	runFI(t, dir, statusPayload("snap-json", 42, 84000), env, "status", "--compact", "--client", "claude-code")
 
 	stdout, _, code := runFI(t, dir, "", env, "snapshot", "--json", "--session", "snap-json")
@@ -383,7 +404,7 @@ func TestSnapshotJSON(t *testing.T) {
 
 func TestRenderModes(t *testing.T) {
 	dir := t.TempDir()
-	env := []string{"FREEINFERENCE_BASE_URL=https://freeinference.org/v1", "FREEINFERENCE_API_KEY=hyi-test-12345"}
+	env := claudeTestEnv()
 	runFI(t, dir, statusPayload("render-test", 42, 84000), env, "status", "--compact", "--client", "claude-code")
 
 	// Disable colors for stable test assertions
@@ -404,7 +425,7 @@ func TestRenderModes(t *testing.T) {
 func TestStatusLineCompactFromStdin(t *testing.T) {
 	dir := t.TempDir()
 	stdout, _, code := runFI(t, dir, statusPayload("sl-test", 42, 84000),
-		[]string{"FREEINFERENCE_BASE_URL=https://freeinference.org/v1", "FREEINFERENCE_API_KEY=hyi-test-12345"},
+		claudeTestEnv(),
 		"status", "--compact", "--client", "claude-code")
 	if code != 0 {
 		t.Errorf("exit = %d", code)
@@ -418,8 +439,8 @@ func TestStatusReportingLevelsAndPipedJSON(t *testing.T) {
 	dir := t.TempDir()
 	configDir := t.TempDir()
 	env := []string{
-		"FREEINFERENCE_BASE_URL=https://freeinference.org/v1",
-		"FREEINFERENCE_API_KEY=hyi-test-12345",
+		"ANTHROPIC_BASE_URL=https://freeinference.org/anthropic",
+		"ANTHROPIC_AUTH_TOKEN=hyi-test-12345",
 		"FI_CONFIG_DIR=" + configDir,
 		"NO_COLOR=1",
 	}

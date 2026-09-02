@@ -73,7 +73,7 @@ func BuildCacheDiagnosis(snap *schema.Snapshot, now time.Time) schema.CacheDiagn
 		ObservedAt:       now,
 	}
 
-	if snap == nil || snap.CacheAnalysis == nil || len(snap.UsageObservations) < MinObservationsForWarning {
+	if snap == nil || snap.CacheAnalysis == nil || effectiveUsableSamples(snap.CacheAnalysis) < MinObservationsForWarning {
 		diag.Evidence = []schema.EvidenceItem{
 			{Description: "Insufficient observations to analyze cache behavior", Source: "inferred"},
 		}
@@ -86,6 +86,7 @@ func BuildCacheDiagnosis(snap *schema.Snapshot, now time.Time) schema.CacheDiagn
 	}
 
 	analysis := snap.CacheAnalysis
+	analysisObs := currentEpochObservations(snap)
 	readShare := 0.0
 	creationShare := 0.0
 	freshShare := 0.0
@@ -102,7 +103,7 @@ func BuildCacheDiagnosis(snap *schema.Snapshot, now time.Time) schema.CacheDiagn
 	// Build evidence from what we can observe.
 	diag.Evidence = []schema.EvidenceItem{
 		{
-			Description: fmt.Sprintf("Cache read share: %.0f%% over %d unique observations", readShare*100, analysis.RequestSamples),
+			Description: fmt.Sprintf("Cache read share: %.0f%% over %d usable observations", readShare*100, effectiveUsableSamples(analysis)),
 			Value:       fmt.Sprintf("%.2f", readShare),
 			Source:      "client_observed",
 		},
@@ -138,7 +139,7 @@ func BuildCacheDiagnosis(snap *schema.Snapshot, now time.Time) schema.CacheDiagn
 	diag.CandidateCauses = buildCandidateCauses(readShare, creationShare, freshShare, analysis, snap)
 
 	// Derive confidence from sample size and data quality.
-	diag.Confidence = deriveConfidence(analysis.RequestSamples, snap.UsageObservations)
+	diag.Confidence = deriveConfidence(effectiveUsableSamples(analysis), analysisObs)
 
 	// Set attribution kind: always heuristic since we lack provider metadata.
 	diag.Kind = schema.AttributionHeuristic
@@ -216,9 +217,10 @@ func buildCandidateCauses(readShare, creationShare, freshShare float64, analysis
 	}
 
 	// Cause 4: Model change
-	if len(snap.UsageObservations) >= 2 {
-		lastModel := snap.UsageObservations[len(snap.UsageObservations)-1].ModelID
-		prevModel := snap.UsageObservations[len(snap.UsageObservations)-2].ModelID
+	analysisObs := currentEpochObservations(snap)
+	if len(analysisObs) >= 2 {
+		lastModel := analysisObs[len(analysisObs)-1].ModelID
+		prevModel := analysisObs[len(analysisObs)-2].ModelID
 		if lastModel != prevModel && lastModel != "" && prevModel != "" {
 			causes = prependCause(causes, schema.RankedCause{
 				Reason:     schema.ReasonModelChanged,
@@ -229,7 +231,7 @@ func buildCandidateCauses(readShare, creationShare, freshShare float64, analysis
 	}
 
 	// Cause 5: Intermittent — high variance
-	variance := computeReadShareVariance(snap.UsageObservations)
+	variance := computeReadShareVariance(analysisObs)
 	if variance >= IntermittentMissVariance && readShare < CacheReadLowThreshold {
 		causes = append(causes, schema.RankedCause{
 			Reason:     schema.ReasonPrefixChanged,
@@ -300,7 +302,7 @@ func deriveConfidence(sampleCount int, observations []schema.UsageObservation) f
 // patterns as PatternThrashing, which is misleading when there is insufficient
 // evidence to support that conclusion.
 func AttributeCacheMisses(snap *schema.Snapshot) CacheAttribution {
-	if snap == nil || snap.CacheAnalysis == nil || len(snap.UsageObservations) < MinObservationsForWarning {
+	if snap == nil || snap.CacheAnalysis == nil || effectiveUsableSamples(snap.CacheAnalysis) < MinObservationsForWarning {
 		return CacheAttribution{
 			Pattern:    PatternInsufficientData,
 			Confidence: "low",

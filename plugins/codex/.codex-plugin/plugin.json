@@ -1,7 +1,7 @@
 {
   "name": "freeinference-companion",
   "version": "0.1.0",
-  "description": "FreeInference skill package for Codex: manual provider diagnostics and model discovery. It does not install automatic lifecycle telemetry; Codex-unavailable context and cache measurements remain unknown. Community-built and unofficial. Not affiliated with or endorsed by FreeInference.",
+  "description": "FreeInference skill package for Codex: manual provider diagnostics and model discovery. It does not install automatic lifecycle telemetry; Codex context and cache measurements are unavailable. Community-built and unofficial. Not affiliated with or endorsed by FreeInference.",
   "author": {
     "name": "b-a-m-n",
     "url": "https://github.com/b-a-m-n"
@@ -10,12 +10,12 @@
   "interface": {
     "displayName": "FreeInference Companion",
     "shortDescription": "Manual FreeInference diagnostics and model discovery for Codex.",
-    "longDescription": "Community-built skill package for FreeInference-powered Codex sessions. Runs user-requested provider diagnostics and model discovery without installing lifecycle hooks, adding inference traffic, or acting as a proxy. Context and cache metrics are Codex-unavailable and reported as unknown.",
+    "longDescription": "Community-built skill package for FreeInference-powered Codex sessions. Runs user-requested provider diagnostics and model discovery without installing lifecycle hooks, adding inference traffic, or acting as a proxy. Context and cache metrics are unavailable because this package receives no Codex telemetry stream.",
     "developerName": "B-A-M-N",
     "category": "Developer Tools",
     "capabilities": ["Read"],
     "defaultPrompt": [
-      "Check my FreeInference session status."
+      "Check FreeInference service status and provider configuration."
     ]
   }
 }

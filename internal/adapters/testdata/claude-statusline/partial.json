@@ -1,0 +1,13 @@
+{
+  "model": {"id": "glm-5.1"},
+  "session_id": "fixture-session",
+  "version": "2.1.132",
+  "context_window": {
+    "total_input_tokens": 175000,
+    "total_output_tokens": 2400,
+    "current_usage": {"input_tokens": 1000, "cache_creation_input_tokens": 1000, "output_tokens": 100},
+    "context_window_size": 200000,
+    "used_percentage": 87.5,
+    "remaining_percentage": 12.5
+  }
+}

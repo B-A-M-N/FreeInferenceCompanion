@@ -1,6 +1,6 @@
 ---
 name: freeinference
-description: FreeInference Companion — manual provider diagnostics, model discovery, and configuration guidance for Codex. This skill package does not install automatic lifecycle telemetry; Codex-unavailable context and cache metrics are reported as unknown.
+description: FreeInference Companion — manual provider diagnostics, model discovery, and configuration guidance for Codex. This skill package does not install automatic lifecycle telemetry; Codex context and cache metrics are reported as unavailable.
 ---
 
 # FreeInference Companion (Codex)
@@ -13,9 +13,18 @@ The `freeinference` CLI provides the following commands. Run any command with `-
 
 ## Commands
 
+### `freeinference fi-status`
+
+Fetch public FreeInference service status. This is stateless and
+unauthenticated; it does not require the Codex provider to be active.
+
+```bash
+freeinference fi-status --json
+```
+
 ### `freeinference status`
 
-Show current session status with context usage, pressure, and cache analysis.
+Show current session status with pressure and the telemetry availability state.
 
 ```bash
 freeinference status --json
@@ -23,7 +32,7 @@ freeinference status --client codex
 freeinference status --level standard --client codex
 ```
 
-Note: this skill does not receive lifecycle events, and Codex does not expose live context metrics; values may report as `unknown`.
+Note: this skill does not receive lifecycle events, and Codex does not expose live context metrics; values report as `unavailable`.
 
 Flags: `--client <type>`, `--compact`, `--level summary|standard|detailed`, `--session <id>`, `--json`
 
@@ -95,7 +104,8 @@ freeinference dashboard --print-url
 
 ### `freeinference context`
 
-Show current context usage. Note: Codex may report unknown values.
+Codex live context telemetry is unsupported by this integration. The command
+reports `unavailable` rather than treating missing values as zero.
 
 ```bash
 freeinference context --json
@@ -103,7 +113,8 @@ freeinference context --json
 
 ### `freeinference cache`
 
-Analyze cache efficiency. Note: Cache metrics are not available from Codex.
+Codex cache telemetry is unsupported by this integration. The command reports
+`unavailable` rather than presenting a pseudo-analysis.
 
 ```bash
 freeinference cache --json
@@ -188,7 +199,7 @@ Many commands accept `--json` for machine-readable JSON output and `--help` for 
 ## Environment Variables
 
 - `FREEINFERENCE_API_KEY` — API credential for the OpenAI-compatible API
-- `FREEINFERENCE_BASE_URL` — API base URL (default: `https://freeinference.org/v1`)
+- `FREEINFERENCE_BASE_URL` — generic provider API URL; Codex activation comes from `config.toml`
 - `FI_HEALTH_URL` — Health monitoring URL (optional)
 - `FI_CACHE_DIR` — Cache directory (default: `~/.cache/freeinference-companion`)
 - `FI_SESSION_ID` — Explicit session override
@@ -229,8 +240,8 @@ models are endpoint-exclusive and belong in Claude Code's Anthropic setup.
 ## Known Differences from Claude Code
 
 1. **No status-line system** — Codex does not support status-line wrappers. `freeinference status-line` is not applicable.
-2. **Context metrics** — Codex does not expose live context window usage to plugins. Context values may report as `unknown`.
-3. **Cache metrics** — Codex does not expose cache metrics. Cache analysis may show limited or no data.
+2. **Context metrics** — Codex does not expose live context window usage to plugins. Context values report as `unavailable`.
+3. **Cache metrics** — Codex does not expose cache metrics. Cache analysis reports `unavailable`.
 4. **Automatic telemetry** — this package intentionally installs no Codex lifecycle hooks. Session metrics are available only when another supported integration records them.
 
 ## Example Workflows

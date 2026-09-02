@@ -30,11 +30,21 @@ func runHook(args []string, stdin io.Reader, stdout io.Writer, _ io.Writer) {
 	}
 	clientType := args[0]
 	eventName := args[1]
+	var client runtime.ClientKind
+	switch clientType {
+	case schema.ClientClaudeCode:
+		client = runtime.ClientClaudeCode
+	case schema.ClientCodex:
+		client = runtime.ClientCodex
+	default:
+		// Unknown clients are rejected before activation or filesystem work.
+		return
+	}
 
 	// Activation gate: evaluated exactly once per process. Must be the FIRST
 	// real work this function does — every step below touches the filesystem
 	// or the network and must be skipped when inactive.
-	activation := runtime.Evaluate()
+	activation := runtime.EvaluateForClient(client)
 	if !activation.Active {
 		return
 	}
@@ -105,6 +115,8 @@ func handleClaudeHook(paths state.Paths, eventName string, stdin io.Reader, stdo
 		_ = adapter.HandlePreCompact(input, sessionID)
 	case "PostCompact":
 		_ = adapter.HandlePostCompact(input, sessionID)
+	case "PostModelSwitch":
+		_ = adapter.HandlePostModelSwitch(input, sessionID)
 	case "Stop":
 		_ = adapter.HandleStop(sessionID)
 	case "StopFailure":
@@ -134,7 +146,7 @@ func handleCodexHook(paths state.Paths, eventName string, stdin io.Reader, stdou
 		_ = adapter.HandleSessionEnd(sessionID)
 		maybeRequestDetachedRefresh(paths, activation)
 	case "UserPromptSubmit":
-		output, err := adapter.HandleUserPromptSubmit(input, sessionID)
+		output, err := adapter.HandleUserPromptSubmitWith(input, sessionID, activation)
 		if err == nil && output != nil {
 			if data, merr := json.Marshal(output); merr == nil {
 				fmt.Fprintln(stdout, string(data))

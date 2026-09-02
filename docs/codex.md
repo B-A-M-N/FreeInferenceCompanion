@@ -86,6 +86,26 @@ It is a **skill-only** package: it exposes user-requested provider diagnostics
 and model discovery, but does not install lifecycle hooks or record automatic
 Codex session telemetry. It does not proxy prompts or select models for you.
 
+The stateless service command is available regardless of provider activation:
+
+```bash
+freeinference fi-status
+freeinference fi-status --json
+```
+
+It makes only an unauthenticated GET to `https://status.freeinference.org/api/status`.
+
+Codex provider/session boundaries are intentional:
+
+- Supported: provider configuration diagnostics, model discovery, `doctor`,
+  `dashboard`, and public `fi-status`.
+- Unsupported: automatic lifecycle telemetry, context percentage, cache
+  read/write counts, and compaction effectiveness.
+
+`freeinference context --client codex` and `freeinference cache --client codex`
+therefore report `unavailable`; they do not infer zeros from absent Codex
+telemetry.
+
 After installation, these skills are available:
 
 - `$freeinference-status`
@@ -97,9 +117,10 @@ After installation, these skills are available:
 
 Codex does not expose a script-backed status line, live context-window counts,
 or cache-token metrics through this package. Accordingly, unavailable values
-are reported as `unknown` rather than invented. Use `freeinference models`,
+are reported as `unavailable` rather than invented. Use `freeinference models`,
 `freeinference doctor`, or `freeinference status --client codex` when you
-explicitly want the available local/provider state.
+explicitly want the available local/provider state. Codex-unavailable values
+are reported as `unavailable`, not `unknown` or zero.
 
 For interactive reports, choose the amount of detail explicitly:
 
@@ -112,7 +133,7 @@ freeinference status --client codex --level detailed
 Set the usual level once with `freeinference config set reporting.level
 standard`; `FI_REPORTING_LEVEL` is a non-persistent override. These levels
 describe only local companion state—Codex-unavailable context and cache
-telemetry remains `unknown`.
+telemetry remains `unavailable`.
 
 ## References
 

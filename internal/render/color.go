@@ -10,6 +10,7 @@ package render
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -458,8 +459,9 @@ type ViewModel struct {
 	Eligible    bool               `json:"eligible"`
 	Eligibility SurfaceEligibility `json:"-"`
 
-	ProviderName      string `json:"provider_name"`
-	ProviderConfirmed bool   `json:"provider_confirmed"`
+	ProviderName          string                `json:"provider_name"`
+	ProviderConfirmed     bool                  `json:"provider_confirmed"`
+	ContextTokenSemantics schema.TokenSemantics `json:"context_token_semantics,omitempty"`
 
 	HealthStatus  string `json:"health_status,omitempty"`
 	HealthAgeSecs *int64 `json:"health_age_seconds,omitempty"`
@@ -486,11 +488,15 @@ type ViewModel struct {
 	WarningActive bool `json:"warning_active"`
 
 	// Cache analysis fields
-	CacheAnalysisRequestSamples int      `json:"cache_analysis_request_samples,omitempty"`
-	CacheAnalysisReadShare      *float64 `json:"cache_analysis_read_share,omitempty"`
-	CacheAnalysisCreationShare  *float64 `json:"cache_analysis_creation_share,omitempty"`
-	CacheAnalysisFreshShare     *float64 `json:"cache_analysis_fresh_share,omitempty"`
-	CacheAnalysisTrend          string   `json:"cache_analysis_trend,omitempty"`
+	CacheAnalysisRequestSamples  int                               `json:"cache_analysis_request_samples,omitempty"`
+	CacheAnalysisObservedSamples int                               `json:"cache_analysis_observed_samples,omitempty"`
+	CacheAnalysisWindowSamples   int                               `json:"cache_analysis_window_samples,omitempty"`
+	CacheAnalysisUsableSamples   int                               `json:"cache_analysis_usable_samples,omitempty"`
+	CacheAnalysisAvailability    schema.CacheTelemetryAvailability `json:"cache_analysis_availability,omitempty"`
+	CacheAnalysisReadShare       *float64                          `json:"cache_analysis_read_share,omitempty"`
+	CacheAnalysisCreationShare   *float64                          `json:"cache_analysis_creation_share,omitempty"`
+	CacheAnalysisFreshShare      *float64                          `json:"cache_analysis_fresh_share,omitempty"`
+	CacheAnalysisTrend           string                            `json:"cache_analysis_trend,omitempty"`
 
 	// Compaction fields
 	CompactionLastResultAt           *time.Time `json:"compaction_last_result_at,omitempty"`
@@ -562,15 +568,16 @@ func BuildViewModel(version string, snap *schema.Snapshot, gs *schema.GlobalStat
 	vm.ProviderName = secure.SanitizeField(snap.Provider.Name)
 	vm.ProviderConfirmed = snap.Provider.Confirmed && snap.Provider.Name == schema.ProviderFreeInference
 
-	if snap.LiveContext != nil {
+	if snap.Client.Type != schema.ClientCodex && snap.LiveContext != nil {
 		lc := snap.LiveContext
 		vm.ContextWindowSize = lc.ContextWindowSize
 		vm.ContextUsedPct = lc.UsedPercentage
-		if lc.TotalInputTokens != nil {
+		vm.ContextTokenSemantics = lc.TotalTokenSemantics
+		if lc.TotalTokenSemantics == schema.TokenSemanticsCurrentContext && lc.TotalInputTokens != nil {
 			used := *lc.TotalInputTokens
-			if lc.TotalOutputTokens != nil {
-				used += *lc.TotalOutputTokens
-			}
+			vm.ContextUsedTokens = &used
+		} else if lc.UsedPercentage != nil && lc.ContextWindowSize != nil {
+			used := int64(math.Round(*lc.UsedPercentage / 100 * float64(*lc.ContextWindowSize)))
 			vm.ContextUsedTokens = &used
 		}
 		if lc.LatestRequest != nil {
@@ -586,10 +593,17 @@ func BuildViewModel(version string, snap *schema.Snapshot, gs *schema.GlobalStat
 	// LiveContext, once again further down). Aside from being dead work, the
 	// duplication masked future edits that touched only one of the two
 	// blocks.
-	if snap.CacheAnalysis != nil {
+	if snap.Client.Type != schema.ClientCodex && snap.CacheAnalysis != nil {
 		vm.CacheReadShare = snap.CacheAnalysis.CacheReadShare
 		vm.CacheTrend = snap.CacheAnalysis.Trend
 		vm.CacheAnalysisRequestSamples = snap.CacheAnalysis.RequestSamples
+		vm.CacheAnalysisObservedSamples = snap.CacheAnalysis.ObservationCount
+		vm.CacheAnalysisWindowSamples = snap.CacheAnalysis.AnalysisWindowCount
+		vm.CacheAnalysisUsableSamples = snap.CacheAnalysis.UsableSampleCount
+		vm.CacheAnalysisAvailability = snap.CacheAnalysis.Availability
+		if vm.CacheAnalysisObservedSamples == 0 {
+			vm.CacheAnalysisObservedSamples = snap.CacheAnalysis.RequestSamples
+		}
 		vm.CacheAnalysisReadShare = snap.CacheAnalysis.CacheReadShare
 		vm.CacheAnalysisCreationShare = snap.CacheAnalysis.CacheCreationShare
 		vm.CacheAnalysisFreshShare = snap.CacheAnalysis.FreshInputShare
@@ -887,9 +901,11 @@ func (vm *ViewModel) Expanded(config RenderConfig) string {
 	fmt.Fprintf(&b, "%s%s%s %s\n", bullet, config.colorize("Last failure", ColorWhite), sep, lastFailure)
 
 	// Cache analysis
-	if vm.CacheAnalysisRequestSamples > 0 {
+	if vm.CacheAnalysisObservedSamples > 0 {
 		fmt.Fprintln(&b)
-		fmt.Fprintf(&b, "%sCache Analysis (%d unique samples):\n", bullet, vm.CacheAnalysisRequestSamples)
+		fmt.Fprintf(&b, "%sCache Analysis (%d observed, %d analyzed, %d usable; %s):\n",
+			bullet, vm.CacheAnalysisObservedSamples, vm.CacheAnalysisWindowSamples,
+			vm.CacheAnalysisUsableSamples, vm.CacheAnalysisAvailability)
 		readShare := formatPct(vm.CacheAnalysisReadShare)
 		creationShare := formatPct(vm.CacheAnalysisCreationShare)
 		freshShare := formatPct(vm.CacheAnalysisFreshShare)

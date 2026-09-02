@@ -68,6 +68,18 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int
 	if cmd == "companion" {
 		return cmdCompanion(state.Paths{}, rest, stdout, stderr)
 	}
+	if cmd == "fi-status" {
+		if printCmdHelp(stdout, stderr, "fi-status", rest) {
+			return 0
+		}
+		return cmdFIStatus(rest, stdout, stderr)
+	}
+	automaticStdin := (cmd == "status" || cmd == "snapshot" || cmd == "render") && stdinHasData(stdin)
+	if automaticStdin && !runtime.EvaluateForClient(runtime.ClientClaudeCode).Active {
+		// Automatic status-line surfaces are a true no-op for non-FreeInference
+		// Claude sessions: no paths, locks, or state directories are created.
+		return 0
+	}
 
 	paths, err := state.NewPaths()
 	if err != nil {
@@ -76,21 +88,30 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int
 	}
 
 	// Derive an activation identity so global state is namespaced under
-	// providers/<id>/ and different endpoints/keys don't share data.
-	activation := runtime.Evaluate()
+	// providers/<id>/ and different endpoints/keys don't share data. When the
+	// command names a client, resolve that client's actual route; a generic
+	// shell credential is not evidence that the named client uses FreeInference.
+	activation := activationForCLICommand(cmd, rest)
+	if automaticStdin {
+		activation = runtime.EvaluateForClient(runtime.ClientClaudeCode)
+	}
 
 	// Commands that read/write provider-level state (models, health, circuit
 	// breakers, account usage) require an active FreeInference runtime.
 	// Session-only commands (sessions, snapshot, context, render) may use
 	// unnamespaced paths because session state is independent of the provider.
 	requiresActiveProvider := map[string]bool{
-		"status":  true,
 		"models":  true,
-		"report":  true,
 		"refresh": true,
-		"cache":   true,
 	}
 	needsProviderState := requiresActiveProvider[cmd]
+	// An interactive status lookup without an explicit session is a live
+	// provider view. An explicit session is a historical diagnostic and remains
+	// readable after activation ends. Automatic status-line input is handled by
+	// the strict no-op gate above.
+	if cmd == "status" && !automaticStdin && !explicitSessionRequested(rest) {
+		needsProviderState = true
+	}
 
 	if !activation.Active {
 		if activation.Disabled {
@@ -101,6 +122,9 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int
 			}
 			fmt.Fprintf(stderr, "         All hooks and automatic features are suppressed.\n")
 			fmt.Fprintf(stderr, "         Run \"freeinference companion enable\" to re-enable.\n")
+		}
+		if activation.Disabled && (cmd == "status" || cmd == "report") {
+			return 1
 		}
 		if needsProviderState {
 			if !activation.Disabled {
@@ -199,6 +223,41 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int
 	}
 }
 
+func activationForCLICommand(cmd string, args []string) runtime.Activation {
+	client := ""
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--client" && i+1 < len(args) {
+			client = args[i+1]
+			i++
+		}
+	}
+	// An explicit client selector always wins. The automatic hook and
+	// status-line paths use EvaluateForClient directly.
+	if client != "" {
+		switch client {
+		case schema.ClientClaudeCode:
+			return runtime.EvaluateForClient(runtime.ClientClaudeCode)
+		case schema.ClientCodex:
+			return runtime.EvaluateForClient(runtime.ClientCodex)
+		}
+	}
+
+	activation := runtime.Evaluate()
+	if !activation.Active {
+		// Interactive/provider commands may be invoked from either client. Use
+		// concrete client evidence when it exists so Claude's Anthropic route
+		// and Codex's selected provider are both valid sources for management
+		// API access. Automatic surfaces do not use this fallback.
+		if claude := runtime.EvaluateForClient(runtime.ClientClaudeCode); claude.Active {
+			return claude
+		}
+		if codex := runtime.EvaluateForClient(runtime.ClientCodex); codex.Active {
+			return codex
+		}
+	}
+	return activation
+}
+
 // cmdVersion implements `freeinference version`, `freeinference --version`, and `freeinference -v`. Supports
 // `--json` for machine-readable output.
 func cmdVersion(args []string, stdout, stderr io.Writer) int {
@@ -251,12 +310,13 @@ Usage:
   freeinference status-line install|uninstall
   freeinference config show|set|reset|path [--json]
   freeinference companion status|enable|disable
+  freeinference fi-status [--json] [--refresh] [--all]
   freeinference version [--json]
   freeinference hook <client> <event>
 
 Environment:
   FREEINFERENCE_API_KEY    FreeInference API credential
-  FREEINFERENCE_BASE_URL   API base URL (default: https://freeinference.org/v1)
+  FREEINFERENCE_BASE_URL   Generic provider API URL (not Claude/Codex activation evidence)
   ANTHROPIC_AUTH_TOKEN     Claude Code credential for the FreeInference Anthropic endpoint
   FI_HEALTH_URL            Health monitoring URL (optional)
   FI_CACHE_DIR             Cache directory (default: ~/.cache/freeinference-companion)
@@ -426,6 +486,17 @@ Flags:
   --help                  Show this help message
 `
 
+	helpFIStatus = `Usage: freeinference fi-status [--json] [--refresh] [--all] [--help]
+
+Fetch the public FreeInference service status without reading local state or sending credentials.
+
+Flags:
+  --json      Output a stable machine-readable status object
+  --refresh   Fetch directly (accepted for scripting; no local cache is used)
+  --all       Include healthy models in human and JSON output
+  --help      Show this help message
+`
+
 	helpStatusLine = `Usage: freeinference status-line install|uninstall|status [--scope user|project|local] [--project <dir>] [--help] [--json]
 
 Install or uninstall the status-line wrapper for Claude Code.
@@ -455,10 +526,10 @@ Flags:
 
 Internal hook entry point for Claude Code and Codex. Never called directly.
 
-Arguments:
-  client    Client type: claude-code or codex
-  event     Event name: SessionStart, SessionEnd, UserPromptSubmit,
-            PreCompact, PostCompact, Stop, StopFailure
+	Arguments:
+	  client    Client type: claude-code or codex
+	  event     Event name: SessionStart, SessionEnd, UserPromptSubmit,
+	            PreCompact, PostCompact, PostModelSwitch, Stop, StopFailure
 `
 )
 
@@ -490,6 +561,8 @@ func printCmdHelp(stdout, stderr io.Writer, cmd string, args []string) bool {
 				fmt.Fprint(stdout, helpRefresh)
 			case "cache":
 				fmt.Fprint(stdout, helpCache)
+			case "fi-status":
+				fmt.Fprint(stdout, helpFIStatus)
 			case "status-line":
 				fmt.Fprint(stdout, helpStatusLine)
 			case "version":

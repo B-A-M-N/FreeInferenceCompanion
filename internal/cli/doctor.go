@@ -54,6 +54,7 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 	add := func(name string, r api.CheckResult) {
 		checks = append(checks, doctorCheck{name, r})
 	}
+	activation := activationForCLICommand("doctor", args)
 
 	// 1. Cache directory exists and is writable.
 	add("Cache directory", checkCacheDir(paths))
@@ -71,12 +72,30 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 	// 5. Status-line wrapper valid.
 	add("Status-line wrapper", checkStatusLineWrapper())
 
-	// 6. Provider detection.
+	// 6. Provider detection. Generic environment detection remains useful for
+	// provider-level setups, while the client-specific checks below prevent a
+	// coincidental shell key from being treated as client evidence.
 	det := adapters.DetectProvider()
-	if det.Confirmed {
+	if activation.Active {
+		add("Provider detection", api.CheckResult{State: api.CheckPass, Detail: "freeinference via " + activation.EndpointSource})
+	} else if det.Confirmed {
 		add("Provider detection", api.CheckResult{State: api.CheckPass, Detail: det.Name + " via " + det.Source})
 	} else {
 		add("Provider detection", api.CheckResult{State: api.CheckUnknown, Detail: "provider unknown — FreeInference features stay quiet"})
+	}
+	claudeActivation := runtime.EvaluateForClient(runtime.ClientClaudeCode)
+	if claudeActivation.Active {
+		add("Claude runtime", api.CheckResult{State: api.CheckPass, Detail: "FreeInference Anthropic route confirmed"})
+	} else {
+		add("Claude runtime", api.CheckResult{State: api.CheckUnknown, Detail: "not confirmed for Claude Code"})
+	}
+	codexActivation := runtime.EvaluateForClient(runtime.ClientCodex)
+	if codexActivation.Active {
+		add("Codex provider", api.CheckResult{State: api.CheckPass, Detail: "selected FreeInference provider confirmed"})
+	} else if codexActivation.InactiveReason == runtime.ReasonCodexProviderUnverified {
+		add("Codex provider", api.CheckResult{State: api.CheckUnknown, Detail: "current Codex provider unverified"})
+	} else {
+		add("Codex provider", api.CheckResult{State: api.CheckUnknown, Detail: "FreeInference is not the selected Codex provider"})
 	}
 
 	// 7. Health source configured.
@@ -95,7 +114,6 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 
 	// 8. Model catalog reachable.
 	// In disabled mode, skip all network-dependent checks.
-	activation := runtime.Evaluate()
 	disabled := os.Getenv("FI_DISABLED") == "1" || activation.Disabled
 	if disabled {
 		// Installation-convenience checks (binary on PATH, hook config,

@@ -234,6 +234,94 @@ func TestRunHookNeverPanics(t *testing.T) {
 	}
 }
 
+func TestAutomaticClaudeStatusIsNoOpForGenericOnlyEnvironment(t *testing.T) {
+	cacheDir := filepath.Join(t.TempDir(), "state")
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("FI_CACHE_DIR", cacheDir)
+	t.Setenv("FREEINFERENCE_BASE_URL", "https://freeinference.org/v1")
+	t.Setenv("FREEINFERENCE_API_KEY", "generic-only-key")
+	t.Setenv("ANTHROPIC_BASE_URL", "")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+
+	var out, errOut strings.Builder
+	code := Run([]string{"freeinference", "status", "--compact"}, strings.NewReader(`{"session_id":"ordinary","model":{"id":"m"}}`), &out, &errOut)
+	if code != 0 || out.Len() != 0 || errOut.Len() != 0 {
+		t.Fatalf("generic-only automatic status leaked output: code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	if _, err := os.Stat(cacheDir); !os.IsNotExist(err) {
+		t.Fatalf("inactive automatic status created state directory: err=%v", err)
+	}
+}
+
+func TestInactiveClaudeHookDoesNotCreateState(t *testing.T) {
+	cacheDir := filepath.Join(t.TempDir(), "state")
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("FI_CACHE_DIR", cacheDir)
+	t.Setenv("FREEINFERENCE_BASE_URL", "https://freeinference.org/v1")
+	t.Setenv("FREEINFERENCE_API_KEY", "generic-only-key")
+	t.Setenv("ANTHROPIC_BASE_URL", "")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+
+	var out, errOut strings.Builder
+	code := Run([]string{"freeinference", "hook", "claude-code", "SessionStart"}, strings.NewReader(`{"session_id":"ordinary","model":"m"}`), &out, &errOut)
+	if code != 0 || out.Len() != 0 || errOut.Len() != 0 {
+		t.Fatalf("inactive hook leaked output: code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	if _, err := os.Stat(cacheDir); !os.IsNotExist(err) {
+		t.Fatalf("inactive hook created state directory: err=%v", err)
+	}
+}
+
+func TestHistoricalSnapshotRemainsInspectableWhenInactive(t *testing.T) {
+	cacheDir := t.TempDir()
+	t.Setenv("FI_CACHE_DIR", cacheDir)
+	t.Setenv("FREEINFERENCE_BASE_URL", "")
+	t.Setenv("FREEINFERENCE_API_KEY", "")
+	t.Setenv("ANTHROPIC_BASE_URL", "")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+
+	paths := state.NewPathsWithDir(cacheDir)
+	snap := minimalSnapshot("historical")
+	snap.Session.Status = schema.SessionCompleted
+	if err := state.SaveSnapshot(paths, schema.ClientClaudeCode, snap.Session.ID, snap); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errOut strings.Builder
+	code := Run([]string{"freeinference", "snapshot", "--session", "historical"}, strings.NewReader(""), &out, &errOut)
+	if code != 0 {
+		t.Fatalf("historical snapshot exit = %d, stderr=%q", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "Historical session — FreeInference is not currently active.") {
+		t.Fatalf("historical snapshot lacked explicit diagnostic label: %q", out.String())
+	}
+}
+
+func TestCodexStatusJSONReportsTelemetryUnavailable(t *testing.T) {
+	input := minimalSnapshot("codex-json")
+	input.Client.Type = schema.ClientCodex
+	input.Provider = schema.ProviderInfo{Name: schema.ProviderFreeInference, Confirmed: true}
+	usedPct := 42.0
+	input.LiveContext = &schema.LiveContext{UsedPercentage: &usedPct}
+	input.CacheAnalysis = &schema.CacheAnalysis{RequestSamples: 4, ObservationCount: 4}
+
+	var out strings.Builder
+	statusJSON(&out, input, nil, false, "", nil, schema.ClientCodex, input.Session.ID, input.Model.ID, input.Provider.Name)
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(out.String()), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"context", "cache"} {
+		section, ok := decoded[field].(map[string]any)
+		if !ok || section["availability"] != "unavailable" || section["reason"] != "client_telemetry_unavailable" {
+			t.Errorf("%s = %#v, want explicit unavailable telemetry", field, decoded[field])
+		}
+	}
+}
+
 // TestDoctorProbeWithInvalidEndpoint is the P0-1 regression test: an invalid
 // API URL combined with `freeinference doctor --probe` must NOT panic. It must skip the
 // inference probe, report the configuration failure, and exit 1 (not a runtime

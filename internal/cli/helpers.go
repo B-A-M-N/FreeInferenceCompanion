@@ -34,7 +34,7 @@ func newAPIClient() (*api.Client, error) {
 		baseURL = customCfg.EndpointIdentity.RequestURL
 		apiKey = customCfg.APIKey
 	} else {
-		activation := runtime.Evaluate()
+		activation := activationForCLICommand("", nil)
 		if activation.Active {
 			baseURL = activation.ManagementBaseURL()
 			switch activation.CredentialSource {
@@ -54,6 +54,17 @@ func newAPIClient() (*api.Client, error) {
 		}
 		if apiKey == "" {
 			apiKey = os.Getenv("FREEINFERENCE_API_KEY")
+		}
+		// Codex stores its selected provider in ~/.codex/config.toml rather
+		// than exporting the runtime endpoint. Use that resolver only when the
+		// ordinary provider-level environment did not produce a client.
+		if baseURL == "" || apiKey == "" {
+			if evidence, resolveErr := runtime.ResolveCodexProviderConfiguration(); resolveErr == nil && evidence.CredentialValue != "" {
+				if endpoint, normalizeErr := api.NormalizeEndpoint(evidence.EndpointURL); normalizeErr == nil && endpoint.IsFI {
+					baseURL = endpoint.Origin + "/v1"
+					apiKey = evidence.CredentialValue
+				}
+			}
 		}
 		if baseURL == "" {
 			baseURL = api.DefaultBaseURL
@@ -122,6 +133,17 @@ func parseClientSessionFlags(args []string) (clientType, sessionID, format strin
 		}
 	}
 	return clientType, sessionID, format, reveal, jsonOut, nil
+}
+
+// explicitSessionRequested distinguishes an intentional historical lookup
+// from an automatic/current-session command. FI_SESSION_ID is equivalent to
+// --session for the diagnostic commands.
+func explicitSessionRequested(args []string) bool {
+	_, sessionID, _, _, _, err := parseClientSessionFlags(args)
+	if err != nil {
+		return false
+	}
+	return sessionID != "" || strings.TrimSpace(os.Getenv("FI_SESSION_ID")) != ""
 }
 
 // resolvedSession pairs a session identity with its loaded snapshot.

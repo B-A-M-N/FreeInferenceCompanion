@@ -21,6 +21,8 @@ type reportData struct {
 	Version          string              `json:"version"`
 	GeneratedAt      string              `json:"generated_at"`
 	Client           string              `json:"client,omitempty"`
+	Historical       bool                `json:"historical,omitempty"`
+	RuntimeActive    bool                `json:"runtime_active"`
 	Session          *reportSession      `json:"session,omitempty"`
 	Health           *reportHealth       `json:"health,omitempty"`
 	AccountUsage     *reportAccountUsage `json:"account_usage,omitempty"`
@@ -37,10 +39,14 @@ type reportSession struct {
 	ProviderConfirmed bool              `json:"provider_confirmed"`
 	ContextUsedPct    *float64          `json:"context_used_pct,omitempty"`
 	ContextLimit      *int64            `json:"context_limit,omitempty"`
+	ContextTelemetry  string            `json:"context_telemetry"`
 	PressureState     string            `json:"pressure_state"`
 	CacheReadShare    *float64          `json:"cache_read_share,omitempty"`
 	CacheTrend        string            `json:"cache_trend,omitempty"`
-	CacheSamples      int               `json:"cache_samples,omitempty"`
+	CacheObserved     int               `json:"cache_observed_samples,omitempty"`
+	CacheAnalyzed     int               `json:"cache_analyzed_samples,omitempty"`
+	CacheUsable       int               `json:"cache_usable_samples,omitempty"`
+	CacheTelemetry    string            `json:"cache_telemetry"`
 	LastFailure       string            `json:"last_failure,omitempty"`
 	LastCompaction    *reportCompaction `json:"last_compaction,omitempty"`
 }
@@ -92,6 +98,8 @@ func cmdReport(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 		Note:        reportNote,
 	}
+	activation := activationForCLICommand("report", args)
+	report.RuntimeActive = activation.Active
 	if gs.Health != nil {
 		report.Health = &reportHealth{
 			Status:    gs.Health.Status,
@@ -117,6 +125,7 @@ func cmdReport(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 	}
 	if resolved != nil {
 		report.Client = resolved.Client
+		report.Historical = !activation.Active && !activation.Disabled
 		report.Session = buildReportSession(resolved.Snap, reveal)
 
 		// Compute budget projection for the markdown report.
@@ -154,14 +163,33 @@ func buildReportSession(snap *schema.Snapshot, reveal bool) *reportSession {
 		ProviderConfirmed: snap.Provider.Confirmed,
 		PressureState:     snap.Pressure.State,
 		ContextLimit:      snap.Model.ContextLength,
+		ContextTelemetry:  "unknown",
+		CacheTelemetry:    "unknown",
 	}
-	if snap.LiveContext != nil {
+	if snap.Client.Type == schema.ClientCodex {
+		rs.ContextTelemetry = "unavailable"
+		rs.CacheTelemetry = "unavailable"
+	}
+	if snap.Client.Type != schema.ClientCodex && snap.LiveContext != nil {
 		rs.ContextUsedPct = snap.LiveContext.UsedPercentage
+		rs.ContextTelemetry = string(snap.LiveContext.TotalTokenSemantics)
+		if rs.ContextTelemetry == "" {
+			rs.ContextTelemetry = "available"
+		}
 	}
-	if snap.CacheAnalysis != nil {
+	if snap.Client.Type != schema.ClientCodex && snap.CacheAnalysis != nil {
 		rs.CacheReadShare = snap.CacheAnalysis.CacheReadShare
 		rs.CacheTrend = snap.CacheAnalysis.Trend
-		rs.CacheSamples = snap.CacheAnalysis.RequestSamples
+		rs.CacheObserved = snap.CacheAnalysis.ObservationCount
+		if rs.CacheObserved == 0 {
+			rs.CacheObserved = snap.CacheAnalysis.RequestSamples
+		}
+		rs.CacheAnalyzed = snap.CacheAnalysis.AnalysisWindowCount
+		rs.CacheUsable = snap.CacheAnalysis.UsableSampleCount
+		rs.CacheTelemetry = string(snap.CacheAnalysis.Availability)
+		if rs.CacheTelemetry == "" {
+			rs.CacheTelemetry = "available"
+		}
 	}
 	if snap.LastFailure != nil {
 		rs.LastFailure = snap.LastFailure.Category
@@ -216,6 +244,9 @@ func printMarkdownReport(stdout io.Writer, report *reportData, reveal bool) {
 		fmt.Fprintln(stdout, "No session resolved. Use --session <id> or see `freeinference sessions`.")
 	} else {
 		s := report.Session
+		if report.Historical {
+			fmt.Fprintln(stdout, "Historical session — FreeInference is not currently active.")
+		}
 		fmt.Fprintln(stdout)
 		fmt.Fprintln(stdout, "--- Session ---")
 		fmt.Fprintf(stdout, "Client:   %s\n", report.Client)
@@ -225,6 +256,8 @@ func printMarkdownReport(stdout io.Writer, report *reportData, reveal bool) {
 		fmt.Fprintf(stdout, "Provider: %s (confirmed: %t)\n", s.Provider, s.ProviderConfirmed)
 		if s.ContextUsedPct != nil {
 			fmt.Fprintf(stdout, "Context:  %.1f%% used\n", *s.ContextUsedPct)
+		} else if s.ContextTelemetry == "unavailable" {
+			fmt.Fprintln(stdout, "Context:  unavailable (Codex does not expose live context telemetry)")
 		} else {
 			fmt.Fprintln(stdout, "Context:  unknown")
 		}
@@ -232,9 +265,11 @@ func printMarkdownReport(stdout io.Writer, report *reportData, reveal bool) {
 			fmt.Fprintf(stdout, "Limit:    %s\n", formatTokenCount(*s.ContextLimit))
 		}
 		fmt.Fprintf(stdout, "Pressure: %s\n", s.PressureState)
-		if s.CacheSamples > 0 {
-			fmt.Fprintf(stdout, "Cache:    %s read share over %d samples (trend: %s)\n",
-				formatPctPtr(s.CacheReadShare), s.CacheSamples, s.CacheTrend)
+		if s.CacheTelemetry == "unavailable" {
+			fmt.Fprintln(stdout, "Cache:    unavailable (Codex does not expose cache telemetry)")
+		} else if s.CacheObserved > 0 {
+			fmt.Fprintf(stdout, "Cache:    %s read share (%d usable of %d observed; trend: %s)\n",
+				formatPctPtr(s.CacheReadShare), s.CacheUsable, s.CacheObserved, s.CacheTrend)
 		}
 		if s.LastCompaction != nil {
 			fmt.Fprintln(stdout)

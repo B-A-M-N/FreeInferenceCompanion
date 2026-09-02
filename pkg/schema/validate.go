@@ -87,6 +87,11 @@ func ValidateSnapshot(s *Snapshot) error {
 	// Token counts must be non-negative when present.
 	if s.LiveContext != nil {
 		lc := s.LiveContext
+		switch lc.TotalTokenSemantics {
+		case "", TokenSemanticsCurrentContext, TokenSemanticsCumulativeSession, TokenSemanticsUnknown:
+		default:
+			return fmt.Errorf("invalid total_token_semantics %q", lc.TotalTokenSemantics)
+		}
 		if lc.TotalInputTokens != nil && *lc.TotalInputTokens < 0 {
 			return fmt.Errorf("total_input_tokens is negative: %d", *lc.TotalInputTokens)
 		}
@@ -101,6 +106,15 @@ func ValidateSnapshot(s *Snapshot) error {
 	// Cache analysis shares, when present, must be in [0, 1] and finite.
 	if s.CacheAnalysis != nil {
 		ca := s.CacheAnalysis
+		switch ca.Availability {
+		case "", CacheTelemetryAvailable, CacheTelemetryPartial,
+			CacheTelemetryUnavailable, CacheTelemetryUnsupported, CacheTelemetryStale:
+		default:
+			return fmt.Errorf("invalid cache telemetry availability %q", ca.Availability)
+		}
+		if ca.RequestSamples < 0 || ca.ObservationCount < 0 || ca.UsableSampleCount < 0 || ca.AnalysisWindowCount < 0 {
+			return errors.New("cache analysis counts must be non-negative")
+		}
 		if ca.CacheReadShare != nil {
 			v := *ca.CacheReadShare
 			if math.IsNaN(v) || math.IsInf(v, 0) {
@@ -184,6 +198,24 @@ func MigrateSnapshot(s *Snapshot) error {
 			// will rebuild it on the next status-line update.
 			s.CacheAnalysis = nil
 			s.SchemaVersion = 2
+		case 2:
+			// v2 → v3: v2 did not record whether Claude total tokens were
+			// current-context or cumulative-session values. Preserve existing
+			// observations but mark the semantics unknown so no old cumulative
+			// counter is used as active context. New cache counters are rebuilt
+			// by the next status-line update.
+			if s.LiveContext != nil && s.LiveContext.TotalTokenSemantics == "" {
+				s.LiveContext.TotalTokenSemantics = TokenSemanticsUnknown
+			}
+			if s.CacheAnalysis != nil {
+				if s.CacheAnalysis.ObservationCount == 0 {
+					s.CacheAnalysis.ObservationCount = s.CacheAnalysis.RequestSamples
+				}
+				if s.CacheAnalysis.Availability == "" {
+					s.CacheAnalysis.Availability = CacheTelemetryUnavailable
+				}
+			}
+			s.SchemaVersion = 3
 		default:
 			return fmt.Errorf("%w: no migration from %d", ErrUnsupportedSchema, s.SchemaVersion)
 		}

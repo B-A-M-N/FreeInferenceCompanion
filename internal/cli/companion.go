@@ -30,7 +30,7 @@ func cmdCompanion(paths state.Paths, args []string, stdout, stderr io.Writer) in
 
 	switch subcommand {
 	case "status":
-		activation := runtime.Evaluate()
+		activation := activationForCLICommand("companion", nil)
 		if jsonOut {
 			enc := json.NewEncoder(stdout)
 			enc.SetIndent("", "  ")
