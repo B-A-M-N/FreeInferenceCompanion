@@ -79,7 +79,7 @@ func CacheTTLWarningMessage(idleMinutes int, activeTokens int64) string {
 	tokens := formatTokenCountBrief(activeTokens)
 	return fmt.Sprintf(
 		"FreeInference: prompt cache may have expired (idle %dm without confirmed TTL data). "+
-			"Your next request might re-read ~%s of context at full price.",
+			"Your next request may need to rebuild the cached prefix (~%s of context).",
 		idleMinutes, tokens)
 }
 
@@ -137,23 +137,23 @@ func EvaluateCacheTTLExpiryV2(snap *schema.Snapshot, activeTokens int64, lastEve
 // distinguishes known vs. unknown TTL data.
 //
 // If CacheTTLSeconds is nil: "FreeInference: prompt cache may have expired
-// (idle Xm without confirmed TTL data). Your next request might re-read
-// context at full price."
+// (idle Xm without confirmed TTL data). Your next request may need to rebuild
+// the cached prefix."
 //
 // If CacheTTLSeconds is set: "FreeInference: prompt cache expired (provider
-// TTL: Xs, idle Xm). Your next request will re-read context at full price."
+// TTL: Xs, idle Xm). Your next request may need to rebuild the cached prefix."
 func CacheTTLWarningMessageV2(snap *schema.Snapshot, idleMinutes int, activeTokens int64) string {
 	if snap == nil || snap.CacheTiming == nil || snap.CacheTiming.CacheTTLSeconds == nil {
 		return fmt.Sprintf(
 			"FreeInference: prompt cache may have expired (idle %dm without confirmed TTL data). "+
-				"Your next request might re-read context at full price.",
+				"Your next request may need to rebuild the cached prefix.",
 			idleMinutes)
 	}
 
 	providerTTL := *snap.CacheTiming.CacheTTLSeconds
 	return fmt.Sprintf(
 		"FreeInference: prompt cache expired (provider TTL: %ds, idle %dm). "+
-			"Your next request will re-read context at full price.",
+			"Your next request may need to rebuild the cached prefix.",
 		providerTTL, idleMinutes)
 }
 

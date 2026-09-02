@@ -611,9 +611,9 @@ func (a *ClaudeAdapter) HandleUserPromptSubmitWith(input *schema.ClaudeHookInput
 			// 3. Cache warning state
 			cacheDecision := engine.QualifyCacheWarning(snap, ActiveContextTokens(snap), true, now)
 
-			// 4. Cache TTL expiry warning state. The prompt cache evaporates
-			// after ~5min idle; warn the user that their next request will
-			// pay full price for the entire context. Only evaluated when
+			// 4. Cache TTL expiry warning state. Warn only when the provider has
+			// confirmed a cache TTL; the companion cannot observe billing or
+			// guarantee that every cache layer will miss. Only evaluated when
 			// context warning won't show (context is urgent safety; TTL is
 			// cost — but both matter, so TTL gets priority over projection
 			// and cache-low because it's the most actionable cost signal).

@@ -55,8 +55,13 @@ func TestActivationForClient_ClaudeRejectsOffHostAndConflictingRoutes(t *testing
 
 	t.Setenv("ANTHROPIC_BASE_URL", "https://freeinference.org/anthropic")
 	t.Setenv("FREEINFERENCE_BASE_URL", "https://freeinference.org/v1")
-	if a := EvaluateForClient(ClientClaudeCode); a.Active || a.InactiveReason != ReasonConflictingEndpoints {
-		t.Fatalf("conflicting runtime routes must remain inactive: %+v", a)
+	if a := EvaluateForClient(ClientClaudeCode); !a.Active {
+		t.Fatalf("unrelated runtime routes must not disable Claude: %+v", a)
+	}
+
+	t.Setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+	if a := EvaluateForClient(ClientClaudeCode); !a.Active {
+		t.Fatalf("unrelated OpenAI route must not disable Claude: %+v", a)
 	}
 }
 

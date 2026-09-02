@@ -316,6 +316,12 @@ func TestCacheTTLWarningMessageV2Messages(t *testing.T) {
 	if !containsString(msg2, "idle 8m") {
 		t.Errorf("expected 'idle 8m', got: %s", msg2)
 	}
+	if !containsString(msg2, "may need to rebuild the cached prefix") {
+		t.Errorf("known TTL should explain the possible rebuild, got: %s", msg2)
+	}
+	if containsString(msg2, "full price") || containsString(msg2, "will re-read") {
+		t.Errorf("known TTL should not overclaim billing or cache behavior, got: %s", msg2)
+	}
 	// Should NOT contain uncertainty language when TTL is known.
 	if containsString(msg2, "may have") {
 		t.Errorf("known TTL should not use uncertain language, got: %s", msg2)

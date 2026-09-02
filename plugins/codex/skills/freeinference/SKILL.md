@@ -20,7 +20,13 @@ unauthenticated; it does not require the Codex provider to be active.
 
 ```bash
 freeinference fi-status --json
+freeinference fi-status --problems
+freeinference fi-status --details
 ```
+
+All models are shown by default. Use `--problems`/`--down` for only down or
+unknown models. `--refresh` and `--all` remain deprecated compatibility
+no-ops.
 
 ### `freeinference status`
 

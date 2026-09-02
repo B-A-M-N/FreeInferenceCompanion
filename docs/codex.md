@@ -106,6 +106,11 @@ Codex provider/session boundaries are intentional:
 therefore report `unavailable`; they do not infer zeros from absent Codex
 telemetry.
 
+When Codex does not expose its active profile to child commands, provider
+selection is reported as unverified. The companion remains fail-closed rather
+than treating a generic FreeInference key as proof that the current Codex
+session uses that provider.
+
 After installation, these skills are available:
 
 - `$freeinference-status`

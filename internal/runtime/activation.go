@@ -402,19 +402,15 @@ func evaluateClaudeActivation(a Activation, evidence ClientEvidence) Activation 
 	a.Client = ClientClaudeCode
 	a.RuntimeKind = RuntimeAnthropic
 
-	// Claude Code consumes ANTHROPIC_BASE_URL. Any other runtime endpoint in
-	// the same process makes the selected route ambiguous, even if origins
-	// happen to match but protocol paths differ.
+	// Claude Code consumes ANTHROPIC_BASE_URL. Client-specific activation must
+	// evaluate Claude's route and credential together; unrelated OpenAI or
+	// companion-native variables in the parent shell are not Claude evidence
+	// and do not make this selected runtime ambiguous.
 	anthropicURL := os.Getenv("ANTHROPIC_BASE_URL")
-	otherEndpoint := firstOtherEndpoint("ANTHROPIC_BASE_URL")
 	if strings.TrimSpace(anthropicURL) == "" {
 		a.EndpointPresent = false
 	} else {
 		a.EndpointPresent = true
-	}
-	if otherEndpoint != "" {
-		a.InactiveReason = ReasonConflictingEndpoints
-		return a
 	}
 
 	credSource, credValue := claudeCredential()
@@ -508,18 +504,6 @@ func evaluateCodexActivation(a Activation, evidence ClientEvidence) Activation {
 	a.Active = true
 	a.capturedCredential = evidence.CredentialValue
 	return a
-}
-
-func firstOtherEndpoint(selected string) string {
-	for _, name := range []string{"FREEINFERENCE_BASE_URL", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL"} {
-		if name == selected {
-			continue
-		}
-		if strings.TrimSpace(os.Getenv(name)) != "" {
-			return name
-		}
-	}
-	return ""
 }
 
 func claudeCredential() (CredentialSource, string) {

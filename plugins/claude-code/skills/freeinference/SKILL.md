@@ -21,7 +21,12 @@ plugin the namespaced slash command is `/freeinference-companion:fi-status`.
 ```bash
 freeinference fi-status
 freeinference fi-status --json
+freeinference fi-status --problems
+freeinference fi-status --details
 ```
+
+All models are shown by default. `--problems`/`--down` filters to down or
+unknown models; `--refresh` and `--all` are deprecated compatibility no-ops.
 
 ### `freeinference status`
 

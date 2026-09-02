@@ -91,7 +91,7 @@ surfaces the user already has:
 | `freeinference doctor [--probe --model <name>]` | Diagnose connectivity and configuration |
 | `freeinference report [--client <type>] [--session <id>] [--format markdown\|json]` | Generate a sanitized support report (includes budget projection when the provider capability is available) |
 | `freeinference dashboard [--status] [--print-url]` | Open FreeInference account dashboard (`--status` for service health page) |
-| `freeinference fi-status [--json] [--refresh] [--all]` | Fetch public service status without credentials or local session state |
+| `freeinference fi-status [--json] [--problems|--down] [--details]` | Fetch public service status without credentials or local session state; all models are shown by default |
 | `freeinference context [--session <id>]` | Show context pressure information |
 | `freeinference cache [--session <id>]` | Show cache efficiency pattern classification and likely diagnoses |
 | `freeinference refresh [--force] [--if-stale --detach] [--worker models\|health\|account-usage]` | Refresh cached provider metadata |
@@ -180,12 +180,11 @@ reserve (default 16,000 tokens). Confidence is labeled `low` or `medium` —
 never `high` in v0.1.0 because the companion does not see the full request
 body the client sends.
 
-Cache TTL expiry warnings may fire when a session has been idle past a
-hypothetical prompt cache lifetime (~5 minutes). The next request might
-re-read context at full price if the cached prefix has evicted. The
-warning suggests sending a short warm-up message first to refill the
-cache before the real query. Gated on ≥10K active context and a
-30-minute cooldown.
+Cache-TTL expiry warnings are emitted only when a provider-confirmed TTL is
+available. Without provider TTL telemetry, Companion does not infer cache
+expiry from idle time. When the provider confirms expiry, the warning says
+the next request may need to rebuild the cached prefix. Gated on ≥10K active
+context and a 30-minute cooldown.
 
 ### Cache miss pattern attribution
 

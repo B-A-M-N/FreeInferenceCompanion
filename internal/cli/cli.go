@@ -310,7 +310,7 @@ Usage:
   freeinference status-line install|uninstall
   freeinference config show|set|reset|path [--json]
   freeinference companion status|enable|disable
-  freeinference fi-status [--json] [--refresh] [--all]
+  freeinference fi-status [--json] [--problems|--down] [--details] [--fail-degraded] [--refresh] [--all]
   freeinference version [--json]
   freeinference hook <client> <event>
 
@@ -486,15 +486,19 @@ Flags:
   --help                  Show this help message
 `
 
-	helpFIStatus = `Usage: freeinference fi-status [--json] [--refresh] [--all] [--help]
+	helpFIStatus = `Usage: freeinference fi-status [--json] [--problems|--down] [--details] [--fail-degraded] [--refresh] [--all] [--help]
 
 Fetch the public FreeInference service status without reading local state or sending credentials.
 
 Flags:
-  --json      Output a stable machine-readable status object
-  --refresh   Fetch directly (accepted for scripting; no local cache is used)
-  --all       Include healthy models in human and JSON output
-  --help      Show this help message
+  --json           Output a stable machine-readable status object
+  --problems       Show only down or unknown models
+  --down           Alias for --problems
+  --details        Include metric ranges, completion tokens, and state duration
+  --fail-degraded  Exit 1 when any model is down
+  --refresh        Deprecated compatibility no-op; every run fetches directly
+  --all            Deprecated compatibility no-op; all models are shown by default
+  --help           Show this help message
 `
 
 	helpStatusLine = `Usage: freeinference status-line install|uninstall|status [--scope user|project|local] [--project <dir>] [--help] [--json]

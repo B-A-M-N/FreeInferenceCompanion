@@ -1,0 +1,148 @@
+{
+  "total": 9,
+  "healthy": 8,
+  "unhealthy": 1,
+  "cycle": {
+    "ok": true,
+    "checkedAt": "2026-09-02T06:42:10.751Z",
+    "error": null
+  },
+  "models": [
+    {
+      "modelId": "bge-m3",
+      "latest": {
+        "ok": true,
+        "checkedAt": "2026-09-02T06:41:14.367Z",
+        "latencyMs": 85,
+        "ttftMs": null,
+        "completionTokens": null,
+        "throughputTps": null,
+        "error": null
+      },
+      "uptimeRatio": 0.99,
+      "history": [
+        {"ok": true, "checkedAt": "2026-09-02T05:41:10.090Z", "latencyMs": 96, "ttftMs": null, "completionTokens": null, "throughputTps": null, "error": null},
+        {"ok": true, "checkedAt": "2026-09-02T06:01:10.755Z", "latencyMs": 78, "ttftMs": null, "completionTokens": null, "throughputTps": null, "error": null},
+        {"ok": true, "checkedAt": "2026-09-02T06:21:12.019Z", "latencyMs": 97, "ttftMs": null, "completionTokens": null, "throughputTps": null, "error": null},
+        {"ok": true, "checkedAt": "2026-09-02T06:41:14.367Z", "latencyMs": 85, "ttftMs": null, "completionTokens": null, "throughputTps": null, "error": null}
+      ],
+      "spark": [
+        {"ok": true, "checkedAt": "2026-09-02T06:21:12.019Z", "latencyMs": 97, "ttftMs": null, "completionTokens": null, "throughputTps": null, "error": null},
+        {"ok": true, "checkedAt": "2026-09-02T06:41:14.367Z", "latencyMs": 85, "ttftMs": null, "completionTokens": null, "throughputTps": null, "error": null}
+      ]
+    },
+    {
+      "modelId": "deepseek-v4-flash",
+      "latest": {"ok": true, "checkedAt": "2026-09-02T06:41:12.835Z", "latencyMs": 1532, "ttftMs": 193, "completionTokens": 552, "throughputTps": 411.5, "error": null},
+      "uptimeRatio": 1,
+      "history": [
+        {"ok": true, "checkedAt": "2026-09-02T06:01:08.806Z", "latencyMs": 1949, "ttftMs": 281, "completionTokens": 580, "throughputTps": 347.12, "error": null},
+        {"ok": true, "checkedAt": "2026-09-02T06:21:10.507Z", "latencyMs": 1512, "ttftMs": 283, "completionTokens": 513, "throughputTps": 416.6, "error": null},
+        {"ok": true, "checkedAt": "2026-09-02T06:41:12.835Z", "latencyMs": 1532, "ttftMs": 193, "completionTokens": 552, "throughputTps": 411.5, "error": null}
+      ],
+      "spark": [
+        {"ok": true, "checkedAt": "2026-09-02T06:21:10.507Z", "latencyMs": 1512, "ttftMs": 283, "completionTokens": 513, "throughputTps": 416.6, "error": null},
+        {"ok": true, "checkedAt": "2026-09-02T06:41:12.835Z", "latencyMs": 1532, "ttftMs": 193, "completionTokens": 552, "throughputTps": 411.5, "error": null}
+      ]
+    },
+    {
+      "modelId": "diffusiongemma",
+      "latest": {"ok": false, "checkedAt": "2026-09-02T06:41:10.674Z", "latencyMs": 60000, "ttftMs": null, "completionTokens": null, "throughputTps": null, "error": "timeout"},
+      "uptimeRatio": 0.78,
+      "history": [
+        {"ok": false, "checkedAt": "2026-09-02T05:41:07.396Z", "latencyMs": 60000, "ttftMs": null, "completionTokens": null, "throughputTps": null, "error": "timeout"},
+        {"ok": false, "checkedAt": "2026-09-02T06:01:06.242Z", "latencyMs": 60000, "ttftMs": null, "completionTokens": null, "throughputTps": null, "error": "timeout"},
+        {"ok": true, "checkedAt": "2026-09-02T06:21:07.675Z", "latencyMs": 17198, "ttftMs": 14953, "completionTokens": 1006, "throughputTps": 58.5, "error": null},
+        {"ok": false, "checkedAt": "2026-09-02T06:41:10.674Z", "latencyMs": 60000, "ttftMs": null, "completionTokens": null, "throughputTps": null, "error": "timeout"}
+      ],
+      "spark": [
+        {"ok": true, "checkedAt": "2026-09-02T06:21:07.675Z", "latencyMs": 17198, "ttftMs": 14953, "completionTokens": 1006, "throughputTps": 58.5, "error": null},
+        {"ok": false, "checkedAt": "2026-09-02T06:41:10.674Z", "latencyMs": 60000, "ttftMs": null, "completionTokens": null, "throughputTps": null, "error": "timeout"}
+      ]
+    },
+    {
+      "modelId": "glm-5.2",
+      "latest": {"ok": true, "checkedAt": "2026-09-02T06:40:44.378Z", "latencyMs": 25102, "ttftMs": 9442, "completionTokens": 1024, "throughputTps": 65.33, "error": null},
+      "uptimeRatio": 0.99,
+      "history": [
+        {"ok": true, "checkedAt": "2026-09-02T06:00:45.838Z", "latencyMs": 16781, "ttftMs": 1732, "completionTokens": 1024, "throughputTps": 67.98, "error": null},
+        {"ok": true, "checkedAt": "2026-09-02T06:20:44.629Z", "latencyMs": 19368, "ttftMs": 2430, "completionTokens": 1024, "throughputTps": 60.4, "error": null},
+        {"ok": true, "checkedAt": "2026-09-02T06:40:44.378Z", "latencyMs": 25102, "ttftMs": 9442, "completionTokens": 1024, "throughputTps": 65.33, "error": null}
+      ],
+      "spark": [
+        {"ok": true, "checkedAt": "2026-09-02T06:20:44.629Z", "latencyMs": 19368, "ttftMs": 2430, "completionTokens": 1024, "throughputTps": 60.4, "error": null},
+        {"ok": true, "checkedAt": "2026-09-02T06:40:44.378Z", "latencyMs": 25102, "ttftMs": 9442, "completionTokens": 1024, "throughputTps": 65.33, "error": null}
+      ]
+    },
+    {
+      "modelId": "glm-5.3",
+      "latest": {"ok": true, "checkedAt": "2026-09-02T06:40:44.378Z", "latencyMs": 24662, "ttftMs": 11006, "completionTokens": 1024, "throughputTps": 74.91, "error": null},
+      "uptimeRatio": 0.95,
+      "history": [
+        {"ok": true, "checkedAt": "2026-09-02T06:00:45.838Z", "latencyMs": 17240, "ttftMs": 3513, "completionTokens": 1024, "throughputTps": 74.52, "error": null},
+        {"ok": true, "checkedAt": "2026-09-02T06:20:44.629Z", "latencyMs": 16968, "ttftMs": 1997, "completionTokens": 1024, "throughputTps": 68.33, "error": null},
+        {"ok": true, "checkedAt": "2026-09-02T06:40:44.378Z", "latencyMs": 24662, "ttftMs": 11006, "completionTokens": 1024, "throughputTps": 74.91, "error": null}
+      ],
+      "spark": [
+        {"ok": true, "checkedAt": "2026-09-02T06:20:44.629Z", "latencyMs": 16968, "ttftMs": 1997, "completionTokens": 1024, "throughputTps": 68.33, "error": null},
+        {"ok": true, "checkedAt": "2026-09-02T06:40:44.378Z", "latencyMs": 24662, "ttftMs": 11006, "completionTokens": 1024, "throughputTps": 74.91, "error": null}
+      ]
+    },
+    {
+      "modelId": "glm-5.3-flash",
+      "latest": {"ok": true, "checkedAt": "2026-09-02T06:40:44.378Z", "latencyMs": 22299, "ttftMs": 1110, "completionTokens": 1024, "throughputTps": 48.28, "error": null},
+      "uptimeRatio": 0.96,
+      "history": [
+        {"ok": true, "checkedAt": "2026-09-02T06:00:45.838Z", "latencyMs": 19279, "ttftMs": 1216, "completionTokens": 1024, "throughputTps": 56.64, "error": null},
+        {"ok": true, "checkedAt": "2026-09-02T06:20:44.629Z", "latencyMs": 21970, "ttftMs": 1903, "completionTokens": 1024, "throughputTps": 50.98, "error": null},
+        {"ok": true, "checkedAt": "2026-09-02T06:40:44.378Z", "latencyMs": 22299, "ttftMs": 1110, "completionTokens": 1024, "throughputTps": 48.28, "error": null}
+      ],
+      "spark": [
+        {"ok": true, "checkedAt": "2026-09-02T06:20:44.629Z", "latencyMs": 21970, "ttftMs": 1903, "completionTokens": 1024, "throughputTps": 50.98, "error": null},
+        {"ok": true, "checkedAt": "2026-09-02T06:40:44.378Z", "latencyMs": 22299, "ttftMs": 1110, "completionTokens": 1024, "throughputTps": 48.28, "error": null}
+      ]
+    },
+    {
+      "modelId": "kimi-k2.7-code",
+      "latest": {"ok": true, "checkedAt": "2026-09-02T06:41:09.040Z", "latencyMs": 10684, "ttftMs": 7944, "completionTokens": 1037, "throughputTps": 378.1, "error": null},
+      "uptimeRatio": 0.94,
+      "history": [
+        {"ok": true, "checkedAt": "2026-09-02T06:01:03.078Z", "latencyMs": 13870, "ttftMs": 2886, "completionTokens": 437, "throughputTps": 39.69, "error": null},
+        {"ok": true, "checkedAt": "2026-09-02T06:21:03.997Z", "latencyMs": 6510, "ttftMs": 3793, "completionTokens": 485, "throughputTps": 178.14, "error": null},
+        {"ok": true, "checkedAt": "2026-09-02T06:41:09.040Z", "latencyMs": 10684, "ttftMs": 7944, "completionTokens": 1037, "throughputTps": 378.1, "error": null}
+      ],
+      "spark": [
+        {"ok": true, "checkedAt": "2026-09-02T06:21:03.997Z", "latencyMs": 6510, "ttftMs": 3793, "completionTokens": 485, "throughputTps": 178.14, "error": null},
+        {"ok": true, "checkedAt": "2026-09-02T06:41:09.040Z", "latencyMs": 10684, "ttftMs": 7944, "completionTokens": 1037, "throughputTps": 378.1, "error": null}
+      ]
+    },
+    {
+      "modelId": "minimax-m3",
+      "latest": {"ok": true, "checkedAt": "2026-09-02T06:41:06.677Z", "latencyMs": 6158, "ttftMs": 1034, "completionTokens": 567, "throughputTps": 110.46, "error": null},
+      "uptimeRatio": 0.96,
+      "history": [
+        {"ok": true, "checkedAt": "2026-09-02T06:01:02.619Z", "latencyMs": 6187, "ttftMs": 737, "completionTokens": 586, "throughputTps": 107.34, "error": null},
+        {"ok": true, "checkedAt": "2026-09-02T06:21:01.597Z", "latencyMs": 11744, "ttftMs": 1641, "completionTokens": 753, "throughputTps": 74.43, "error": null},
+        {"ok": true, "checkedAt": "2026-09-02T06:41:06.677Z", "latencyMs": 6158, "ttftMs": 1034, "completionTokens": 567, "throughputTps": 110.46, "error": null}
+      ],
+      "spark": [
+        {"ok": true, "checkedAt": "2026-09-02T06:21:01.597Z", "latencyMs": 11744, "ttftMs": 1641, "completionTokens": 753, "throughputTps": 74.43, "error": null},
+        {"ok": true, "checkedAt": "2026-09-02T06:41:06.677Z", "latencyMs": 6158, "ttftMs": 1034, "completionTokens": 567, "throughputTps": 110.46, "error": null}
+      ]
+    },
+    {
+      "modelId": "qwen3.6-35b",
+      "latest": {"ok": true, "checkedAt": "2026-09-02T06:41:09.480Z", "latencyMs": 1194, "ttftMs": 90, "completionTokens": 282, "throughputTps": 254.53, "error": null},
+      "uptimeRatio": 1,
+      "history": [
+        {"ok": true, "checkedAt": "2026-09-02T06:01:05.117Z", "latencyMs": 1125, "ttftMs": 110, "completionTokens": 258, "throughputTps": 253.2, "error": null},
+        {"ok": true, "checkedAt": "2026-09-02T06:21:06.599Z", "latencyMs": 1076, "ttftMs": 115, "completionTokens": 249, "throughputTps": 258.06, "error": null},
+        {"ok": true, "checkedAt": "2026-09-02T06:41:09.480Z", "latencyMs": 1194, "ttftMs": 90, "completionTokens": 282, "throughputTps": 254.53, "error": null}
+      ],
+      "spark": [
+        {"ok": true, "checkedAt": "2026-09-02T06:21:06.599Z", "latencyMs": 1076, "ttftMs": 115, "completionTokens": 249, "throughputTps": 258.06, "error": null},
+        {"ok": true, "checkedAt": "2026-09-02T06:41:09.480Z", "latencyMs": 1194, "ttftMs": 90, "completionTokens": 282, "throughputTps": 254.53, "error": null}
+      ]
+    }
+  ]
+}
