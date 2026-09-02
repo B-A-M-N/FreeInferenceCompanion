@@ -1,0 +1,7 @@
+{
+  "session_id": "codex-fixture-session",
+  "hook_event_name": "Stop",
+  "model": "glm-5.1",
+  "turn_id": "turn-fixture-001",
+  "permission_mode": "default"
+}

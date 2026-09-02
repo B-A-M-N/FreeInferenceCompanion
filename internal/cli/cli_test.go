@@ -274,6 +274,80 @@ func TestInactiveClaudeHookDoesNotCreateState(t *testing.T) {
 	}
 }
 
+func TestAutomaticRefreshRequiresExplicitOptIn(t *testing.T) {
+	t.Setenv("FI_AUTO_REFRESH", "")
+	if automaticRefreshEnabled() {
+		t.Fatal("automatic lifecycle refresh must be disabled by default")
+	}
+
+	t.Setenv("FI_AUTO_REFRESH", "1")
+	if !automaticRefreshEnabled() {
+		t.Fatal("FI_AUTO_REFRESH=1 must enable automatic lifecycle refresh")
+	}
+}
+
+func TestClaudeHookStillDispatchesStopFailure(t *testing.T) {
+	paths := state.NewPathsWithDir(t.TempDir())
+	var out strings.Builder
+
+	handleClaudeHook(paths, "SessionStart",
+		strings.NewReader(`{"session_id":"claude-stop-failure","model":"m1"}`),
+		&out, runtime.Activation{})
+	handleClaudeHook(paths, "StopFailure",
+		strings.NewReader(`{"session_id":"claude-stop-failure","error":"429 rate limit"}`),
+		&out, runtime.Activation{})
+
+	snap, err := state.LoadSnapshot(paths, schema.ClientClaudeCode, "claude-stop-failure")
+	if err != nil || snap == nil || snap.LastFailure == nil {
+		t.Fatalf("Claude StopFailure was not dispatched: snap=%#v err=%v", snap, err)
+	}
+	events, err := state.ReadEvents(paths, schema.ClientClaudeCode, "claude-stop-failure", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Type == state.EventTurnFailed {
+			return
+		}
+	}
+	t.Fatal("Claude StopFailure did not append turn_failed event")
+}
+
+func TestCodexFooterCommandIsReversible(t *testing.T) {
+	home := t.TempDir()
+	codexHome := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(codexHome, 0700); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(codexHome, "config.toml")
+	original := "[tui]\nstatus_line = [\"model\"]\n"
+	if err := os.WriteFile(configPath, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", codexHome)
+
+	var out, errOut strings.Builder
+	if code := Run([]string{"freeinference", "codex-footer", "install"}, strings.NewReader(""), &out, &errOut); code != 0 {
+		t.Fatalf("install exit=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := Run([]string{"freeinference", "codex-footer", "status", "--json"}, strings.NewReader(""), &out, &errOut); code != 0 || !strings.Contains(out.String(), `"status": "installed"`) {
+		t.Fatalf("status exit=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	if code := Run([]string{"freeinference", "codex-footer", "uninstall"}, strings.NewReader(""), &out, &errOut); code != 0 {
+		t.Fatalf("uninstall exit=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	restored, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(restored) != original {
+		t.Fatalf("footer command did not restore config: %q", restored)
+	}
+}
+
 func TestHistoricalSnapshotRemainsInspectableWhenInactive(t *testing.T) {
 	cacheDir := t.TempDir()
 	t.Setenv("FI_CACHE_DIR", cacheDir)

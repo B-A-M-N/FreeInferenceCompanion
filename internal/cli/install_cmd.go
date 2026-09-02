@@ -132,7 +132,9 @@ The installer:
   3. Verifies the SHA-256 checksum
   4. Extracts the binary to ~/.local/freeinference/bin/
   5. Symlinks to ~/.local/bin/freeinference (or adds to PATH)
-  6. Extracts plugins to ~/.claude/plugins/ and ~/.codex/plugins/
+  6. Extracts Claude and Codex plugins (including lifecycle hooks)
+  7. Registers the Codex plugin through a local Codex marketplace when the
+     Codex CLI is available; otherwise prints the manual registration command
 
 Flags:
   --manifest <url>     URL of the marketplace.json file (default: GitHub latest release)

@@ -96,11 +96,13 @@ type ProviderInfo struct {
 
 // SessionInfo tracks session lifecycle.
 type SessionInfo struct {
-	ID          string     `json:"id"`
-	StartedAt   time.Time  `json:"started_at"`
-	LastEventAt time.Time  `json:"last_event_at"`
-	EndedAt     *time.Time `json:"ended_at,omitempty"`
-	Status      string     `json:"status"` // "active", "stopped", "completed"
+	ID                string     `json:"id"`
+	StartedAt         time.Time  `json:"started_at"`
+	LastEventAt       time.Time  `json:"last_event_at"`
+	EndedAt           *time.Time `json:"ended_at,omitempty"`
+	Status            string     `json:"status"` // "active", "stopped", "completed"
+	StartSource       string     `json:"start_source,omitempty"`
+	ConversationEpoch int        `json:"conversation_epoch,omitempty"`
 }
 
 // ModelInfo describes the current model.
@@ -225,6 +227,11 @@ type ActivityState struct {
 	TurnStartedAt *time.Time `json:"turn_started_at,omitempty"`
 	TurnEndedAt   *time.Time `json:"turn_ended_at,omitempty"`
 	Confidence    string     `json:"confidence"` // "client-lifecycle"
+	// TurnID and LastTurnID are bounded, client-provided correlation values.
+	// They suppress duplicate or stale lifecycle transitions; prompt text is
+	// never persisted.
+	TurnID     string `json:"turn_id,omitempty"`
+	LastTurnID string `json:"last_turn_id,omitempty"`
 }
 
 // WarningState tracks active and historical warnings.
@@ -388,6 +395,14 @@ type GlobalState struct {
 	AccountUsageCapability *AccountUsageCapability `json:"account_usage_capability"`
 	PublicStatus           *PublicStatusCache      `json:"public_status"`
 	CircuitBreakers        []CircuitBreaker        `json:"circuit_breakers"`
+}
+
+// RefreshThrottle is a small provider-scoped coordination record used by
+// automatic metadata refresh workers. It never represents inference traffic
+// and contains no credentials or upstream response data.
+type RefreshThrottle struct {
+	LastRequestAt *time.Time `json:"last_request_at,omitempty"`
+	CooldownUntil *time.Time `json:"cooldown_until,omitempty"`
 }
 
 // PublicStatusCache stores the last validated unauthenticated service-status

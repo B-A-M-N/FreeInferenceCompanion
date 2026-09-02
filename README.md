@@ -1,6 +1,6 @@
 # FreeInference Companion
 
-Lightweight observability layer for FreeInference-powered coding-agent sessions. Shows live Claude context metrics, rolling cache pattern classification with likely diagnoses, model health, optional account-budget projection, and context-pressure warnings — without adding latency, making network calls from hooks, or sending inference probes without explicit consent. The companion provides conversational management through Claude Code and a Codex skill package so users can query supported state naturally.
+Lightweight observability layer for FreeInference-powered coding-agent sessions. Shows live Claude context metrics, rolling cache pattern classification with likely diagnoses, model health, optional account-budget projection, and context-pressure warnings — without proxying inference traffic, adding inference calls, or sending inference probes without explicit consent. Lifecycle hooks record local state; detached metadata refreshes are opt-in, then protected by shared throttling and rate-limit cooldowns. The companion provides conversational management through Claude Code and Codex plugins so users can query supported state naturally.
 
 **Companion, not proxy.** No prompt interception, no transcript scraping, no automatic failover, no daemon.
 
@@ -27,6 +27,9 @@ freeinference models --refresh
 
 # Install the Claude Code status line (composes with any existing one)
 freeinference status-line install
+
+# Configure Codex's native model/context footer
+freeinference codex-footer install
 ```
 
 Supported platforms: Linux amd64, Linux arm64, macOS amd64, macOS arm64.
@@ -42,15 +45,18 @@ freeinference CLI (Go, static binary)
   │   └── sessions/        # Per-session snapshots and advisory locks
   ├── commands: status, sessions, snapshot, render, models, doctor,
   │             report, failures, dashboard, context, cache, fi-status, run, trace,
-  │             refresh, status-line
+  │             refresh, status-line, codex-footer
   └── hook: freeinference hook claude-code <event>
 
 Claude Code plugin → scripts/run-hook.sh → freeinference hook claude-code <event>
-Codex plugin       → skills only → user-requested CLI diagnostics
+Codex plugin       → hooks/scripts + skills → local lifecycle recording and diagnostics
 ```
 
 Plugin hooks resolve the `freeinference` binary from `PATH`, the plugin-bundled `bin/freeinference`,
-or `~/.local/bin/freeinference` — and exit 0 no matter what.
+or `~/.local/bin/freeinference` — and exit 0 no matter what. Hook handlers only record local
+state. Session start/end request no upstream work by default. If `FI_AUTO_REFRESH=1` is set,
+stale metadata workers share a one-minute request spacing guard and provider-wide cooldown after
+a rate limit.
 
 ### Where the data shows up
 
@@ -62,10 +68,11 @@ surfaces the user already has:
   installer (`freeinference status-line install`) preserves and replays stdin to any
   prior statusline, so an existing footer segment keeps working alongside
   ours. Nothing takes over the prompt or the transcript.
-- **Codex** — Codex has no arbitrary script-backed statusline in the same
-  sense; we expose the data through `freeinference status` / `freeinference snapshot --json` /
-  `freeinference render` for whoever the user wires in (their shell prompt, DevDesktop,
-  tmux status bar, etc.).
+- **Codex** — Codex owns a native footer configured with
+  `freeinference codex-footer install`; it renders Codex's own model and
+  remaining-context items. Companion lifecycle state remains available through
+  `freeinference status` / `freeinference snapshot --json` /
+  `freeinference render`, while hook telemetry does not scrape that footer.
 - **External integrators** — `freeinference snapshot --json` and `freeinference render --mode line`
   are stable contracts. DevDesktop, tmux, and similar panels can subscribe
   without redesigning core state.
@@ -73,12 +80,12 @@ surfaces the user already has:
 ### Design principles
 
 - **Status line reads live Claude JSON from stdin + cached health/model-monitor data** — zero network, average-latency target only
-- **Hooks do local computation only** — no network, average-latency target only, always fail open (exit 0)
+- **Hooks do local computation only** — no inference/network work in the hook process or by default in lifecycle operation, average-latency target only, always fail open (exit 0); detached stale metadata refresh requires explicit `FI_AUTO_REFRESH=1`
 - **Every session mutation holds a cross-process file lock** — concurrent hooks and status lines coordinate writes; lock contention returns immediately (fail-open) and is counted in `state.DroppedMutations()`
 - **Warnings use JSON `systemMessage`** — never plain stdout, never `additionalContext`, never in model context; no warning → no output at all (zero bytes)
 - **Surface eligibility is gated by seven checks** — runtime active, client matches, session matches, session active, activation identity matches, observation fresh, provider confirmed FreeInference; any gate failing produces zero bytes
 - **Provider detection gates all warnings** — no FreeInference warning or health symbol ever appears in a non-FreeInference session
-- **Background refreshes are detached and coalesced across processes** — file-lock single-flight, per-endpoint circuit breakers (2→30min backoff), `Retry-After` honored; public model status uses no credentials
+- **Opt-in background refreshes are detached and coalesced across processes** — stale caches, one-minute shared spacing for authenticated metadata requests, provider-wide cooldown after rate limits, per-endpoint circuit breakers (2→30min backoff), `Retry-After` honored; public model status uses no credentials
 - **No inference probes for monitoring** — `freeinference doctor --probe --model <name>` is manual only, marked `X-Probe: synthetic`
 - **Advisory warnings, never blocking** — context pressure, projection overflow, cache-low with pattern classification and likely diagnosis, cache TTL expiry; all labeled with confidence, all advisory
 - **Schema validation + quarantine** — corrupt or unsupported state files are renamed aside so subsequent writes start fresh; hooks never block on bad state
@@ -105,6 +112,7 @@ surfaces the user already has:
 | `freeinference refresh [--force] [--if-stale --detach] [--worker models\|health\|account-usage\|public-status]` | Refresh cached provider metadata and public model status |
 | `freeinference hook <client> <event>` | Process a lifecycle hook event (internal) |
 | `freeinference status-line install\|uninstall` | Manage the Claude Code status line |
+| `freeinference codex-footer install\|uninstall\|status` | Configure Codex's native model/context footer |
 
 ## Environment
 
@@ -117,7 +125,8 @@ surfaces the user already has:
 | `FI_CACHE_DIR` | `~/.cache/freeinference-companion` | State cache directory |
 | `FI_SESSION_ID` | — | Explicit session override for status/context/report |
 | `FI_PROVIDER` | — | Set to `freeinference` for attribution metadata only. Does NOT activate the companion. Activation requires a supported endpoint and credential. |
-| `FI_NO_BACKGROUND` | — | Set to `1` to disable detached background refresh |
+| `FI_AUTO_REFRESH` | `0` | Set to `1` to opt in to stale metadata refreshes from lifecycle hooks |
+| `FI_NO_BACKGROUND` | — | Set to `1` to disable detached background refresh after opting in |
 | `FI_TRACING` | `1` for `freeinference run` | Enable or disable launch-time trace correlation; it does not affect ordinary client launches |
 
 The companion activates only when the current client has an approved
@@ -257,7 +266,8 @@ renders as `—` (em dash), never fabricated as `0%`.
 
 Detailed status surfaces may include cached public monitor data for the
 current model (health, uptime, latency, and check age). The monitor is read
-from `global/public-status.json`; hooks and status-line paths never fetch it
+from `global/public-status.json`; hook processes and status-line paths never
+fetch it (an explicitly opted-in detached worker may refresh it)
 synchronously.
 
 ### Reporting levels
@@ -326,7 +336,7 @@ FreeInference/
 ├── pkg/schema/                # State structs, telemetry contract types
 ├── plugins/
 │   ├── claude-code/           # .claude-plugin/, hooks/, scripts/, skills/
-│   └── codex/                 # .codex-plugin/, skills/ (no lifecycle hooks)
+│   └── codex/                 # .codex-plugin/, hooks/, scripts/, skills/
 └── Makefile
 ```
 

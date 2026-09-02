@@ -31,6 +31,14 @@ const (
 	HealthTTL       = 120 * time.Second
 	AccountUSageTTL = 60 * time.Minute
 	PublicStatusTTL = 20 * time.Minute
+
+	// AutomaticRefreshMinInterval is shared by all authenticated metadata
+	// workers. It prevents several stale workers spawned by one session from
+	// creating a burst against the provider API.
+	AutomaticRefreshMinInterval = time.Minute
+	// AutomaticRateLimitCooldown is the conservative fallback when a provider
+	// returns 429 without a usable Retry-After value.
+	AutomaticRateLimitCooldown = 15 * time.Minute
 )
 
 // Backoff intervals for consecutive failures: 2 → 5 → 15 → 30 minutes.
@@ -123,6 +131,11 @@ func (r *Refresher) WorkerRefresh(worker string) *RefreshResult {
 			result.SkipReason = "cache fresh"
 			return result
 		}
+		if !reserveAutomaticRefresh(r.Paths, now) {
+			result.Skipped = true
+			result.SkipReason = "automatic refresh cooldown"
+			return result
+		}
 		r.refreshModels(result, now)
 	case WorkerHealth:
 		if r.HealthURL == "" {
@@ -133,6 +146,11 @@ func (r *Refresher) WorkerRefresh(worker string) *RefreshResult {
 		if !healthStale(gs, now) {
 			result.Skipped = true
 			result.SkipReason = "cache fresh"
+			return result
+		}
+		if !reserveAutomaticRefresh(r.Paths, now) {
+			result.Skipped = true
+			result.SkipReason = "automatic refresh cooldown"
 			return result
 		}
 		r.refreshHealth(result, now)
@@ -151,6 +169,11 @@ func (r *Refresher) WorkerRefresh(worker string) *RefreshResult {
 		if !accountUsageStale(gs, now) {
 			result.Skipped = true
 			result.SkipReason = "cache fresh"
+			return result
+		}
+		if !reserveAutomaticRefresh(r.Paths, now) {
+			result.Skipped = true
+			result.SkipReason = "automatic refresh cooldown"
 			return result
 		}
 		r.refreshAccountUsage(result, now)
@@ -330,6 +353,11 @@ func publicStatusStale(gs *schema.GlobalState, now time.Time) bool {
 		return true
 	}
 	return false
+}
+
+func reserveAutomaticRefresh(paths state.Paths, now time.Time) bool {
+	allowed, err := state.ReserveRefreshSlot(paths, now, AutomaticRefreshMinInterval)
+	return err == nil && allowed
 }
 
 func breakerOpen(gs *schema.GlobalState, endpoint string, now time.Time) bool {
@@ -673,6 +701,24 @@ func (r *Refresher) recordFailure(endpoint string, cause error, now time.Time) {
 		// (In production this would use structured logging.)
 		_ = err
 	}
+	if isRateLimitFailure(cause) {
+		cooldown := AutomaticRateLimitCooldown
+		if errors.As(cause, &he) && he.RetryAfter > cooldown {
+			cooldown = he.RetryAfter
+		}
+		_ = state.ExtendRefreshCooldown(r.Paths, now.Add(cooldown))
+	}
+}
+
+func isRateLimitFailure(cause error) bool {
+	if cause == nil {
+		return false
+	}
+	var he *api.HTTPError
+	if errors.As(cause, &he) {
+		return he.StatusCode == 429
+	}
+	return failures.Normalize(cause.Error()).Category == failures.RateLimit
 }
 
 func (r *Refresher) resetCircuitBreaker(endpoint string) {

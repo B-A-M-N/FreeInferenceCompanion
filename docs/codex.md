@@ -104,9 +104,70 @@ Claude Code configuration, not a Codex profile.
 ## 4. Optional: FreeInference Companion plugin
 
 The companion plugin is separate from the model-provider configuration above.
-It is a **skill-only** package: it exposes user-requested provider diagnostics
-and model discovery, but does not install lifecycle hooks or record automatic
-Codex session telemetry. It does not proxy prompts or select models for you.
+It installs Codex lifecycle hooks alongside the diagnostic skills. The hooks
+record bounded session and turn state locally; they do not proxy prompts,
+rewrite requests, or add inference calls. Session start/end perform no
+upstream work by default. If `FI_AUTO_REFRESH=1` is explicitly set, stale
+metadata refreshes run detached, while automatic authenticated refreshes are
+globally spaced by one minute and enter a provider-wide cooldown after a rate
+limit. Explicit `refresh --force` remains a user-requested operation.
+
+After installing or updating the plugin, open `/hooks` in Codex and review /
+trust the current plugin hook definition. Codex deliberately skips changed
+non-managed plugin hooks until they are trusted.
+
+The bundled hook map is intentionally limited to Codex lifecycle events:
+
+| Codex event | Companion behavior |
+| --- | --- |
+| `SessionStart` (`startup`, `resume`, `compact`, `clear`) | Reactivate the existing logical session; only `clear` starts a new conversational epoch. |
+| `UserPromptSubmit` | Record a bounded turn transition and optional `turn_id`; never persist prompt text. |
+| `PreCompact` / `PostCompact` | Record the compaction boundary without inventing token counts or reduction percentages. |
+| `Stop` | End the correlated turn; duplicate or stale `turn_id` deliveries are ignored. |
+| `SessionEnd` | Complete the logical session. |
+
+Codex does not provide `PostModelSwitch` or `StopFailure` in this integration.
+The active model is observed on every lifecycle event that supplies one, and
+model changes are recorded with hook-event provenance.
+
+The normal Companion installer copies the plugin to
+`~/.codex/plugins/freeinference-companion` and, when the Codex CLI is
+available, registers and installs it through a local marketplace. If Codex was
+not on `PATH` during installation, complete registration with:
+
+```bash
+freeinference install
+# For an existing installation:
+freeinference update
+
+codex plugin marketplace add ~/.codex/plugins/freeinference-companion-marketplace
+codex plugin add freeinference-companion@freeinference-companion-local
+```
+
+For a source checkout, the equivalent marketplace-backed install is:
+
+```bash
+codex plugin marketplace add /path/to/FreeInferenceCompanion/codex-marketplace
+codex plugin add freeinference-companion@freeinference-companion-local
+```
+
+The Codex plugin bundle includes its hook runner and platform-matched CLI
+binary, so the hooks do not depend on a separate `freeinference` executable
+already being on `PATH`.
+
+Codex also owns a native footer. To configure Codex to show its own model,
+remaining-context, and current-directory items while preserving existing
+footer items:
+
+```bash
+freeinference codex-footer install
+freeinference codex-footer status
+freeinference codex-footer uninstall
+```
+
+This is native Codex rendering, not scraped screen telemetry. The companion
+does not treat `context-remaining` as a hook field or as live plugin context
+usage.
 
 The stateless service command is available regardless of provider activation:
 
@@ -119,10 +180,11 @@ It makes only an unauthenticated GET to `https://status.freeinference.org/api/st
 
 Codex provider/session boundaries are intentional:
 
-- Supported: provider configuration diagnostics, model discovery, `doctor`,
+- Supported: local lifecycle/session recording, provider configuration
+  diagnostics, model discovery, native Codex footer configuration, `doctor`,
   `dashboard`, and public `fi-status`.
-- Unsupported: automatic lifecycle telemetry, context percentage, cache
-  read/write counts, and compaction effectiveness.
+- Unsupported: live context percentage, cache read/write counts, and
+  compaction effectiveness.
 
 `freeinference context --client codex` and `freeinference cache --client codex`
 therefore report `unavailable`; they do not infer zeros from absent Codex
@@ -155,9 +217,10 @@ After installation, these skills are available:
 - `$freeinference-dashboard`
 - `$freeinference-cache`
 
-Codex does not expose a script-backed status line, live context-window counts,
-or cache-token metrics through this package. Accordingly, unavailable values
-are reported as `unavailable` rather than invented. Use `freeinference models`,
+Codex does not expose an arbitrary script-backed FreeInference status line,
+live context-window counts, or cache-token metrics through this package.
+Accordingly, unavailable values are reported as `unavailable` rather than
+invented. Use `freeinference models`,
 `freeinference doctor`, or `freeinference status --client codex` when you
 explicitly want the available local/provider state. Codex-unavailable values
 are reported as `unavailable`, not `unknown` or zero.

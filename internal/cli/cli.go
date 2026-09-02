@@ -63,6 +63,9 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int
 	if cmd == "update" {
 		return cmdUpdate(state.Paths{}, rest, stdout, stderr)
 	}
+	if cmd == "codex-footer" {
+		return cmdCodexFooter(rest, stdout, stderr)
+	}
 	// Persistent companion controls are intentionally stateless: disabling the
 	// companion must not create cache, salt, session, or provider directories.
 	if cmd == "companion" {
@@ -332,9 +335,10 @@ Usage:
   freeinference update [--manifest <url>] [--platform <key>] [--dry-run] [--force]
   freeinference context [--client <type>] [--session <id>] [--help]
   freeinference cache [--client <type>] [--session <id>] [--help]
-	freeinference refresh [--force|--if-stale] [--detach]
-	  [--worker models|health|account-usage|public-status] [--help]
+  freeinference refresh [--force|--if-stale] [--detach]
+    [--worker models|health|account-usage|public-status] [--help]
   freeinference status-line install|uninstall
+  freeinference codex-footer install|uninstall|status
   freeinference config show|set|reset|path [--json]
   freeinference companion status|enable|disable
   freeinference fi-status [--json] [--problems|--down] [--details] [--fail-degraded] [--refresh] [--all]
@@ -351,7 +355,8 @@ Environment:
   FI_CACHE_DIR             Cache directory (default: ~/.cache/freeinference-companion)
   FI_SESSION_ID            Explicit session override for status/context/report
   FI_PROVIDER              Attribution metadata only; does not activate the companion
-  FI_NO_BACKGROUND         Disable background refresh
+  FI_AUTO_REFRESH          Opt in to stale metadata refreshes from lifecycle hooks
+  FI_NO_BACKGROUND         Disable detached background refresh after opting in
   FI_DISABLED              Disable all companion features
   FI_ALLOW_INSECURE_LOCALHOST  Allow http:// loopback (development only)
   FI_TRACING                Enable/disable Companion launch tracing (default: enabled for run)
@@ -568,6 +573,22 @@ Flags:
   --help           Show this help message
 `
 
+	helpCodexFooter = `Usage: freeinference codex-footer install|uninstall|status [--json] [--help]
+
+Configure Codex's native tui.status_line footer. This makes Codex render its
+own model, remaining-context, and current-directory items; it is not a
+script-backed FreeInference telemetry status line.
+
+Subcommands:
+  install    Preserve existing items and add the native footer items
+  uninstall  Restore the prior footer when Companion still owns it
+  status     Show configuration and ownership status
+
+Flags:
+  --json     Output machine-readable status
+  --help     Show this help message
+`
+
 	helpVersion = `Usage: freeinference version [--json] [--help]
 
 Show the freeinference companion version and schema information.
@@ -584,7 +605,7 @@ Internal hook entry point for Claude Code and Codex. Never called directly.
 	Arguments:
 	  client    Client type: claude-code or codex
 	  event     Event name: SessionStart, SessionEnd, UserPromptSubmit,
-	            PreCompact, PostCompact, PostModelSwitch, Stop, StopFailure
+	            PreCompact, PostCompact, PostModelSwitch, Stop, StopFailure (Claude only)
 `
 )
 
@@ -624,6 +645,8 @@ func printCmdHelp(stdout, stderr io.Writer, cmd string, args []string) bool {
 				fmt.Fprint(stdout, helpTrace)
 			case "status-line":
 				fmt.Fprint(stdout, helpStatusLine)
+			case "codex-footer":
+				fmt.Fprint(stdout, helpCodexFooter)
 			case "version":
 				fmt.Fprint(stdout, helpVersion)
 			case "install":

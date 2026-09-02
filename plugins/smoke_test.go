@@ -182,7 +182,7 @@ func TestClaudeCodeReferencedHooksExist(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 2. Codex skill package
+// 2. Codex plugin installation
 // ---------------------------------------------------------------------------
 
 func TestCodexPluginJSONRequiredFields(t *testing.T) {
@@ -208,6 +208,146 @@ func TestCodexPluginJSONRequiredFields(t *testing.T) {
 	}
 }
 
+func TestCodexHookEventStructure(t *testing.T) {
+	plug := pluginDir("codex")
+	hj := filepath.Join(plug, "hooks", "hooks.json")
+
+	data, err := os.ReadFile(hj)
+	if err != nil {
+		t.Fatalf("read hooks.json: %v", err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("parse hooks.json: %v", err)
+	}
+
+	hooksObj, ok := parsed["hooks"].(map[string]any)
+	if !ok {
+		t.Fatal("hooks.json must have a 'hooks' object")
+	}
+	expectedEvents := map[string]bool{
+		"SessionStart":     true,
+		"SessionEnd":       true,
+		"UserPromptSubmit": true,
+		"PreCompact":       true,
+		"PostCompact":      true,
+		"Stop":             true,
+	}
+	for event, eventVal := range hooksObj {
+		if !expectedEvents[event] {
+			t.Errorf("unexpected Codex hook event: %s", event)
+		}
+		arr, ok := eventVal.([]any)
+		if !ok || len(arr) == 0 {
+			t.Errorf("Codex event %s must be a non-empty array", event)
+			continue
+		}
+		for i, elem := range arr {
+			obj, ok := elem.(map[string]any)
+			if !ok {
+				t.Errorf("Codex event %s element %d must be an object", event, i)
+				continue
+			}
+			subHooks, ok := obj["hooks"].([]any)
+			if !ok || len(subHooks) == 0 {
+				t.Errorf("Codex event %s element %d missing hooks array", event, i)
+				continue
+			}
+			for j, sh := range subHooks {
+				shObj, ok := sh.(map[string]any)
+				if !ok {
+					t.Errorf("Codex event %s sub-hook %d must be an object", event, j)
+					continue
+				}
+				if shObj["type"] != "command" {
+					t.Errorf("Codex event %s sub-hook %d must be a command", event, j)
+				}
+				command, ok := shObj["command"].(string)
+				if !ok || !strings.Contains(command, "${PLUGIN_ROOT}/scripts/run-hook.sh") {
+					t.Errorf("Codex event %s sub-hook %d must use PLUGIN_ROOT runner", event, j)
+				}
+			}
+		}
+	}
+	for event := range expectedEvents {
+		if _, ok := hooksObj[event]; !ok {
+			t.Errorf("Codex hooks.json missing event: %s", event)
+		}
+	}
+}
+
+func TestCodexHookScriptExecutable(t *testing.T) {
+	script := filepath.Join(pluginDir("codex"), "scripts", "run-hook.sh")
+	info, err := os.Stat(script)
+	if err != nil {
+		t.Fatalf("stat Codex run-hook.sh: %v", err)
+	}
+	if info.Mode().Perm()&0111 == 0 {
+		t.Error("Codex run-hook.sh must be executable")
+	}
+}
+
+func TestCodexReferencedHooksExist(t *testing.T) {
+	plug := pluginDir("codex")
+	data, err := os.ReadFile(filepath.Join(plug, "hooks", "hooks.json"))
+	if err != nil {
+		t.Fatalf("read Codex hooks.json: %v", err)
+	}
+	var parsed struct {
+		Hooks map[string][]struct {
+			Hooks []struct {
+				Command string `json:"command"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("parse Codex hooks.json: %v", err)
+	}
+	for event, groups := range parsed.Hooks {
+		for _, group := range groups {
+			for _, hook := range group.Hooks {
+				if strings.Contains(hook.Command, "run-hook.sh") {
+					if _, err := os.Stat(filepath.Join(plug, "scripts", "run-hook.sh")); err != nil {
+						t.Errorf("Codex hook event %s references missing runner: %v", event, err)
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestCodexMarketplaceManifestDiscoversPlugin(t *testing.T) {
+	marketplaceRoot := filepath.Join(pluginRoot(), "..", "codex-marketplace")
+	manifestPath := filepath.Join(marketplaceRoot, ".agents", "plugins", "marketplace.json")
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read Codex marketplace manifest: %v", err)
+	}
+	var parsed struct {
+		Name    string `json:"name"`
+		Plugins []struct {
+			Name   string `json:"name"`
+			Source struct {
+				Path string `json:"path"`
+			} `json:"source"`
+		} `json:"plugins"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("parse Codex marketplace manifest: %v", err)
+	}
+	if parsed.Name != "freeinference-companion-local" || len(parsed.Plugins) != 1 {
+		t.Fatalf("unexpected Codex marketplace manifest: %+v", parsed)
+	}
+	entry := parsed.Plugins[0]
+	if entry.Name != "freeinference-companion" || entry.Source.Path != "./plugins/freeinference-companion" {
+		t.Fatalf("unexpected Codex marketplace entry: %+v", entry)
+	}
+	pluginManifest := filepath.Join(marketplaceRoot, strings.TrimPrefix(entry.Source.Path, "./"), ".codex-plugin", "plugin.json")
+	if _, err := os.Stat(pluginManifest); err != nil {
+		t.Fatalf("Codex marketplace plugin target is missing: %v", err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // 3. Hook script behaviour via subprocess
 // ---------------------------------------------------------------------------
@@ -218,6 +358,36 @@ func TestClaudeCodeHookSyntax(t *testing.T) {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("bash -n failed: %v\noutput: %s", err, string(out))
+	}
+}
+
+func TestCodexHookSyntax(t *testing.T) {
+	script := filepath.Join(pluginDir("codex"), "scripts", "run-hook.sh")
+	cmd := exec.Command("bash", "-n", script)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Codex bash -n failed: %v\noutput: %s", err, string(out))
+	}
+}
+
+func TestCodexHookExitZeroWhenMissingBinary(t *testing.T) {
+	script := filepath.Join(pluginDir("codex"), "scripts", "run-hook.sh")
+	cmd := exec.Command("bash", script, "SessionStart")
+	cmd.Env = append(os.Environ(),
+		"FI_DISABLED=",
+		"PLUGIN_ROOT=/nonexistent/path/noexist",
+		"CLAUDE_PLUGIN_ROOT=/nonexistent/path/noexist",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		if exitErr.ExitCode() != 0 {
+			t.Errorf("expected Codex hook exit 0, got %d; output: %s", exitErr.ExitCode(), string(out))
+		}
+	} else {
+		t.Fatalf("unexpected error: %v; output: %s", err, string(out))
 	}
 }
 
@@ -558,6 +728,7 @@ func TestClaudeCodeHookCreatesSessionState(t *testing.T) {
 		// SessionStart normally launches detached refresh workers. Keep this
 		// behavioral test self-contained so a child cannot outlive TempDir cleanup.
 		"FI_NO_BACKGROUND=1",
+		"FI_AUTO_REFRESH=0",
 		"FREEINFERENCE_API_KEY=",
 		"FREEINFERENCE_BASE_URL=",
 		"ANTHROPIC_AUTH_TOKEN=test-key-hyi",
@@ -591,6 +762,65 @@ func TestClaudeCodeHookCreatesSessionState(t *testing.T) {
 	}
 	if !strings.Contains(sessionsOut, "test-session-123") {
 		t.Errorf("sessions output does not contain test session ID:\n%s", sessionsOut)
+	}
+}
+
+func TestCodexHookCreatesSessionState(t *testing.T) {
+	bin := buildTestBinary(t)
+	tmpHome := t.TempDir()
+	cacheDir := filepath.Join(tmpHome, "cache")
+	codexHome := filepath.Join(tmpHome, "codex")
+	if err := os.MkdirAll(codexHome, 0700); err != nil {
+		t.Fatal(err)
+	}
+	config := `model_provider = "freeinference"
+
+[model_providers.freeinference]
+name = "FreeInference"
+base_url = "https://freeinference.org/v1"
+env_key = "CODEX_FI_KEY"
+wire_api = "responses"
+`
+	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	script := filepath.Join(pluginDir("codex"), "scripts", "run-hook.sh")
+	env := append(os.Environ(),
+		"HOME="+tmpHome,
+		"CODEX_HOME="+codexHome,
+		"CODEX_PROFILE=",
+		"CODEX_FI_KEY=test-key-codex",
+		"FI_CACHE_DIR="+cacheDir,
+		"FI_DISABLED=",
+		"FI_NO_BACKGROUND=1",
+		"FI_AUTO_REFRESH=0",
+		"FREEINFERENCE_API_KEY=",
+		"FREEINFERENCE_BASE_URL=",
+		"PATH="+filepath.Dir(bin)+":/usr/bin:/bin",
+		"PLUGIN_ROOT=",
+		"CLAUDE_PLUGIN_ROOT=",
+	)
+
+	payload := `{"session_id":"codex-session-123","hook_event_name":"SessionStart","model":"glm-5.1","source":"startup"}`
+	stdout, _, exitCode := runHook(t, script, "SessionStart", env, payload)
+	if exitCode != 0 {
+		t.Fatalf("Codex hook exited %d, want 0; stdout: %s", exitCode, stdout)
+	}
+	for _, event := range []string{"UserPromptSubmit", "PreCompact", "PostCompact", "Stop", "SessionEnd"} {
+		payload := `{"session_id":"codex-session-123","hook_event_name":"` + event + `","trigger":"manual","reason":"other"}`
+		stdout, _, exitCode = runHook(t, script, event, env, payload)
+		if exitCode != 0 || stdout != "" {
+			t.Fatalf("Codex %s hook result: exit=%d stdout=%q", event, exitCode, stdout)
+		}
+	}
+
+	sessionsOut, errOut, exitCode := runFI(t, bin, tmpHome, cacheDir, "sessions", "--json", "--include-identifiers")
+	if exitCode != 0 {
+		t.Fatalf("freeinference sessions exited %d; stderr: %s", exitCode, errOut)
+	}
+	if !strings.Contains(sessionsOut, "codex-session-123") {
+		t.Errorf("sessions output does not contain Codex test session ID:\n%s", sessionsOut)
 	}
 }
 

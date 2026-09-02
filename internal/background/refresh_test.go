@@ -140,6 +140,21 @@ func TestRateLimitOpensBreakerAndHonorsRetryAfter(t *testing.T) {
 	if calls.Load() != 1 {
 		t.Errorf("open breaker must block requests: %d calls", calls.Load())
 	}
+	allowed, err := state.ReserveRefreshSlot(r.Paths, time.Now(), AutomaticRefreshMinInterval)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allowed {
+		t.Fatal("provider rate-limit cooldown must block other automatic refresh workers")
+	}
+	accountRefresher := NewRefresher(api.NewClientForTest(server.URL+"/v1", "test-key", time.Second), r.Paths, "")
+	res = accountRefresher.WorkerRefresh(WorkerAccountUsage)
+	if !res.Skipped || res.SkipReason != "automatic refresh cooldown" {
+		t.Fatalf("shared rate-limit cooldown should defer account refresh, got %+v", res)
+	}
+	if calls.Load() != 1 {
+		t.Errorf("shared rate-limit cooldown must prevent another provider request: %d calls", calls.Load())
+	}
 }
 
 func TestServerErrorBackoffEscalates(t *testing.T) {
@@ -305,6 +320,17 @@ func expireBreaker(t *testing.T, paths state.Paths, endpoint string) {
 		}
 	}
 	if err := state.SaveCircuitBreakers(paths, gs.CircuitBreakers); err != nil {
+		t.Fatal(err)
+	}
+	throttle := &schema.RefreshThrottle{}
+	if err := state.ReadJSON(paths.GlobalRefreshThrottle(), throttle); err == nil {
+		past := time.Now().Add(-time.Minute)
+		throttle.LastRequestAt = &past
+		throttle.CooldownUntil = &past
+		if err := state.WriteJSONAtomically(paths.GlobalRefreshThrottle(), throttle); err != nil {
+			t.Fatal(err)
+		}
+	} else if !os.IsNotExist(err) {
 		t.Fatal(err)
 	}
 }

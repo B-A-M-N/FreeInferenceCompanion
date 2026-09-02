@@ -6,9 +6,11 @@ package installer
 
 import (
 	"archive/zip"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -133,7 +135,7 @@ func Install(opts Options, stdout, stderr io.Writer) (*Result, error) {
 	// Extract plugins.
 	if !opts.NoPlugin {
 		fmt.Fprintf(stdout, "  Extracting plugins...\n")
-		if err := extractPlugins(extractDir, paths); err != nil {
+		if err := extractPlugins(extractDir, paths, stdout); err != nil {
 			return nil, fmt.Errorf("install plugins: %w", err)
 		}
 		result.Plugins = extractPluginPaths(paths)
@@ -243,7 +245,7 @@ func Update(opts Options, stdout, stderr io.Writer) (*Result, error) {
 
 	// Also update plugins.
 	if !opts.NoPlugin {
-		if err := extractPlugins(extractDir, paths); err != nil {
+		if err := extractPlugins(extractDir, paths, stdout); err != nil {
 			return nil, fmt.Errorf("update plugins: %w", err)
 		}
 		result.Plugins = extractPluginPaths(paths)
@@ -286,6 +288,15 @@ func Uninstall(paths Paths, stdout, stderr io.Writer) error {
 			fmt.Fprintf(stdout, "  Removed Codex plugin: %s\n", pluginPath)
 		}
 	}
+	if paths.CodexMarketplaceDir != "" {
+		if _, err := os.Stat(paths.CodexMarketplaceDir); err == nil {
+			unregisterCodexMarketplace()
+			if err := os.RemoveAll(paths.CodexMarketplaceDir); err != nil {
+				return fmt.Errorf("remove Codex marketplace: %w", err)
+			}
+			fmt.Fprintf(stdout, "  Removed Codex marketplace: %s\n", paths.CodexMarketplaceDir)
+		}
+	}
 
 	// Remove install dir.
 	if paths.InstallDir != "" {
@@ -299,6 +310,18 @@ func Uninstall(paths Paths, stdout, stderr io.Writer) error {
 
 	fmt.Fprintf(stdout, "Uninstall complete.\n")
 	return nil
+}
+
+func unregisterCodexMarketplace() {
+	codex, err := exec.LookPath("codex")
+	if err != nil {
+		return
+	}
+	// These are best-effort cleanup calls. The local marketplace and direct
+	// fallback tree are still removed below even when an older Codex version
+	// does not support one of the native plugin commands.
+	_ = runCodexPluginCommand(codex, "plugin", "remove", "freeinference-companion@freeinference-companion-local", "--json")
+	_ = runCodexPluginCommand(codex, "plugin", "marketplace", "remove", "freeinference-companion-local", "--json")
 }
 
 // installBinary copies the freeinference binary from the extracted ZIP into
@@ -366,7 +389,7 @@ func findBinary(root string) string {
 
 // extractPlugins extracts plugin ZIPs from the release archive into the
 // appropriate plugin directories for each coding agent.
-func extractPlugins(extractDir string, paths Paths) error {
+func extractPlugins(extractDir string, paths Paths, stdout io.Writer) error {
 	// Extract Claude Code plugin.
 	pluginSrc := filepath.Join(extractDir, "plugins", "claude-code")
 	if _, err := os.Stat(pluginSrc); err == nil {
@@ -389,9 +412,78 @@ func extractPlugins(extractDir string, paths Paths) error {
 		if err := removeAllThenCopy(pluginDest, codexSrc); err != nil {
 			return fmt.Errorf("copy codex plugin: %w", err)
 		}
+		if err := registerCodexMarketplace(paths, codexSrc, stdout); err != nil {
+			return fmt.Errorf("register Codex marketplace: %w", err)
+		}
 	}
 
 	return nil
+}
+
+// registerCodexMarketplace creates a self-contained local marketplace from
+// the bundled plugin and asks Codex to install it through the native plugin
+// manager. The direct plugin copy remains as a fallback for older Codex
+// versions and for users who complete registration manually.
+func registerCodexMarketplace(paths Paths, pluginSrc string, stdout io.Writer) error {
+	if paths.CodexMarketplaceDir == "" {
+		return nil
+	}
+	pluginDest := filepath.Join(paths.CodexMarketplaceDir, "plugins", "freeinference-companion")
+	if err := removeAllThenCopy(pluginDest, pluginSrc); err != nil {
+		return err
+	}
+	marketplace := map[string]any{
+		"name":      "freeinference-companion-local",
+		"interface": map[string]string{"displayName": "FreeInference Companion"},
+		"plugins": []any{map[string]any{
+			"name":     "freeinference-companion",
+			"source":   map[string]string{"source": "local", "path": "./plugins/freeinference-companion"},
+			"policy":   map[string]string{"installation": "AVAILABLE", "authentication": "ON_INSTALL"},
+			"category": "Developer Tools",
+		}},
+	}
+	data, err := json.MarshalIndent(marketplace, "", "  ")
+	if err != nil {
+		return err
+	}
+	marketplacePath := filepath.Join(paths.CodexMarketplaceDir, ".agents", "plugins", "marketplace.json")
+	if err := os.MkdirAll(filepath.Dir(marketplacePath), 0700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(marketplacePath, append(data, '\n'), 0600); err != nil {
+		return err
+	}
+
+	codex, err := exec.LookPath("codex")
+	if err != nil {
+		if stdout != nil {
+			fmt.Fprintln(stdout, "  Codex CLI not found; plugin files installed. Register later with `codex plugin marketplace add`.")
+		}
+		return nil
+	}
+	if err := runCodexPluginCommand(codex, "plugin", "marketplace", "add", paths.CodexMarketplaceDir, "--json"); err != nil {
+		if stdout != nil {
+			fmt.Fprintf(stdout, "  Codex marketplace registration deferred: %v\n", err)
+		}
+		return nil
+	}
+	if err := runCodexPluginCommand(codex, "plugin", "add", "freeinference-companion@freeinference-companion-local", "--json"); err != nil {
+		if stdout != nil {
+			fmt.Fprintf(stdout, "  Codex plugin installation deferred; run `codex plugin add freeinference-companion@freeinference-companion-local`: %v\n", err)
+		}
+		return nil
+	}
+	if stdout != nil {
+		fmt.Fprintln(stdout, "  Registered and installed the Codex plugin through its local marketplace.")
+	}
+	return nil
+}
+
+func runCodexPluginCommand(codex string, args ...string) error {
+	cmd := exec.Command(codex, args...)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	return cmd.Run()
 }
 
 // extractPluginPaths returns the paths of extracted plugin directories.

@@ -131,7 +131,10 @@ type ClaudeWarningOutput struct {
 	SuppressOutput bool   `json:"suppressOutput,omitempty"`
 }
 
-// CodexWarningOutput is the JSON a Codex hook returns (no suppressOutput).
+// CodexWarningOutput is the intentionally minimal JSON a Codex hook may
+// return. Codex accepts the common suppressOutput field, but this companion
+// does not emit it: lifecycle hooks have no warning data without live context
+// telemetry, and recording must remain silent during normal operation.
 type CodexWarningOutput struct {
 	Continue      bool   `json:"continue"`
 	SystemMessage string `json:"systemMessage,omitempty"`

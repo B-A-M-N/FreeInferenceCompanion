@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -93,8 +94,12 @@ func createTestZIP(t *testing.T, version string) ([]byte, string) {
 	f, _ = w.Create("plugins/claude-code/package.json")
 	f.Write([]byte(`{"name":"freeinference-companion"}`))
 
-	f, _ = w.Create("plugins/codex/config.json")
+	f, _ = w.Create("plugins/codex/.codex-plugin/plugin.json")
 	f.Write([]byte(`{"name":"freeinference-companion"}`))
+	f, _ = w.Create("plugins/codex/hooks/hooks.json")
+	f.Write([]byte(`{"hooks":{}}`))
+	f, _ = w.Create("plugins/codex/scripts/run-hook.sh")
+	f.Write([]byte("#!/usr/bin/env bash\nexit 0\n"))
 
 	w.Close()
 
@@ -153,6 +158,20 @@ func TestInstallFresh(t *testing.T) {
 			t.Errorf("plugin not extracted to %s: %v", pluginPath, err)
 		}
 	}
+	codexPlugin := filepath.Join(paths.CodexPluginDir, "freeinference-companion")
+	for _, rel := range []string{".codex-plugin/plugin.json", "hooks/hooks.json", "scripts/run-hook.sh"} {
+		if _, err := os.Stat(filepath.Join(codexPlugin, rel)); err != nil {
+			t.Errorf("Codex plugin artifact %s not extracted: %v", rel, err)
+		}
+	}
+	marketplace := filepath.Join(paths.CodexMarketplaceDir, ".agents", "plugins", "marketplace.json")
+	if _, err := os.Stat(marketplace); err != nil {
+		t.Errorf("Codex marketplace manifest not created: %v", err)
+	}
+	marketplacePlugin := filepath.Join(paths.CodexMarketplaceDir, "plugins", "freeinference-companion", ".codex-plugin", "plugin.json")
+	if _, err := os.Stat(marketplacePlugin); err != nil {
+		t.Errorf("Codex marketplace plugin not created: %v", err)
+	}
 
 	// Verify version output.
 	if !strings.Contains(stdout.String(), "v0.2.0") {
@@ -166,6 +185,40 @@ func TestInstallChecksumMismatch(t *testing.T) {
 	err := VerifyChecksum(data, "0000000000000000000000000000000000000000000000000000000000000000")
 	if err == nil {
 		t.Error("expected checksum mismatch error")
+	}
+}
+
+func TestRegisterCodexMarketplaceUsesNativePluginManager(t *testing.T) {
+	home := t.TempDir()
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0700); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(home, "codex-args.log")
+	fakeCodex := filepath.Join(fakeBin, "codex")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"" + logPath + "\"\n"
+	if err := os.WriteFile(fakeCodex, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin)
+
+	pluginSrc := filepath.Join(home, "plugin-source")
+	if err := os.MkdirAll(filepath.Join(pluginSrc, ".codex-plugin"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginSrc, ".codex-plugin", "plugin.json"), []byte(`{"name":"freeinference-companion"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	paths := Paths{CodexMarketplaceDir: filepath.Join(home, "marketplace")}
+	if err := registerCodexMarketplace(paths, pluginSrc, io.Discard); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	args, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(args), "plugin marketplace add") || !strings.Contains(string(args), "plugin add freeinference-companion@freeinference-companion-local") {
+		t.Fatalf("Codex native manager was not invoked as expected: %s", args)
 	}
 }
 

@@ -1,0 +1,10 @@
+{
+  "session_id": "codex-fixture-session",
+  "transcript_path": "/private/transcript.jsonl",
+  "cwd": "/private/project",
+  "hook_event_name": "SessionStart",
+  "model": "glm-5.1",
+  "permission_mode": "default",
+  "source": "startup",
+  "additive_vendor_field": "ignored"
+}

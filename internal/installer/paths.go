@@ -20,6 +20,9 @@ type Paths struct {
 	ClaudePluginDir string
 	// CodexPluginDir is the directory where the Codex plugin ZIP is extracted.
 	CodexPluginDir string
+	// CodexMarketplaceDir is the local marketplace root used to register the
+	// bundled Codex plugin with Codex's native plugin manager.
+	CodexMarketplaceDir string
 }
 
 // DefaultPaths returns Paths using standard locations.
@@ -31,13 +34,18 @@ func DefaultPaths() (Paths, error) {
 
 	localBin := filepath.Join(home, ".local", "bin")
 	installDir := filepath.Join(home, ".local", "freeinference")
+	codexHome := strings.TrimSpace(os.Getenv("CODEX_HOME"))
+	if codexHome == "" {
+		codexHome = filepath.Join(home, ".codex")
+	}
 
 	return Paths{
-		InstallDir:      installDir,
-		BinaryPath:      filepath.Join(installDir, "bin", "freeinference"),
-		LocalBin:        localBin,
-		ClaudePluginDir: filepath.Join(home, ".claude", "plugins"),
-		CodexPluginDir:  filepath.Join(home, ".codex", "plugins"),
+		InstallDir:          installDir,
+		BinaryPath:          filepath.Join(installDir, "bin", "freeinference"),
+		LocalBin:            localBin,
+		ClaudePluginDir:     filepath.Join(home, ".claude", "plugins"),
+		CodexPluginDir:      filepath.Join(codexHome, "plugins"),
+		CodexMarketplaceDir: filepath.Join(codexHome, "plugins", "freeinference-companion-marketplace"),
 	}, nil
 }
 

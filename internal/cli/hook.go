@@ -144,7 +144,7 @@ func handleCodexHook(paths state.Paths, eventName string, stdin io.Reader, stdou
 		_ = adapter.HandleSessionStartWithTrace(input, activation, consumeTraceForHook(schema.ClientCodex, activation))
 		maybeRequestDetachedRefresh(paths, activation)
 	case "SessionEnd":
-		_ = adapter.HandleSessionEnd(sessionID)
+		_ = adapter.HandleSessionEnd(sessionID, input)
 		maybeRequestDetachedRefresh(paths, activation)
 	case "UserPromptSubmit":
 		output, err := adapter.HandleUserPromptSubmitWith(input, sessionID, activation)
@@ -158,9 +158,7 @@ func handleCodexHook(paths state.Paths, eventName string, stdin io.Reader, stdou
 	case "PostCompact":
 		_ = adapter.HandlePostCompact(input, sessionID)
 	case "Stop":
-		_ = adapter.HandleStop(sessionID)
-	case "StopFailure":
-		_ = adapter.HandleStopFailure(input, sessionID)
+		_ = adapter.HandleStop(sessionID, input)
 	default:
 		return
 	}
@@ -188,16 +186,18 @@ func consumeTraceForHook(client string, activation runtime.Activation) *schema.T
 	}
 }
 
-// maybeRequestDetachedRefresh spawns detached refresh workers when caches are
-// stale. Called only after the activation gate has already confirmed an active
-// FreeInference runtime (P0-2), so the permissive DetectProvider check is gone.
-// FI_NO_BACKGROUND=1 still suppresses spawning.
+// maybeRequestDetachedRefresh spawns detached refresh workers only when stale
+// refreshes have been explicitly enabled. Normal lifecycle hooks are local
+// recording only, so installing or using the plugin cannot consume provider
+// metadata/API quota by default. Called only after the activation gate has
+// already confirmed an active FreeInference runtime (P0-2).
+// FI_NO_BACKGROUND=1 still suppresses spawning when auto-refresh is enabled.
 //
 // Detached children re-validate activation independently — the parent gate
 // alone is insufficient because environment or configuration may change
 // between spawn and child exec.
 func maybeRequestDetachedRefresh(paths state.Paths, activation runtime.Activation) {
-	if os.Getenv("FI_NO_BACKGROUND") == "1" {
+	if os.Getenv("FI_NO_BACKGROUND") == "1" || !automaticRefreshEnabled() {
 		return
 	}
 	if !activation.Active {
@@ -212,4 +212,8 @@ func maybeRequestDetachedRefresh(paths state.Paths, activation runtime.Activatio
 		return
 	}
 	_ = background.SpawnDetachedWorkers(exe, stale)
+}
+
+func automaticRefreshEnabled() bool {
+	return os.Getenv("FI_AUTO_REFRESH") == "1"
 }

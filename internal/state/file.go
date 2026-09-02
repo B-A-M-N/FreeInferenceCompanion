@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/secure"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
@@ -173,6 +174,16 @@ func (p Paths) GlobalCircuitBreakersLock() string {
 // GlobalCircuitBreakers returns the path to the circuit breaker state.
 func (p Paths) GlobalCircuitBreakers() string {
 	return filepath.Join(p.GlobalDir(), "circuit-breakers.json")
+}
+
+// GlobalRefreshThrottle returns the provider-scoped automatic refresh budget.
+func (p Paths) GlobalRefreshThrottle() string {
+	return filepath.Join(p.GlobalDir(), "refresh-throttle.json")
+}
+
+// GlobalRefreshThrottleLock returns the lock for the automatic refresh budget.
+func (p Paths) GlobalRefreshThrottleLock() string {
+	return filepath.Join(p.GlobalDir(), "refresh-throttle.lock")
 }
 
 // SessionIndexDir returns the directory for the session index. This is stored
@@ -760,4 +771,64 @@ func UpdateCircuitBreakers(paths Paths, mutate func(cbs []schema.CircuitBreaker)
 		return err
 	}
 	return SaveCircuitBreakers(paths, updated)
+}
+
+// ReserveRefreshSlot atomically reserves one automatic authenticated metadata
+// request. A denied reservation is intentional: the caller should leave its
+// cache stale and retry on a later lifecycle event instead of queueing another
+// network request. This is background-worker code, so a short blocking lock is
+// preferable to racing reservations.
+func ReserveRefreshSlot(paths Paths, now time.Time, minInterval time.Duration) (bool, error) {
+	if minInterval < 0 {
+		return false, fmt.Errorf("refresh minimum interval must not be negative")
+	}
+	if err := paths.EnsureGlobalDir(); err != nil {
+		return false, err
+	}
+	fl := NewFileLock(paths.GlobalRefreshThrottleLock())
+	if err := fl.AcquireBlocking(); err != nil {
+		return false, err
+	}
+	defer fl.Release()
+
+	throttle := &schema.RefreshThrottle{}
+	if err := ReadJSON(paths.GlobalRefreshThrottle(), throttle); err != nil && !os.IsNotExist(err) {
+		return false, fmt.Errorf("load refresh throttle: %w", err)
+	}
+	if throttle.CooldownUntil != nil && now.Before(*throttle.CooldownUntil) {
+		return false, nil
+	}
+	if throttle.LastRequestAt != nil && now.Sub(*throttle.LastRequestAt) < minInterval {
+		return false, nil
+	}
+	now = now.UTC()
+	throttle.LastRequestAt = &now
+	if err := WriteJSONAtomically(paths.GlobalRefreshThrottle(), throttle); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// ExtendRefreshCooldown records a provider-wide cooldown after a rate-limit
+// response. The longest active cooldown wins, so concurrent workers cannot
+// shorten the safe retry window.
+func ExtendRefreshCooldown(paths Paths, until time.Time) error {
+	if err := paths.EnsureGlobalDir(); err != nil {
+		return err
+	}
+	fl := NewFileLock(paths.GlobalRefreshThrottleLock())
+	if err := fl.AcquireBlocking(); err != nil {
+		return err
+	}
+	defer fl.Release()
+
+	throttle := &schema.RefreshThrottle{}
+	if err := ReadJSON(paths.GlobalRefreshThrottle(), throttle); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("load refresh throttle: %w", err)
+	}
+	until = until.UTC()
+	if throttle.CooldownUntil == nil || until.After(*throttle.CooldownUntil) {
+		throttle.CooldownUntil = &until
+	}
+	return WriteJSONAtomically(paths.GlobalRefreshThrottle(), throttle)
 }

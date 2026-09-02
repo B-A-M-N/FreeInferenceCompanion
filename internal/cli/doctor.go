@@ -12,6 +12,7 @@ import (
 	"github.com/b-a-m-n/freeinference-companion/internal/adapters"
 	"github.com/b-a-m-n/freeinference-companion/internal/api"
 	"github.com/b-a-m-n/freeinference-companion/internal/config"
+	"github.com/b-a-m-n/freeinference-companion/internal/install"
 	"github.com/b-a-m-n/freeinference-companion/internal/runtime"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
 	"github.com/b-a-m-n/freeinference-companion/internal/tracing"
@@ -70,11 +71,20 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 
 	// 4. Claude hook configuration present.
 	add("Claude hook config", checkClaudeHookConfig())
+	// 5. Codex installation is intentionally decomposed. A plugin directory,
+	// a registered Codex plugin, a hook definition, the hooks feature flag, and
+	// hook trust are separate states and must not be reported as one pass.
+	add("Codex plugin installed", checkCodexPluginInstalled())
+	add("Codex plugin registration", checkCodexPluginRegistration())
+	add("Codex hook definition", checkCodexHookDefinition())
+	add("Codex hooks feature", checkCodexHooksFeature())
+	add("Codex hook trust", checkCodexHookTrust())
+	add("Codex native footer", checkCodexNativeFooter())
 
-	// 5. Status-line wrapper valid.
+	// 6. Status-line wrapper valid.
 	add("Status-line wrapper", checkStatusLineWrapper())
 
-	// 6. Provider detection. Generic environment detection remains useful for
+	// 7. Provider detection. Generic environment detection remains useful for
 	// provider-level setups, while the client-specific checks below prevent a
 	// coincidental shell key from being treated as client evidence.
 	det := adapters.DetectProvider()
@@ -175,7 +185,7 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 		add("Trace ID format", api.CheckResult{State: api.CheckUnknown, Detail: "no active trace ID"})
 	}
 
-	// 7. Health source configured.
+	// 8. Health source configured.
 	if healthURL := os.Getenv("FI_HEALTH_URL"); healthURL != "" {
 		sanitized, err := api.NormalizeHealthURL(healthURL)
 		if err != nil {
@@ -189,7 +199,7 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 		add("Health source", api.CheckResult{State: api.CheckUnknown, Detail: "not configured (optional)"})
 	}
 
-	// 8. Model catalog reachable.
+	// 9. Model catalog reachable.
 	// In disabled mode, skip all network-dependent checks.
 	disabled := os.Getenv("FI_DISABLED") == "1" || activation.Disabled
 	if disabled {
@@ -199,7 +209,7 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 		// make `doctor` exit 1 — diagnostics stay usable when disabled.
 		for i := range checks {
 			switch checks[i].name {
-			case "freeinference binary", "Claude hook config", "Status-line wrapper":
+			case "freeinference binary", "Claude hook config", "Codex plugin installed", "Codex plugin registration", "Codex hook definition", "Codex hooks feature", "Codex hook trust", "Codex native footer", "Status-line wrapper":
 				if checks[i].result.State == api.CheckFail {
 					checks[i].result.State = api.CheckWarn
 				}
@@ -524,6 +534,176 @@ func checkClaudeHookConfig() api.CheckResult {
 		}
 	}
 	return api.CheckResult{State: api.CheckUnknown, Detail: "not installed as a Claude plugin"}
+}
+
+func codexPluginRoots(home string) []string {
+	codexHome := strings.TrimSpace(os.Getenv("CODEX_HOME"))
+	if codexHome == "" {
+		codexHome = filepath.Join(home, ".codex")
+	}
+	roots := []string{filepath.Join(codexHome, "plugins", "freeinference-companion")}
+	matches, _ := filepath.Glob(filepath.Join(codexHome, "plugins", "cache", "*", "*", "*"))
+	for _, match := range matches {
+		duplicate := false
+		for _, root := range roots {
+			if filepath.Clean(root) == filepath.Clean(match) {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			roots = append(roots, match)
+		}
+	}
+	return roots
+}
+
+func codexPluginManifest(root string) bool {
+	data, err := os.ReadFile(filepath.Join(root, ".codex-plugin", "plugin.json"))
+	if err != nil {
+		return false
+	}
+	var manifest struct {
+		Name string `json:"name"`
+	}
+	return json.Unmarshal(data, &manifest) == nil && manifest.Name == "freeinference-companion"
+}
+
+func checkCodexPluginInstalled() api.CheckResult {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return api.CheckResult{State: api.CheckUnknown, Detail: "no home directory"}
+	}
+	for _, root := range codexPluginRoots(home) {
+		if codexPluginManifest(root) {
+			return api.CheckResult{State: api.CheckPass, Detail: "manifest found at " + root}
+		}
+	}
+	return api.CheckResult{State: api.CheckUnknown, Detail: "not installed as a Codex plugin"}
+}
+
+func checkCodexPluginRegistration() api.CheckResult {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return api.CheckResult{State: api.CheckUnknown, Detail: "no home directory"}
+	}
+	codexHome := strings.TrimSpace(os.Getenv("CODEX_HOME"))
+	if codexHome == "" {
+		codexHome = filepath.Join(home, ".codex")
+	}
+	cacheRoot := filepath.Join(codexHome, "plugins", "cache", "freeinference-companion-local", "freeinference-companion")
+	versions, _ := filepath.Glob(filepath.Join(cacheRoot, "*"))
+	for _, version := range versions {
+		if codexPluginManifest(version) {
+			return api.CheckResult{State: api.CheckPass, Detail: "Codex-managed cache found at " + version}
+		}
+	}
+	if codexPluginManifest(filepath.Join(codexHome, "plugins", "freeinference-companion")) {
+		return api.CheckResult{State: api.CheckWarn, Detail: "files are present, but Codex marketplace registration is not established"}
+	}
+	return api.CheckResult{State: api.CheckUnknown, Detail: "Codex marketplace registration not established"}
+}
+
+func checkCodexHookDefinition() api.CheckResult {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return api.CheckResult{State: api.CheckUnknown, Detail: "no home directory"}
+	}
+	for _, root := range codexPluginRoots(home) {
+		hookPath := filepath.Join(root, "hooks", "hooks.json")
+		data, readErr := os.ReadFile(hookPath)
+		if readErr != nil || !strings.Contains(string(data), "${PLUGIN_ROOT}") || !strings.Contains(string(data), "run-hook.sh") {
+			continue
+		}
+		runner := filepath.Join(root, "scripts", "run-hook.sh")
+		if info, statErr := os.Stat(runner); statErr == nil && info.Mode()&0111 != 0 {
+			return api.CheckResult{State: api.CheckPass, Detail: hookPath}
+		}
+	}
+	return api.CheckResult{State: api.CheckUnknown, Detail: "Codex hooks/hooks.json and executable runner not found"}
+}
+
+func checkCodexHooksFeature() api.CheckResult {
+	path, err := runtime.CodexConfigPath()
+	if err != nil {
+		return api.CheckResult{State: api.CheckUnknown, Detail: "Codex config path unavailable"}
+	}
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return api.CheckResult{State: api.CheckPass, Detail: "hooks enabled by default (no config override)"}
+	}
+	if err != nil {
+		return api.CheckResult{State: api.CheckUnknown, Detail: "Codex feature configuration unavailable"}
+	}
+	if enabled, found := codexHooksFeatureOverride(string(data)); found {
+		if !enabled {
+			return api.CheckResult{State: api.CheckWarn, Detail: "hooks disabled in Codex config"}
+		}
+		return api.CheckResult{State: api.CheckPass, Detail: "hooks enabled in Codex config"}
+	}
+	return api.CheckResult{State: api.CheckPass, Detail: "hooks enabled by default (no config override)"}
+}
+
+func codexHooksFeatureOverride(contents string) (bool, bool) {
+	table := ""
+	for _, raw := range strings.Split(contents, "\n") {
+		line := strings.TrimSpace(raw)
+		if hash := strings.IndexByte(line, '#'); hash >= 0 {
+			line = strings.TrimSpace(line[:hash])
+		}
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			table = strings.TrimSpace(line[1 : len(line)-1])
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if (table == "features" && key == "hooks") || key == "features.hooks" {
+			switch value {
+			case "true":
+				return true, true
+			case "false":
+				return false, true
+			}
+		}
+	}
+	return false, false
+}
+
+func checkCodexHookTrust() api.CheckResult {
+	registration := checkCodexPluginRegistration()
+	if registration.State == api.CheckPass {
+		return api.CheckResult{State: api.CheckWarn, Detail: "Codex-managed trust state is not locally inspectable; review `/hooks` after changes"}
+	}
+	return api.CheckResult{State: api.CheckUnknown, Detail: "trust cannot be established until Codex marketplace installation is active; review `/hooks`"}
+}
+
+func checkCodexNativeFooter() api.CheckResult {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return api.CheckResult{State: api.CheckUnknown, Detail: "no home directory"}
+	}
+	configPath, err := runtime.CodexConfigPath()
+	if err != nil {
+		return api.CheckResult{State: api.CheckUnknown, Detail: "Codex config path unavailable"}
+	}
+	status, err := install.InspectCodexTUI(home, configPath)
+	if err != nil {
+		return api.CheckResult{State: api.CheckUnknown, Detail: "native footer configuration unavailable"}
+	}
+	switch status.Status {
+	case "installed":
+		return api.CheckResult{State: api.CheckPass, Detail: "Companion-owned Codex native footer configured"}
+	case "configured_unmanaged":
+		return api.CheckResult{State: api.CheckPass, Detail: "Codex native footer configured outside Companion"}
+	case "drifted":
+		return api.CheckResult{State: api.CheckWarn, Detail: "Companion footer ownership drifted; reinstall/uninstall will require reconciliation"}
+	default:
+		return api.CheckResult{State: api.CheckUnknown, Detail: "Codex native footer not configured"}
+	}
 }
 
 func checkStatusLineWrapper() api.CheckResult {
