@@ -46,9 +46,11 @@ only verifies the mapping and fails open when setup is absent:
 Use the reversible lifecycle commands:
 
 ```bash
-freeinference trace setup --client codex
-freeinference trace uninstall --client codex
+freeinference trace setup codex
+freeinference trace uninstall codex
 ```
+
+The equivalent `--client codex` form is also accepted.
 
 Setup creates a one-time backup, preserves unrelated configuration, refuses
 conflicts, and uninstall restores the backup only when the mapping is still

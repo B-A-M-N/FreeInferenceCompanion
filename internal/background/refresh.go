@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"syscall"
 	"time"
 
@@ -475,9 +476,8 @@ func publicStatusCache(status *api.PublicStatusResponse, now time.Time) (*schema
 		CycleOK:    status.Cycle.OK,
 		CycleError: publicStatusText(status.Cycle.Error),
 	}
-	const maxCachedModels = 256
 	for i, model := range status.Models {
-		if i >= maxCachedModels {
+		if i >= schema.MaxPublicStatusModels {
 			break
 		}
 		if model.ValidationError != "" {
@@ -488,19 +488,15 @@ func publicStatusCache(status *api.PublicStatusResponse, now time.Time) (*schema
 			UptimeRatio: model.UptimeRatio,
 		}
 		if model.Latest != nil {
-			latestAt, parseErr := time.Parse(time.RFC3339Nano, model.Latest.CheckedAt)
-			if parseErr != nil {
+			latest, ok := cachedPublicStatusSample(*model.Latest)
+			if !ok {
 				continue
 			}
-			entry.Latest = &schema.PublicStatusSampleCache{
-				OK:               model.Latest.OK,
-				CheckedAt:        latestAt.UTC(),
-				LatencyMs:        model.Latest.LatencyMs,
-				TTFTMs:           model.Latest.TTFTMs,
-				CompletionTokens: model.Latest.CompletionTokens,
-				ThroughputTps:    model.Latest.ThroughputTps,
-				Error:            publicStatusText(model.Latest.Error),
-			}
+			entry.Latest = &latest
+		}
+		entry.History = cachedPublicStatusHistory(model, entry.Latest)
+		if entry.Latest == nil && len(entry.History) == 0 {
+			continue
 		}
 		cache.Models = append(cache.Models, entry)
 	}
@@ -508,6 +504,96 @@ func publicStatusCache(status *api.PublicStatusResponse, now time.Time) (*schema
 		return nil, errors.New("public status contains no valid model metrics")
 	}
 	return cache, nil
+}
+
+// cachedPublicStatusSample copies one already-validated public sample into
+// the durable schema and normalizes its timestamp. Pointers are copied so a
+// caller cannot mutate the cache through the response object after refresh.
+func cachedPublicStatusSample(sample api.PublicStatusSample) (schema.PublicStatusSampleCache, bool) {
+	checkedAt, err := time.Parse(time.RFC3339Nano, sample.CheckedAt)
+	if err != nil {
+		return schema.PublicStatusSampleCache{}, false
+	}
+	return schema.PublicStatusSampleCache{
+		OK:               copyBool(sample.OK),
+		CheckedAt:        checkedAt.UTC(),
+		LatencyMs:        copyInt64(sample.LatencyMs),
+		TTFTMs:           copyInt64(sample.TTFTMs),
+		CompletionTokens: copyInt64(sample.CompletionTokens),
+		ThroughputTps:    copyFloat64(sample.ThroughputTps),
+		Error:            publicStatusText(sample.Error),
+	}, true
+}
+
+// cachedPublicStatusHistory retains the newest distinct synthetic samples
+// from both history and spark. The endpoint may expose either collection, and
+// deduplication prevents the same check from consuming the whole bound twice.
+func cachedPublicStatusHistory(model api.PublicStatusModel, latest *schema.PublicStatusSampleCache) []schema.PublicStatusSampleCache {
+	type candidate struct {
+		sample api.PublicStatusSample
+		at     time.Time
+	}
+	candidates := make([]candidate, 0, len(model.History)+len(model.Spark))
+	for _, sample := range append(append([]api.PublicStatusSample{}, model.History...), model.Spark...) {
+		cached, ok := cachedPublicStatusSample(sample)
+		if !ok {
+			continue
+		}
+		if latest != nil && cached.CheckedAt.Equal(latest.CheckedAt) {
+			continue
+		}
+		candidates = append(candidates, candidate{sample: sample, at: cached.CheckedAt})
+	}
+	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].at.After(candidates[j].at) })
+	result := make([]schema.PublicStatusSampleCache, 0, minInt(len(candidates), schema.MaxPublicStatusSamplesPerModel))
+	seen := make(map[int64]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		key := candidate.at.UnixNano()
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		cached, ok := cachedPublicStatusSample(candidate.sample)
+		if !ok {
+			continue
+		}
+		result = append(result, cached)
+		if len(result) == schema.MaxPublicStatusSamplesPerModel {
+			break
+		}
+	}
+	return result
+}
+
+func copyBool(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func copyInt64(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func copyFloat64(value *float64) *float64 {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func minInt(left, right int) int {
+	if left < right {
+		return left
+	}
+	return right
 }
 
 func publicStatusText(value string) string {

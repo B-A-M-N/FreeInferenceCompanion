@@ -340,7 +340,8 @@ func statusJSON(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalState,
 	if active != nil {
 		obj["active"] = *active
 	}
-	if snap != nil && snap.Provider.Confirmed && snap.Provider.Name == schema.ProviderFreeInference && gs != nil && gs.PublicStatus != nil {
+	activationMatches := snap != nil && (activationID == "" || snap.ActivationID == activationID)
+	if active != nil && *active && activationMatches && snap.Provider.Confirmed && snap.Provider.Name == schema.ProviderFreeInference && gs != nil && gs.PublicStatus != nil {
 		for _, metric := range gs.PublicStatus.Models {
 			if metric.ModelID != snap.Model.ID {
 				continue

@@ -113,3 +113,17 @@ func TestFetchPublicStatusRejectsOversizedResponse(t *testing.T) {
 		t.Fatal("oversized public status response must fail")
 	}
 }
+
+func FuzzFetchPublicStatusDecoderDoesNotPanic(f *testing.F) {
+	f.Add(`{"models":[{"modelId":"m1","latest":{"ok":true,"checkedAt":"2026-09-01T12:00:00Z"}}],"total":1,"healthy":1,"cycle":{"ok":true,"checkedAt":"2026-09-01T12:00:00Z"}}`)
+	f.Add("not-json")
+	f.Fuzz(func(t *testing.T, body string) {
+		if len(body) > maxPublicStatusBody*2 {
+			return
+		}
+		client := &http.Client{Transport: publicStatusRoundTripper(func(_ *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body))}, nil
+		})}
+		_, _ = FetchPublicStatusWithClient(context.Background(), client)
+	})
+}

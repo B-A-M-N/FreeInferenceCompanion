@@ -117,7 +117,7 @@ func ComposeClaudeCustomHeaders(existing, generatedID string) (string, string, S
 		if ValidateTraceID(existingID) {
 			return existing, existingID, SourceExistingHeader, nil
 		}
-		return existing, "", SourceNone, nil
+		return existing, "", SourceNone, errors.New("existing X-Session-ID is not a valid Companion trace ID")
 	}
 	if generatedID == "" {
 		return existing, "", SourceNone, nil

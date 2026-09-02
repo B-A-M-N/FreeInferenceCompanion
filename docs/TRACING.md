@@ -69,9 +69,11 @@ Codex receives the same header through the selected provider's documented
 Install the Codex mapping explicitly:
 
 ```bash
-freeinference trace setup --client codex
-freeinference trace uninstall --client codex
+freeinference trace setup codex
+freeinference trace uninstall codex
 ```
+
+The equivalent `--client codex` form is also accepted.
 
 Setup keeps a mode-preserving backup and uses a lock, refuses conflicting
 existing mappings, and uninstall restores the original file only when the

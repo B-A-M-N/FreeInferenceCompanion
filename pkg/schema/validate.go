@@ -202,6 +202,97 @@ func validateFailureRecord(f *FailureRecord) error {
 	return nil
 }
 
+// ValidatePublicStatusCache checks the bounded, unauthenticated monitor
+// artifact before it is used or written. A failed refresh may intentionally
+// leave Models empty, but any supplied model/sample must be safe and finite.
+func ValidatePublicStatusCache(c *PublicStatusCache) error {
+	if c == nil {
+		return errors.New("nil public status cache")
+	}
+	if len(c.Source) > 256 || len(c.CycleError) > 200 || len(c.LastError) > 200 {
+		return errors.New("public status cache field is too long")
+	}
+	for name, value := range map[string]string{
+		"source": c.Source, "cycle_error": c.CycleError, "last_error": c.LastError,
+	} {
+		for _, r := range value {
+			if r < 0x20 || r > 0x7e {
+				return fmt.Errorf("public status %s contains unsafe characters", name)
+			}
+		}
+	}
+	if c.Total < 0 || c.Healthy < 0 || c.Unhealthy < 0 ||
+		(c.Total > 0 && (c.Healthy > c.Total || c.Unhealthy > c.Total || c.Healthy+c.Unhealthy > c.Total)) {
+		return errors.New("public status cache contains inconsistent model counts")
+	}
+	if c.ConsecutiveFailure < 0 || c.ConsecutiveFailure > 1000 {
+		return errors.New("public status cache failure count is out of range")
+	}
+	if len(c.Models) > MaxPublicStatusModels {
+		return errors.New("public status cache contains too many models")
+	}
+	seen := make(map[string]struct{}, len(c.Models))
+	for _, model := range c.Models {
+		if model.ModelID == "" || len(model.ModelID) > 256 {
+			return errors.New("public status cache model id is invalid")
+		}
+		for _, r := range model.ModelID {
+			if r < 0x20 || r > 0x7e {
+				return errors.New("public status cache model id contains unsafe characters")
+			}
+		}
+		if _, exists := seen[model.ModelID]; exists {
+			return errors.New("public status cache contains duplicate model ids")
+		}
+		seen[model.ModelID] = struct{}{}
+		if model.UptimeRatio != nil && (math.IsNaN(*model.UptimeRatio) || math.IsInf(*model.UptimeRatio, 0) || *model.UptimeRatio < 0 || *model.UptimeRatio > 1) {
+			return errors.New("public status cache uptime ratio is invalid")
+		}
+		if err := validatePublicStatusCacheSample(model.Latest); err != nil {
+			return err
+		}
+		if len(model.History) > MaxPublicStatusSamplesPerModel {
+			return errors.New("public status cache contains too many samples")
+		}
+		for i := range model.History {
+			if err := validatePublicStatusCacheSample(&model.History[i]); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func validatePublicStatusCacheSample(sample *PublicStatusSampleCache) error {
+	if sample == nil {
+		return nil
+	}
+	if sample.CheckedAt.IsZero() {
+		return errors.New("public status cache sample timestamp is missing")
+	}
+	if sample.LatencyMs != nil && (*sample.LatencyMs < 0 || *sample.LatencyMs > 7*24*60*60*1000) {
+		return errors.New("public status cache latency is out of range")
+	}
+	if sample.TTFTMs != nil && (*sample.TTFTMs < 0 || *sample.TTFTMs > 7*24*60*60*1000) {
+		return errors.New("public status cache ttft is out of range")
+	}
+	if sample.CompletionTokens != nil && (*sample.CompletionTokens < 0 || *sample.CompletionTokens > 1<<40) {
+		return errors.New("public status cache completion tokens are out of range")
+	}
+	if sample.ThroughputTps != nil && (math.IsNaN(*sample.ThroughputTps) || math.IsInf(*sample.ThroughputTps, 0) || *sample.ThroughputTps < 0 || *sample.ThroughputTps > 1e9) {
+		return errors.New("public status cache throughput is invalid")
+	}
+	if len(sample.Error) > 200 {
+		return errors.New("public status cache sample error is too long")
+	}
+	for _, r := range sample.Error {
+		if r < 0x20 || r > 0x7e {
+			return errors.New("public status cache sample error contains unsafe characters")
+		}
+	}
+	return nil
+}
+
 func validateTraceInfo(t *TraceInfo) error {
 	if t.Source != TraceSourceCompanionGenerated && t.Source != TraceSourceExistingHeader && t.Source != TraceSourceNone {
 		return fmt.Errorf("invalid trace source %q", t.Source)

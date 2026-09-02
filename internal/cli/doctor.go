@@ -164,7 +164,7 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 		add("Trace client support", api.CheckResult{State: api.CheckWarn, Detail: "one or more client launchers are unavailable or unverified"})
 	}
 	if inherited, ok := tracing.EnvironmentTrace(); ok && (claudeActivation.Active || codexActivation.Active) {
-		add("Trace correlation", api.CheckResult{State: api.CheckPass, Detail: "active for this Companion-launched process"})
+		add("Trace correlation", api.CheckResult{State: api.CheckWarn, Detail: "inherited trace present but unverified; durable provenance requires a launch receipt"})
 		if tracing.ValidateTraceID(inherited.SessionID) {
 			add("Trace ID format", api.CheckResult{State: api.CheckPass, Detail: "opaque bounded ID format valid"})
 		} else {

@@ -408,10 +408,19 @@ type PublicStatusCache struct {
 	NextRetryAt        *time.Time               `json:"next_retry_at,omitempty"`
 }
 
+// Public-status cache bounds keep the detached worker's durable artifact
+// predictable while retaining enough synthetic samples for incident
+// correlation across the normal 20-minute monitor cadence.
+const (
+	MaxPublicStatusModels          = 256
+	MaxPublicStatusSamplesPerModel = 64
+)
+
 type PublicStatusModelCache struct {
-	ModelID     string                   `json:"model_id"`
-	Latest      *PublicStatusSampleCache `json:"latest,omitempty"`
-	UptimeRatio *float64                 `json:"uptime_ratio,omitempty"`
+	ModelID     string                    `json:"model_id"`
+	Latest      *PublicStatusSampleCache  `json:"latest,omitempty"`
+	History     []PublicStatusSampleCache `json:"history,omitempty"`
+	UptimeRatio *float64                  `json:"uptime_ratio,omitempty"`
 }
 
 type PublicStatusSampleCache struct {

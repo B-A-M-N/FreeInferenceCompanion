@@ -79,6 +79,10 @@ func EnsureCodexTraceHeader(path, providerID string) (CodexTraceMapping, error) 
 		return CodexTraceMapping{}, err
 	}
 	defer lock.Release()
+	return ensureCodexTraceHeaderLocked(path, providerID)
+}
+
+func ensureCodexTraceHeaderLocked(path, providerID string) (CodexTraceMapping, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return CodexTraceMapping{}, err
@@ -186,6 +190,35 @@ func EnsureCodexTraceHeader(path, providerID string) (CodexTraceMapping, error) 
 
 const codexTraceBackupSuffix = ".freeinference-trace.backup"
 
+// SetupCodexTraceConfig performs the complete explicit setup lifecycle under
+// one lock: inspect, backup, and (only when needed) install the mapping. This
+// closes the race window between separate backup and rewrite operations.
+func SetupCodexTraceConfig(path, providerID string) (CodexTraceMapping, error) {
+	if !validCodexName(providerID) {
+		return CodexTraceMapping{}, errors.New("invalid Codex provider name")
+	}
+	lock, err := acquireCodexTraceLock(path)
+	if err != nil {
+		return CodexTraceMapping{}, err
+	}
+	defer lock.Release()
+
+	configured, conflict, err := InspectCodexTraceHeader(path, providerID)
+	if err != nil {
+		return CodexTraceMapping{}, err
+	}
+	if conflict {
+		return CodexTraceMapping{Existing: true}, errors.New("Codex X-Session-ID mapping already points elsewhere")
+	}
+	if configured {
+		return CodexTraceMapping{Ready: true, Existing: true}, nil
+	}
+	if err := backupCodexTraceConfigLocked(path); err != nil {
+		return CodexTraceMapping{}, err
+	}
+	return ensureCodexTraceHeaderLocked(path, providerID)
+}
+
 // BackupCodexTraceConfig makes a one-time, mode-preserving backup before the
 // explicit trace setup command mutates Codex configuration. Existing backups
 // are never overwritten, so uninstall remains reversible to the first state.
@@ -195,6 +228,10 @@ func BackupCodexTraceConfig(path string) error {
 		return err
 	}
 	defer lock.Release()
+	return backupCodexTraceConfigLocked(path)
+}
+
+func backupCodexTraceConfigLocked(path string) error {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return err

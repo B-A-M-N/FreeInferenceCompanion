@@ -74,6 +74,41 @@ func TestComposeClaudeHeadersMalformedFailsOpen(t *testing.T) {
 	}
 }
 
+func TestComposeClaudeHeadersRejectsUnverifiedExistingSession(t *testing.T) {
+	generated, err := GenerateTraceID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := ComposeClaudeCustomHeaders("X-Session-ID: user-session", generated); err == nil {
+		t.Fatal("arbitrary existing X-Session-ID must be reported as a trace conflict")
+	}
+	if err := ValidateClaudeCustomHeaders("X-Session-ID: user-session"); err == nil {
+		t.Fatal("header validation must report an unverified session header")
+	}
+}
+
+func FuzzComposeClaudeCustomHeadersDoesNotPanic(f *testing.F) {
+	f.Add("X-Client: cli\nContent-Type: application/json")
+	f.Add("X-Session-ID: user-session")
+	f.Add("X-Broken")
+	f.Fuzz(func(t *testing.T, input string) {
+		if len(input) > maxHeaderBlockBytes*2 {
+			return
+		}
+		generated, err := GenerateTraceID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		composed, id, source, composeErr := ComposeClaudeCustomHeaders(input, generated)
+		if len(composed) > maxHeaderBlockBytes+TraceIDLength+len(SessionHeader)+2 && composeErr == nil {
+			t.Fatalf("composed headers exceeded expected bound: %d", len(composed))
+		}
+		if composeErr == nil && source != SourceNone && !ValidateTraceID(id) {
+			t.Fatalf("successful composition returned invalid id %q", id)
+		}
+	})
+}
+
 func TestReceiptIsPrivateAndCannotDeleteArbitraryPath(t *testing.T) {
 	t.Setenv("TMPDIR", t.TempDir())
 	r := LaunchReceipt{

@@ -99,7 +99,7 @@ surfaces the user already has:
 | `freeinference dashboard [--status] [--print-url]` | Open FreeInference account dashboard (`--status` for service health page) |
 | `freeinference fi-status [--json] [--problems|--down] [--details]` | Fetch public service status without credentials or local session state; all models are shown by default |
 | `freeinference run claude|codex [args...]` | Explicitly launch a verified client with a fresh per-process `X-Session-ID` correlation |
-| `freeinference trace [setup\|uninstall] [--client codex] [--json]` | Show trace metadata or manage the reversible Codex header mapping |
+| `freeinference trace [setup\|uninstall] [codex] [--json]` | Show trace metadata or manage the reversible Codex header mapping |
 | `freeinference context [--session <id>]` | Show context pressure information |
 | `freeinference cache [--session <id>]` | Show cache efficiency pattern classification and likely diagnoses |
 | `freeinference refresh [--force] [--if-stale --detach] [--worker models\|health\|account-usage\|public-status]` | Refresh cached provider metadata and public model status |

@@ -17,17 +17,19 @@ import (
 )
 
 type traceStatus struct {
-	Enabled        bool   `json:"enabled"`
-	Active         bool   `json:"active"`
-	Verified       bool   `json:"verified"`
-	Client         string `json:"client,omitempty"`
-	TraceID        string `json:"trace_id,omitempty"`
-	Header         string `json:"header"`
-	Provider       string `json:"provider,omitempty"`
-	Source         string `json:"source"`
-	StartedAt      string `json:"started_at,omitempty"`
-	EndpointOrigin string `json:"endpoint_origin,omitempty"`
-	Note           string `json:"note"`
+	Enabled             bool   `json:"enabled"`
+	Active              bool   `json:"active"`
+	Verified            bool   `json:"verified"`
+	Client              string `json:"client,omitempty"`
+	TraceID             string `json:"trace_id,omitempty"`
+	Header              string `json:"header"`
+	Provider            string `json:"provider,omitempty"`
+	Source              string `json:"source"`
+	StartedAt           string `json:"started_at,omitempty"`
+	EndpointOrigin      string `json:"endpoint_origin,omitempty"`
+	CodexMapping        string `json:"codex_mapping,omitempty"`
+	CodexSetupAvailable bool   `json:"codex_setup_available,omitempty"`
+	Note                string `json:"note"`
 }
 
 func cmdTrace(paths state.Paths, args []string, stdout, stderr io.Writer) int {
@@ -70,6 +72,10 @@ func cmdTrace(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 			printTraceUsage(stdout)
 			return 0
 		default:
+			if (operation == "setup" || operation == "uninstall") && clientType == "" && args[i] == "codex" {
+				clientType = schema.ClientCodex
+				continue
+			}
 			fmt.Fprintf(stderr, "usage error: unknown flag or argument %q\n", args[i])
 			return 2
 		}
@@ -109,6 +115,7 @@ func cmdTrace(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 	if resolved != nil {
 		if clientType == "" {
 			activation = traceActivation(resolved.Client, args)
+			clientType = resolved.Client
 		}
 		status.Client = resolved.Client
 		if trace := currentTraceInfo(resolved.Snap, resolved.Client, activation); trace != nil && status.Enabled {
@@ -118,6 +125,9 @@ func cmdTrace(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 		if trace := environmentTraceInfo(clientType, activation); trace != nil {
 			applyTraceStatus(&status, trace)
 		}
+	}
+	if clientType == schema.ClientCodex {
+		applyCodexMappingStatus(&status)
 	}
 	if !status.Active {
 		status.Source = string(tracing.SourceNone)
@@ -137,6 +147,9 @@ func cmdTrace(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	fmt.Fprintf(stdout, "Tracing:       %s\n", boolStatus(status.Enabled))
+	if status.CodexMapping != "" {
+		fmt.Fprintf(stdout, "Codex mapping: %s\n", status.CodexMapping)
+	}
 	if !status.Active {
 		fmt.Fprintln(stdout, "Correlation:   unavailable (no active Companion launch trace)")
 		return 0
@@ -206,11 +219,7 @@ func cmdTraceCodexLifecycle(operation string, args []string, stdout, stderr io.W
 	}
 
 	if operation == "setup" {
-		if err := runtime.BackupCodexTraceConfig(path); err != nil {
-			fmt.Fprintf(stderr, "error: Codex trace backup: %v\n", err)
-			return 1
-		}
-		mapping, err := runtime.EnsureCodexTraceHeader(path, evidence.ProviderID)
+		mapping, err := runtime.SetupCodexTraceConfig(path, evidence.ProviderID)
 		if err != nil {
 			fmt.Fprintf(stderr, "error: Codex trace setup: %v\n", err)
 			return 1
@@ -273,6 +282,51 @@ func applyTraceStatus(status *traceStatus, trace *schema.TraceInfo) {
 	}
 }
 
+func applyCodexMappingStatus(status *traceStatus) {
+	if status == nil {
+		return
+	}
+	path, err := runtime.CodexConfigPath()
+	if err != nil {
+		status.CodexMapping = "unavailable"
+		status.Note = "Codex trace mapping status is unavailable"
+		return
+	}
+	evidence, err := runtime.ResolveCodexProviderConfiguration()
+	if err != nil || !evidence.ProviderSelectionVerified {
+		status.CodexMapping = "unavailable (provider unverified)"
+		status.Note = "Codex trace mapping requires a verified selected provider"
+		return
+	}
+	endpoint, err := api.NormalizeEndpoint(evidence.EndpointURL)
+	if err != nil || !endpoint.IsFI {
+		status.CodexMapping = "not applicable (provider is not FreeInference)"
+		return
+	}
+	configured, conflict, err := runtime.InspectCodexTraceHeader(path, evidence.ProviderID)
+	if err != nil {
+		status.CodexMapping = "unavailable"
+		status.Note = "Codex trace mapping could not be inspected"
+		return
+	}
+	if conflict {
+		status.CodexMapping = "conflict"
+		status.Note = "Codex X-Session-ID mapping is user-owned; Companion will not replace it"
+		return
+	}
+	if configured {
+		status.CodexMapping = "configured"
+		return
+	}
+	status.CodexMapping = "missing"
+	status.CodexSetupAvailable = codexConfigInstallable(path)
+	if status.CodexSetupAvailable {
+		status.Note = "Run `freeinference trace setup --client codex` to install the reversible mapping"
+	} else {
+		status.Note = "Codex trace mapping is missing and its config is not writable"
+	}
+}
+
 func boolStatus(value bool) string {
 	if value {
 		return "enabled"
@@ -290,7 +344,7 @@ func sessionIDFromArgs(args []string) string {
 }
 
 func printTraceUsage(w io.Writer) {
-	fmt.Fprintln(w, "Usage: freeinference trace [setup|uninstall] [--json] [--client claude-code|codex] [--session <id>]")
-	fmt.Fprintln(w, "Show the current per-launch trace correlation metadata.")
-	fmt.Fprintln(w, "Codex lifecycle: `trace setup --client codex` installs a reversible mapping; `trace uninstall --client codex` restores the backup.")
+	fmt.Fprintln(w, "Usage: freeinference trace [status|setup|uninstall] [codex] [--json] [--client claude-code|codex] [--session <id>]")
+	fmt.Fprintln(w, "Show the current per-launch trace correlation metadata and Codex mapping state.")
+	fmt.Fprintln(w, "Codex lifecycle: `trace setup codex` (or `--client codex`) installs a reversible mapping; `trace uninstall codex` restores the backup.")
 }

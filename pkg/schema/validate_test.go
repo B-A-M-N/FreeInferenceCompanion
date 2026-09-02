@@ -4,6 +4,7 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestValidateSnapshotValid(t *testing.T) {
@@ -166,6 +167,47 @@ func TestValidateSnapshotRejectsBadCacheShares(t *testing.T) {
 	if err := ValidateSnapshot(s); err == nil {
 		t.Fatal("cache_read_share > 1 must be rejected")
 	}
+}
+
+func TestValidatePublicStatusCacheBoundsAndFiniteMetrics(t *testing.T) {
+	ok := true
+	badUptime := math.NaN()
+	cache := &PublicStatusCache{
+		Source: "https://status.freeinference.org",
+		Models: []PublicStatusModelCache{{
+			ModelID:     "glm-5.2",
+			UptimeRatio: &badUptime,
+			Latest:      &PublicStatusSampleCache{OK: &ok, CheckedAt: nowForSchemaTest()},
+		}},
+	}
+	if err := ValidatePublicStatusCache(cache); err == nil {
+		t.Fatal("NaN public monitor uptime must be rejected")
+	}
+
+	cache.Models[0].UptimeRatio = nil
+	cache.Models[0].History = make([]PublicStatusSampleCache, MaxPublicStatusSamplesPerModel+1)
+	if err := ValidatePublicStatusCache(cache); err == nil {
+		t.Fatal("oversized public monitor history must be rejected")
+	}
+}
+
+func TestValidatePublicStatusCacheRejectsDuplicateModels(t *testing.T) {
+	ok := true
+	now := nowForSchemaTest()
+	cache := &PublicStatusCache{
+		Source: "https://status.freeinference.org",
+		Models: []PublicStatusModelCache{
+			{ModelID: "same", Latest: &PublicStatusSampleCache{OK: &ok, CheckedAt: now}},
+			{ModelID: "same", Latest: &PublicStatusSampleCache{OK: &ok, CheckedAt: now}},
+		},
+	}
+	if err := ValidatePublicStatusCache(cache); err == nil {
+		t.Fatal("duplicate public monitor models must be rejected")
+	}
+}
+
+func nowForSchemaTest() time.Time {
+	return time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
 }
 
 func TestMigrateV1ClearsLiveContext(t *testing.T) {

@@ -84,13 +84,14 @@ type reportHealth struct {
 }
 
 type reportModelMonitor struct {
-	Model       string     `json:"model"`
-	OK          *bool      `json:"ok,omitempty"`
-	UptimeRatio *float64   `json:"uptime_ratio,omitempty"`
-	LatencyMs   *int64     `json:"latency_ms,omitempty"`
-	TTFTMs      *int64     `json:"ttft_ms,omitempty"`
-	CheckedAt   *time.Time `json:"checked_at,omitempty"`
-	Error       string     `json:"error,omitempty"`
+	Model         string     `json:"model"`
+	OK            *bool      `json:"ok,omitempty"`
+	UptimeRatio   *float64   `json:"uptime_ratio,omitempty"`
+	LatencyMs     *int64     `json:"latency_ms,omitempty"`
+	TTFTMs        *int64     `json:"ttft_ms,omitempty"`
+	ThroughputTps *float64   `json:"throughput_tps,omitempty"`
+	CheckedAt     *time.Time `json:"checked_at,omitempty"`
+	Error         string     `json:"error,omitempty"`
 }
 
 type reportAccountUsage struct {
@@ -265,6 +266,7 @@ func buildReportModelMonitor(gs *schema.GlobalState, modelID string) *reportMode
 			monitor.OK = metric.Latest.OK
 			monitor.LatencyMs = metric.Latest.LatencyMs
 			monitor.TTFTMs = metric.Latest.TTFTMs
+			monitor.ThroughputTps = metric.Latest.ThroughputTps
 			checked := metric.Latest.CheckedAt
 			monitor.CheckedAt = &checked
 			monitor.Error = secure.SanitizeField(metric.Latest.Error)
@@ -333,6 +335,9 @@ func printMarkdownReport(stdout io.Writer, report *reportData, reveal bool) {
 		if report.ModelMonitor.LatencyMs != nil {
 			fmt.Fprintf(stdout, "Latency: %dms\n", *report.ModelMonitor.LatencyMs)
 		}
+		if report.ModelMonitor.ThroughputTps != nil {
+			fmt.Fprintf(stdout, "Throughput: %.1f t/s\n", *report.ModelMonitor.ThroughputTps)
+		}
 		if report.ModelMonitor.CheckedAt != nil {
 			fmt.Fprintf(stdout, "Checked: %s\n", report.ModelMonitor.CheckedAt.UTC().Format(time.RFC3339))
 		}
@@ -361,8 +366,36 @@ func printMarkdownReport(stdout io.Writer, report *reportData, reveal bool) {
 		fmt.Fprintln(stdout)
 		fmt.Fprintln(stdout, "--- Incident Summary ---")
 		fmt.Fprintf(stdout, "Failures: %d\n", report.Incidents.Total)
+		for _, count := range report.Incidents.ByStatus {
+			fmt.Fprintf(stdout, "  HTTP %-19s %d\n", count.Name, count.Count)
+		}
 		for _, count := range report.Incidents.ByCategory {
 			fmt.Fprintf(stdout, "  %-24s %d\n", count.Name, count.Count)
+		}
+		if len(report.Incidents.Recent) > 0 {
+			fmt.Fprintln(stdout, "Latest:")
+			limit := len(report.Incidents.Recent)
+			if limit > 5 {
+				limit = 5
+			}
+			for _, incident := range report.Incidents.Recent[:limit] {
+				status := "—"
+				if incident.HTTPStatus != nil {
+					status = fmt.Sprintf("%d", *incident.HTTPStatus)
+				}
+				model := incident.Model
+				if model == "" {
+					model = "?"
+				}
+				fmt.Fprintf(stdout, "  %s  %-16s %-4s %-20s", incident.At.UTC().Format(time.RFC3339), model, status, incident.Category)
+				if incident.Retryable != nil {
+					fmt.Fprintf(stdout, " retryable=%t", *incident.Retryable)
+				}
+				if incident.PublicMonitor != nil {
+					fmt.Fprintf(stdout, " monitor=%s", incident.PublicMonitor.Status)
+				}
+				fmt.Fprintln(stdout)
+			}
 		}
 	}
 

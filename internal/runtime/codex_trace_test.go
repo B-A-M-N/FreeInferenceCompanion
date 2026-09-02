@@ -81,6 +81,54 @@ func TestCodexTraceBackupRestoreIsReversible(t *testing.T) {
 	}
 }
 
+func TestCodexTraceSetupIsAtomicAndIdempotent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	original := "model_provider = \"freeinference\"\n[model_providers.freeinference]\nbase_url=\"https://freeinference.org/v1\"\nenv_key=\"CODEX_FI_KEY\"\n"
+	if err := os.WriteFile(path, []byte(original), 0640); err != nil {
+		t.Fatal(err)
+	}
+	first, err := SetupCodexTraceConfig(path, "freeinference")
+	if err != nil || !first.Ready || !first.Modified {
+		t.Fatalf("first setup = %#v, %v", first, err)
+	}
+	backup, err := os.ReadFile(path + codexTraceBackupSuffix)
+	if err != nil || string(backup) != original {
+		t.Fatalf("backup = %q, err=%v", backup, err)
+	}
+	second, err := SetupCodexTraceConfig(path, "freeinference")
+	if err != nil || !second.Ready || second.Modified {
+		t.Fatalf("second setup = %#v, %v", second, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0640 {
+		t.Fatalf("setup changed config mode: %v, %o", err, info.Mode().Perm())
+	}
+}
+
+func TestCodexTraceFixtureCorpus(t *testing.T) {
+	fixtures := []string{
+		"model_provider=\"freeinference\"\r\n[model_providers.\"freeinference\"]\r\nbase_url=\"https://freeinference.org/v1\"\r\nenv_key=\"CODEX_FI_KEY\"\r\n",
+		"[model_providers.freeinference]\nbase_url=\"https://freeinference.org/v1\"\nenv_key=\"CODEX_FI_KEY\"\nenv_http_headers = { \"X-Other\" = \"OTHER_ENV\" }\n",
+		"[model_providers.freeinference]\nbase_url=\"https://freeinference.org/v1\"\nenv_key=\"CODEX_FI_KEY\"\n[model_providers.freeinference.env_http_headers]\n# keep\n\"X-Other\" = \"OTHER_ENV\"\n",
+	}
+	for i, fixture := range fixtures {
+		t.Run(string(rune('a'+i)), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(path, []byte(fixture), 0600); err != nil {
+				t.Fatal(err)
+			}
+			mapping, err := EnsureCodexTraceHeader(path, "freeinference")
+			if err != nil || !mapping.Ready {
+				t.Fatalf("fixture setup = %#v, %v", mapping, err)
+			}
+			configured, conflict, err := InspectCodexTraceHeader(path, "freeinference")
+			if err != nil || !configured || conflict {
+				t.Fatalf("fixture inspect = %t, %t, %v", configured, conflict, err)
+			}
+		})
+	}
+}
+
 func FuzzInlineHeaderMapDoesNotPanic(f *testing.F) {
 	f.Add(`{"X-Session-ID" = "FI_TRACE_SESSION_ID"}`)
 	f.Add("{")

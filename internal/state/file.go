@@ -639,6 +639,13 @@ func LoadGlobal(paths Paths) (*schema.GlobalState, error) {
 	if err := readJSONQuarantine(paths.GlobalPublicStatus(), &gs.PublicStatus, "public-status"); err != nil {
 		loadErr = err
 	}
+	if gs.PublicStatus != nil {
+		if err := schema.ValidatePublicStatusCache(gs.PublicStatus); err != nil {
+			quarantineGlobalFile(paths.GlobalPublicStatus(), "public-status", schema.QuarantineReason(err))
+			gs.PublicStatus = nil
+			loadErr = fmt.Errorf("quarantined public-status: %w", err)
+		}
+	}
 	if err := readJSONQuarantine(paths.GlobalCircuitBreakers(), &gs.CircuitBreakers, "circuit-breakers"); err != nil {
 		loadErr = err
 	}
@@ -706,6 +713,9 @@ func SaveAccountUsageCapability(paths Paths, c *schema.AccountUsageCapability) e
 
 // SavePublicStatus writes the unauthenticated public monitor cache atomically.
 func SavePublicStatus(paths Paths, s *schema.PublicStatusCache) error {
+	if err := schema.ValidatePublicStatusCache(s); err != nil {
+		return fmt.Errorf("validate public status cache: %w", err)
+	}
 	if err := paths.EnsureDirs(); err != nil {
 		return err
 	}

@@ -133,6 +133,7 @@ func printFailureReport(w io.Writer, report *incidents.Report) {
 		fmt.Fprintf(w, "Failure incidents: %d\n", report.Total)
 	}
 	printIncidentCounts(w, "By category", report.ByCategory)
+	printIncidentCounts(w, "By HTTP status", report.ByStatus)
 	printIncidentCounts(w, "By model", report.ByModel)
 	printIncidentCounts(w, "By client", report.ByClient)
 	if len(report.Recent) > 0 {
@@ -144,6 +145,9 @@ func printFailureReport(w io.Writer, report *incidents.Report) {
 			}
 			if incident.HTTPStatus != nil {
 				fmt.Fprintf(w, " http=%d", *incident.HTTPStatus)
+			}
+			if incident.PublicMonitor != nil {
+				fmt.Fprintf(w, " monitor=%s", incident.PublicMonitor.Status)
 			}
 			fmt.Fprintln(w)
 		}

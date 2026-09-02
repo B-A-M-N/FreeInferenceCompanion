@@ -466,7 +466,7 @@ func renderFIStatusHuman(stdout io.Writer, out fiStatusOutput, details bool, wid
 }
 
 func renderFIStatusWide(stdout io.Writer, models []fiStatusModel) {
-	fmt.Fprintln(stdout, "MODEL                    STATUS  LATENCY  TTFT     THROUGHPUT  UPTIME  CHECKED")
+	fmt.Fprintln(stdout, "MODEL                    STATUS  LATENCY  TTFT     THROUGHPUT  MONITOR UPTIME  CHECKED")
 	fmt.Fprintln(stdout, "──────────────────────────────────────────────────────────────────────────────")
 	for _, model := range models {
 		fmt.Fprintf(stdout, "%-24s %-7s %-8s %-8s %-11s %-7s %s\n",
@@ -476,7 +476,7 @@ func renderFIStatusWide(stdout io.Writer, models []fiStatusModel) {
 }
 
 func renderFIStatusMedium(stdout io.Writer, models []fiStatusModel) {
-	fmt.Fprintln(stdout, "MODEL                    STATUS  LATENCY  TTFT     UPTIME")
+	fmt.Fprintln(stdout, "MODEL                    STATUS  LATENCY  TTFT     MONITOR UPTIME")
 	fmt.Fprintln(stdout, "──────────────────────────────────────────────────────────")
 	for _, model := range models {
 		fmt.Fprintf(stdout, "%-24s %-7s %-8s %-8s %-7s\n",
@@ -487,7 +487,7 @@ func renderFIStatusMedium(stdout io.Writer, models []fiStatusModel) {
 
 func renderFIStatusNarrow(stdout io.Writer, models []fiStatusModel) {
 	for _, model := range models {
-		fmt.Fprintf(stdout, "%-20s %-7s %-7s uptime %s\n",
+		fmt.Fprintf(stdout, "%-20s %-7s %-7s monitor uptime %s\n",
 			fitStatusModel(model.ID, 20), strings.ToUpper(model.Status), formatMilliseconds(model.LatencyMs), formatUptime(model.UptimePct))
 	}
 }
@@ -498,7 +498,7 @@ func renderFIStatusDetails(stdout io.Writer, model fiStatusModel) {
 	fmt.Fprintf(stdout, "  Latency:       %s\n", formatMilliseconds(model.LatencyMs))
 	fmt.Fprintf(stdout, "  TTFT:          %s\n", formatMilliseconds(model.TTFTMs))
 	fmt.Fprintf(stdout, "  Throughput:    %s\n", formatThroughput(model.Throughput))
-	fmt.Fprintf(stdout, "  Uptime:        %s\n", formatUptime(model.UptimePct))
+	fmt.Fprintf(stdout, "  Monitor uptime: %s\n", formatUptime(model.UptimePct))
 	if model.CurrentStateFor != nil {
 		prefix := ""
 		if model.StateDurationAtLeast {

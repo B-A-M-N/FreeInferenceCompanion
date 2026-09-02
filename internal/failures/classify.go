@@ -15,9 +15,9 @@ const maxInputBytes = 64 << 10
 
 const (
 	RateLimit            = "rate_limit"
-	AuthenticationFailed = "auth"
-	PermissionDenied     = "permission"
-	InvalidRequest       = "invalid"
+	AuthenticationFailed = "authentication_failed"
+	PermissionDenied     = "permission_denied"
+	InvalidRequest       = "invalid_request"
 	RequestTimeout       = "request_timeout"
 	ModelNotFound        = "model_not_found"
 	Overloaded           = "overloaded"
@@ -264,7 +264,10 @@ func classify(raw string, status int, providerType string) (string, string) {
 	if strings.Contains(lower, "no such host") || strings.Contains(lower, "dns") || strings.Contains(lower, "name resolution") {
 		return NetworkError, "dns"
 	}
-	if strings.Contains(lower, "connect timeout") || strings.Contains(lower, "connection refused") || strings.Contains(lower, "dial tcp") {
+	if strings.Contains(lower, "connect timeout") {
+		return RequestTimeout, "connect"
+	}
+	if strings.Contains(lower, "connection refused") || strings.Contains(lower, "dial tcp") {
 		return NetworkError, "connect"
 	}
 	if strings.Contains(lower, "read timeout") || strings.Contains(lower, "i/o timeout") || strings.Contains(lower, "deadline exceeded") || strings.Contains(lower, "timed out") || strings.Contains(lower, "timeout") {
@@ -329,11 +332,15 @@ func retryableFor(category string) *bool {
 	switch category {
 	case RateLimit, RequestTimeout, Overloaded, BadGateway, GatewayTimeout, ServerError, NetworkError:
 		value = true
-	case TLSError, AuthenticationFailed, PermissionDenied, InvalidRequest, ModelNotFound, Cancelled, MaxOutputTokens, Unknown:
+	case TLSError, AuthenticationFailed, PermissionDenied, InvalidRequest, ModelNotFound, Cancelled, MaxOutputTokens:
 		// These categories are evidence that retrying the same request is
 		// unlikely to help. Keep the explicit false value so consumers can
 		// distinguish that conclusion from an unavailable signal.
 		value = false
+	case Unknown:
+		// An unrecognized error does not provide enough evidence to infer a
+		// retry policy. Keep this optional rather than inventing "false".
+		return nil
 	default:
 		return nil
 	}

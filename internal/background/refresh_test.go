@@ -245,6 +245,35 @@ func TestPublicStatusWorkerUsesUnauthenticatedBoundedCache(t *testing.T) {
 	}
 }
 
+func TestPublicStatusCacheRetainsBoundedHistoryForCorrelation(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	ok := true
+	history := make([]api.PublicStatusSample, 0, schema.MaxPublicStatusSamplesPerModel+10)
+	for i := 0; i < schema.MaxPublicStatusSamplesPerModel+10; i++ {
+		checked := now.Add(-time.Duration(i+1) * 20 * time.Minute)
+		history = append(history, api.PublicStatusSample{OK: &ok, CheckedAt: checked.Format(time.RFC3339)})
+	}
+	latest := api.PublicStatusSample{OK: &ok, CheckedAt: now.Format(time.RFC3339)}
+	cache, err := publicStatusCache(&api.PublicStatusResponse{
+		Total: 1, Healthy: 1,
+		Cycle:  api.PublicStatusCycle{OK: &ok, CheckedAt: now.Format(time.RFC3339)},
+		Models: []api.PublicStatusModel{{ModelID: "glm-5.2", Latest: &latest, History: history}},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := cache.Models[0]
+	if len(model.History) != schema.MaxPublicStatusSamplesPerModel {
+		t.Fatalf("history length=%d, want %d", len(model.History), schema.MaxPublicStatusSamplesPerModel)
+	}
+	if !model.History[0].CheckedAt.After(model.History[len(model.History)-1].CheckedAt) {
+		t.Fatalf("history is not newest-first: first=%s last=%s", model.History[0].CheckedAt, model.History[len(model.History)-1].CheckedAt)
+	}
+	if model.History[0].CheckedAt.Equal(model.Latest.CheckedAt) {
+		t.Fatal("latest sample was duplicated into history")
+	}
+}
+
 func TestStaleWorkers(t *testing.T) {
 	server := modelsServer(t, nil, func(w http.ResponseWriter, r *http.Request) { writeModelsJSON(w) })
 	defer server.Close()

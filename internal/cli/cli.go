@@ -339,7 +339,7 @@ Usage:
   freeinference companion status|enable|disable
   freeinference fi-status [--json] [--problems|--down] [--details] [--fail-degraded] [--refresh] [--all]
   freeinference run claude|codex [args...]
-  freeinference trace [--json] [--client claude-code|codex] [--session <id>]
+  freeinference trace [status|setup|uninstall] [codex] [--json] [--client claude-code|codex] [--session <id>]
   freeinference version [--json]
   freeinference hook <client> <event>
 
@@ -544,9 +544,9 @@ Flags:
   --help           Show this help message
 `
 
-	helpTrace = `Usage: freeinference trace [--json] [--client claude-code|codex] [--session <id>] [--help]
+	helpTrace = `Usage: freeinference trace [status|setup|uninstall] [codex] [--json] [--client claude-code|codex] [--session <id>] [--help]
 
-Show the current per-launch X-Session-ID correlation metadata.
+Show the current per-launch X-Session-ID correlation metadata and Codex mapping state.
 
 Trace IDs are opaque, random, and retained only as private session metadata.
 No request content or credentials are included.

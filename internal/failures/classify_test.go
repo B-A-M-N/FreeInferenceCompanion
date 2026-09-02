@@ -28,7 +28,7 @@ func TestNormalizeHTTPAndTransportFailures(t *testing.T) {
 		{"connect reset", "read: connection reset by peer", NetworkError, 0, "connection_reset", true},
 		{"dns", "dial tcp: lookup api: no such host", NetworkError, 0, "dns", true},
 		{"tls", "tls handshake failed: x509 certificate", TLSError, 0, "tls", false},
-		{"timeout", "connect timeout", NetworkError, 0, "connect", true},
+		{"timeout", "connect timeout", RequestTimeout, 0, "connect", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
