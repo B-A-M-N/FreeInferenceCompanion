@@ -690,7 +690,7 @@ func checkCodexHooksFeature() api.CheckResult {
 }
 
 func readDoctorFile(path string, maxBytes int64) ([]byte, error) {
-	f, err := openDoctorFile(path)
+	f, err := config.OpenNoFollow(path)
 	if err != nil {
 		return nil, err
 	}

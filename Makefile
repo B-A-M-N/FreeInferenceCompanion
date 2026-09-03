@@ -120,7 +120,7 @@ package: build-all
 		else \
 			tmp_archive="$$archive.tmp"; \
 			rm -f "$$tmp_archive" "$$archive"; \
-			if ( cd "$$staging" && LC_ALL=C find "$$archive_name" -print | LC_ALL=C sort | COPYFILE_DISABLE=1 tar --format=ustar --mtime="@$$epoch" --uid=0 --gid=0 --uname=root --gname=root -cf "$$tmp_archive" -T - ) && gzip -n < "$$tmp_archive" > "$$archive"; then \
+			if ( cd "$$staging" && LC_ALL=C find "$$archive_name" -print | LC_ALL=C sort | COPYFILE_DISABLE=1 tar --no-recursion --format=ustar --mtime="@$$epoch" --uid=0 --gid=0 --uname=root --gname=root -cf "$$tmp_archive" -T - ) && gzip -n < "$$tmp_archive" > "$$archive"; then \
 				rm -f "$$tmp_archive"; \
 			else \
 				rm -f "$$tmp_archive" "$$archive"; \

@@ -454,8 +454,10 @@ func commitRelease(extractDir string, paths Paths, opts Options, manifest *Marke
 		result.Warnings = append(result.Warnings, warnings...)
 		if len(warnings) > 0 {
 			result.PartiallyInstalled = true
-			for _, warning := range warnings {
-				fmt.Fprintf(stdout, "  Warning: %s\n", warning)
+			if stdout != nil {
+				for _, warning := range warnings {
+					fmt.Fprintf(stdout, "  Warning: %s\n", warning)
+				}
 			}
 		}
 	}
