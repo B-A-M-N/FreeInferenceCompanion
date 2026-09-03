@@ -441,13 +441,6 @@ func priorDigest(metadata *InstallationMetadata, claude bool) string {
 	return metadata.CodexPluginSHA256
 }
 
-func priorMarketplaceDigest(metadata *InstallationMetadata) string {
-	if metadata == nil {
-		return ""
-	}
-	return metadata.CodexMarketplaceSHA256
-}
-
 func manifestURLOrigin(raw string) string {
 	if u, err := url.Parse(raw); err == nil {
 		return u.Scheme + "://" + u.Host
