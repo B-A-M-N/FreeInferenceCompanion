@@ -59,7 +59,8 @@ freeinference fi-status --details
 
 All models are shown by default. Use `--problems`/`--down` for only down or
 unknown models. `--refresh` and `--all` remain deprecated compatibility
-no-ops.
+no-ops. The same operation is directly discoverable in the Codex TUI as
+`$freeinference-fi-status`.
 
 ### `freeinference status`
 

@@ -34,9 +34,10 @@ Ensure `$HOME/.local/bin` is on `PATH`, then run:
 freeinference status
 ```
 
-`freeinference doctor` is optional. It performs bounded local checks and may
-contact configured metadata/health endpoints, but it does not send an
-inference request unless `--probe --model <name>` is explicitly supplied.
+`freeinference doctor` is optional. When FreeInference is active, it performs
+one bounded authenticated model-catalog check in addition to local checks. It
+does not query health/account/public-status endpoints or send an inference
+request unless `--probe --model <name>` is explicitly supplied.
 
 The combined platform ZIP contains the Claude Code plugin tree. Codex is
 installed separately through its native marketplace manager. The CLI installer

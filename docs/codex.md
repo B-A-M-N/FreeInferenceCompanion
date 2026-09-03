@@ -180,6 +180,7 @@ After installation, these skills are available in the Codex TUI:
 
 - `$freeinference` (router and full reference)
 - `$freeinference-status`
+- `$freeinference-fi-status`
 - `$freeinference-models`
 - `$freeinference-doctor`
 - `$freeinference-report`

@@ -54,9 +54,9 @@ The important diagnostics are surfaced inside the native clients as skills:
   `/freeinference-companion:freeinference-doctor`,
   `/freeinference-companion:freeinference-report`, and
   `/freeinference-companion:freeinference-cache`.
-- Codex: `$freeinference-status`, `$freeinference-models`,
-  `$freeinference-doctor`, `$freeinference-report`, and
-  `$freeinference-cache`.
+- Codex: `$freeinference-status`, `$freeinference-fi-status`,
+  `$freeinference-models`, `$freeinference-doctor`, `$freeinference-report`,
+  and `$freeinference-cache`.
 
 These native skills are command guidance and discovery surfaces; the
 underlying CLI remains available for scripts and terminal use. The remaining
@@ -241,6 +241,7 @@ it.
 | Cache diagnostics | [Classifications and limits](docs/CACHE_DIAGNOSTICS.md) |
 | Security model | [Security and vulnerability reporting](SECURITY.md) |
 | Development and release | [Development](docs/DEVELOPMENT.md) · [Releasing](docs/RELEASING.md) |
+| Release proof | [Native client evidence](docs/EVIDENCE.md) |
 | Release history | [CHANGELOG](CHANGELOG.md) |
 
 ## Useful commands
