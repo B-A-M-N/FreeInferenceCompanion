@@ -103,6 +103,36 @@ jobs:
           print('Codex manifest and lifecycle hooks are internally consistent.')
           "
 
+  codex-runtime:
+    name: Codex CLI plugin install (pinned)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install pinned Codex CLI
+        run: npm install --global @openai/codex@0.149.0
+      - name: Install staged local marketplace plugin
+        env:
+          CODEX_HOME: ${{ runner.temp }}/codex-home
+        run: |
+          set -euo pipefail
+          mkdir -p "$CODEX_HOME"
+          codex plugin marketplace add "$GITHUB_WORKSPACE/codex-marketplace" --json
+          codex plugin add freeinference-companion@freeinference-companion-local --json
+          codex plugin list --json > "$RUNNER_TEMP/codex-plugin-list.json"
+          python3 - "$RUNNER_TEMP/codex-plugin-list.json" <<'PY'
+          import json
+          import sys
+
+          data = json.load(open(sys.argv[1]))
+          installed = data.get("installed", [])
+          assert any(
+              item.get("pluginId") == "freeinference-companion@freeinference-companion-local"
+              and item.get("installed") is True
+              for item in installed
+          ), data
+          print("Codex plugin installed and reported by the real CLI.")
+          PY
+
   bench:
     name: Benchmarks (average latency gate)
     runs-on: ubuntu-latest
@@ -234,6 +264,7 @@ jobs:
     needs:
       - lint-and-test
       - plugin-validity
+      - codex-runtime
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -260,6 +291,7 @@ jobs:
     needs:
       - lint-and-test
       - plugin-validity
+      - codex-runtime
       - macos-runtime
       - build-static
       - cross-build

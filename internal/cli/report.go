@@ -79,6 +79,8 @@ type reportCompaction struct {
 type reportHealth struct {
 	Status    string `json:"status"`
 	Checked   string `json:"checked"`
+	AgeSecs   int64  `json:"age_seconds"`
+	Stale     bool   `json:"stale"`
 	Healthy   *int   `json:"healthy_count,omitempty"`
 	Unhealthy *int   `json:"unhealthy_count,omitempty"`
 }
@@ -91,11 +93,15 @@ type reportModelMonitor struct {
 	TTFTMs        *int64     `json:"ttft_ms,omitempty"`
 	ThroughputTps *float64   `json:"throughput_tps,omitempty"`
 	CheckedAt     *time.Time `json:"checked_at,omitempty"`
+	AgeSecs       *int64     `json:"age_seconds,omitempty"`
+	Stale         bool       `json:"stale,omitempty"`
 	Error         string     `json:"error,omitempty"`
 }
 
 type reportAccountUsage struct {
 	FetchedAt     string `json:"fetched_at"`
+	AgeSecs       int64  `json:"age_seconds"`
+	Stale         bool   `json:"stale"`
 	RequestsUsed  *int64 `json:"requests_used,omitempty"`
 	RequestsLimit *int64 `json:"requests_limit,omitempty"`
 	TokensUsed    *int64 `json:"tokens_used,omitempty"`
@@ -120,30 +126,41 @@ func cmdReport(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 	}
 
 	gs := loadGlobal(paths)
+	now := time.Now().UTC()
 	report := &reportData{
 		Tool:        "freeinference-companion",
 		Version:     Version,
-		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		GeneratedAt: now.Format(time.RFC3339),
 		Note:        reportNote,
 	}
 	activation := activationForCLICommand("report", args)
 	report.RuntimeActive = activation.Active
 	if gs.Health != nil {
+		age := now.Sub(gs.Health.FetchedAt)
 		report.Health = &reportHealth{
 			Status:    gs.Health.Status,
 			Checked:   gs.Health.FetchedAt.UTC().Format(time.RFC3339),
+			AgeSecs:   max(0, int64(age.Seconds())),
+			Stale:     age < 0 || age > schema.DefaultHealthMaxAge,
 			Healthy:   gs.Health.HealthyCount,
 			Unhealthy: gs.Health.UnhealthyCount,
 		}
 	}
-	if gs.HasAuthoritativeAccountUsage() {
-		report.AccountUsage = &reportAccountUsage{
-			FetchedAt:     gs.AccountUsage.FetchedAt.UTC().Format(time.RFC3339),
-			RequestsUsed:  gs.AccountUsage.RequestsUsed,
-			RequestsLimit: gs.AccountUsage.RequestsLimit,
-			TokensUsed:    gs.AccountUsage.TokensUsed,
-			TokensLimit:   gs.AccountUsage.TokensLimit,
+	if gs != nil && gs.AccountUsage != nil && gs.AccountUsageCapability != nil &&
+		gs.AccountUsageCapability.State == schema.CapabilitySupported && schema.ValidateAccountUsage(gs.AccountUsage) == nil {
+		age := now.Sub(gs.AccountUsage.FetchedAt)
+		usage := &reportAccountUsage{
+			FetchedAt: gs.AccountUsage.FetchedAt.UTC().Format(time.RFC3339),
+			AgeSecs:   max(0, int64(age.Seconds())),
+			Stale:     age < 0 || age > schema.DefaultAccountUsageMaxAge,
 		}
+		if !usage.Stale {
+			usage.RequestsUsed = gs.AccountUsage.RequestsUsed
+			usage.RequestsLimit = gs.AccountUsage.RequestsLimit
+			usage.TokensUsed = gs.AccountUsage.TokensUsed
+			usage.TokensLimit = gs.AccountUsage.TokensLimit
+		}
+		report.AccountUsage = usage
 	}
 	incidentFilter := incidents.Filter{Since: time.Now().UTC().Add(-24 * time.Hour)}
 
@@ -158,11 +175,11 @@ func cmdReport(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 		report.Session = buildReportSession(resolved.Snap, reveal)
 		incidentFilter.Client = resolved.Client
 		incidentFilter.SessionID = resolved.SessionID
-		report.ModelMonitor = buildReportModelMonitor(gs, resolved.Snap.Model.ID)
+		report.ModelMonitor = buildReportModelMonitor(gs, resolved.Snap.Model.ID, now)
 
 		// Compute budget projection for the markdown report.
-		if gs.HasAuthoritativeAccountUsage() {
-			proj := engine.ProjectBudget(gs.AccountUsage, resolved.Snap, time.Now().UTC(), gs.CircuitBreakers)
+		if report.AccountUsage != nil && !report.AccountUsage.Stale {
+			proj := engine.ProjectBudget(gs.AccountUsage, resolved.Snap, now, gs.CircuitBreakers)
 			if proj.Status != engine.BudgetUnknown {
 				report.BudgetProjection = engineProjectBudgetFromProj(proj)
 			}
@@ -180,6 +197,9 @@ func cmdReport(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 		}
 		if traceActivation.Active && resolved != nil {
 			report.Trace = buildReportTrace(resolved.Snap)
+			if report.Trace != nil && !reveal {
+				report.Trace.TraceID = displaySessionID(report.Trace.TraceID, false)
+			}
 		}
 	}
 
@@ -253,7 +273,7 @@ func buildReportSession(snap *schema.Snapshot, reveal bool) *reportSession {
 	return rs
 }
 
-func buildReportModelMonitor(gs *schema.GlobalState, modelID string) *reportModelMonitor {
+func buildReportModelMonitor(gs *schema.GlobalState, modelID string, now time.Time) *reportModelMonitor {
 	if gs == nil || gs.PublicStatus == nil || modelID == "" {
 		return nil
 	}
@@ -269,6 +289,9 @@ func buildReportModelMonitor(gs *schema.GlobalState, modelID string) *reportMode
 			monitor.ThroughputTps = metric.Latest.ThroughputTps
 			checked := metric.Latest.CheckedAt
 			monitor.CheckedAt = &checked
+			age := max(0, int64(now.Sub(checked).Seconds()))
+			monitor.AgeSecs = &age
+			monitor.Stale = now.Before(checked) || now.Sub(checked) > 45*time.Minute
 			monitor.Error = secure.SanitizeField(metric.Latest.Error)
 		}
 		return monitor
@@ -320,6 +343,9 @@ func printMarkdownReport(stdout io.Writer, report *reportData, reveal bool) {
 			fmt.Fprintf(stdout, "Models:  %d healthy, %d unhealthy\n", *report.Health.Healthy, *report.Health.Unhealthy)
 		}
 		fmt.Fprintf(stdout, "Checked: %s\n", report.Health.Checked)
+		if report.Health.Stale {
+			fmt.Fprintln(stdout, "Freshness: stale")
+		}
 	}
 
 	if report.ModelMonitor != nil {
@@ -341,6 +367,9 @@ func printMarkdownReport(stdout io.Writer, report *reportData, reveal bool) {
 		if report.ModelMonitor.CheckedAt != nil {
 			fmt.Fprintf(stdout, "Checked: %s\n", report.ModelMonitor.CheckedAt.UTC().Format(time.RFC3339))
 		}
+		if report.ModelMonitor.Stale {
+			fmt.Fprintln(stdout, "Freshness: stale")
+		}
 		if report.ModelMonitor.Error != "" {
 			fmt.Fprintf(stdout, "Error:   %s\n", report.ModelMonitor.Error)
 		}
@@ -350,6 +379,9 @@ func printMarkdownReport(stdout io.Writer, report *reportData, reveal bool) {
 		fmt.Fprintln(stdout)
 		fmt.Fprintln(stdout, "--- Account Usage ---")
 		fmt.Fprintf(stdout, "Updated: %s\n", report.AccountUsage.FetchedAt)
+		if report.AccountUsage.Stale {
+			fmt.Fprintln(stdout, "Freshness: stale (not used for budget calculations)")
+		}
 		if report.AccountUsage.RequestsUsed != nil || report.AccountUsage.RequestsLimit != nil {
 			fmt.Fprintf(stdout, "Requests: %s\n", formatQuotaPair(report.AccountUsage.RequestsUsed, report.AccountUsage.RequestsLimit))
 		}

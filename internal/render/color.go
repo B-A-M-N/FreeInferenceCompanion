@@ -472,6 +472,7 @@ type ViewModel struct {
 
 	HealthStatus  string `json:"health_status,omitempty"`
 	HealthAgeSecs *int64 `json:"health_age_seconds,omitempty"`
+	HealthStale   bool   `json:"health_stale,omitempty"`
 
 	// Model-specific public monitor metrics. These are cache-only and never
 	// trigger a request from a render or status-line path.
@@ -529,6 +530,8 @@ type ViewModel struct {
 
 	// Account usage fields (FreeInference account-level quotas)
 	AccountUsageFetchedAt     *time.Time `json:"account_usage_fetched_at,omitempty"`
+	AccountUsageAgeSecs       *int64     `json:"account_usage_age_seconds,omitempty"`
+	AccountUsageStale         bool       `json:"account_usage_stale,omitempty"`
 	AccountUsageRequestsUsed  *int64     `json:"account_usage_requests_used,omitempty"`
 	AccountUsageRequestsLimit *int64     `json:"account_usage_requests_limit,omitempty"`
 	AccountUsageTokensUsed    *int64     `json:"account_usage_tokens_used,omitempty"`
@@ -663,8 +666,10 @@ func BuildViewModel(version string, snap *schema.Snapshot, gs *schema.GlobalStat
 	// P0-5: also require activation identity match.
 	if vm.ProviderConfirmed && activationMatches && gs != nil && gs.Health != nil {
 		vm.HealthStatus = secure.SanitizeField(gs.Health.Status)
-		age := max(int64(0), int64(now.Sub(gs.Health.FetchedAt).Seconds()))
+		delta := now.Sub(gs.Health.FetchedAt)
+		age := max(int64(0), int64(delta.Seconds()))
 		vm.HealthAgeSecs = &age
+		vm.HealthStale = delta < 0 || delta > schema.DefaultHealthMaxAge
 		if vm.LastFailureCategory == "" && gs.Health.UnhealthyCount != nil && *gs.Health.UnhealthyCount > 0 {
 			vm.HealthStatus = "degraded"
 		}
@@ -728,13 +733,20 @@ func BuildViewModel(version string, snap *schema.Snapshot, gs *schema.GlobalStat
 	// Account usage is authoritative account-level quota data. Like health
 	// and circuit breakers, gate it by activation identity match so switching
 	// endpoints or keys does not surface quotas from another runtime.
-	if activationMatches && gs.HasAuthoritativeAccountUsage() {
+	if activationMatches && gs != nil && gs.AccountUsage != nil && schema.ValidateAccountUsage(gs.AccountUsage) == nil {
 		au := gs.AccountUsage
 		vm.AccountUsageFetchedAt = &au.FetchedAt
-		vm.AccountUsageRequestsUsed = au.RequestsUsed
-		vm.AccountUsageRequestsLimit = au.RequestsLimit
-		vm.AccountUsageTokensUsed = au.TokensUsed
-		vm.AccountUsageTokensLimit = au.TokensLimit
+		delta := now.Sub(au.FetchedAt)
+		age := max(int64(0), int64(delta.Seconds()))
+		vm.AccountUsageAgeSecs = &age
+		vm.AccountUsageStale = delta < 0 || delta > schema.DefaultAccountUsageMaxAge ||
+			gs.AccountUsageCapability == nil || gs.AccountUsageCapability.State != schema.CapabilitySupported
+		if !vm.AccountUsageStale {
+			vm.AccountUsageRequestsUsed = au.RequestsUsed
+			vm.AccountUsageRequestsLimit = au.RequestsLimit
+			vm.AccountUsageTokensUsed = au.TokensUsed
+			vm.AccountUsageTokensLimit = au.TokensLimit
+		}
 	}
 
 	return vm
@@ -867,6 +879,10 @@ func (vm *ViewModel) Expanded(config RenderConfig) string {
 	if vm.ProviderConfirmed {
 		if vm.HealthStatus != "" {
 			health = vm.HealthStatus
+			if vm.HealthStale {
+				health += " · stale"
+				healthColor = ColorYellow
+			}
 			if vm.HealthAgeSecs != nil {
 				health = fmt.Sprintf("%s · %ds old", health, *vm.HealthAgeSecs)
 			}
@@ -1070,9 +1086,12 @@ func (vm *ViewModel) Expanded(config RenderConfig) string {
 	// Account Usage (account-level quotas from FreeInference)
 	hasRequests := vm.AccountUsageRequestsUsed != nil || vm.AccountUsageRequestsLimit != nil
 	hasTokens := vm.AccountUsageTokensUsed != nil || vm.AccountUsageTokensLimit != nil
-	if hasRequests || hasTokens {
+	if hasRequests || hasTokens || vm.AccountUsageStale {
 		fmt.Fprintln(&b)
 		header := "Account Usage"
+		if vm.AccountUsageStale {
+			header += " (stale)"
+		}
 		if vm.AccountUsageFetchedAt != nil {
 			header += fmt.Sprintf(" (updated %s)", vm.AccountUsageFetchedAt.Format("2006-01-02 15:04"))
 		}

@@ -17,8 +17,10 @@ func TestProjectBudget_NoAccountUsage(t *testing.T) {
 
 func TestProjectBudget_HealthyQuota(t *testing.T) {
 	au := &schema.AccountUsage{
-		TokensUsed:  ptrI64(10000),
-		TokensLimit: ptrI64(1000000),
+		Authoritative: true,
+		FetchedAt:     time.Now(),
+		TokensUsed:    ptrI64(10000),
+		TokensLimit:   ptrI64(1000000),
 	}
 	snap := &schema.Snapshot{}
 	proj := ProjectBudget(au, snap, time.Now(), nil)
@@ -29,8 +31,10 @@ func TestProjectBudget_HealthyQuota(t *testing.T) {
 
 func TestProjectBudget_WatchQuota(t *testing.T) {
 	au := &schema.AccountUsage{
-		TokensUsed:  ptrI64(750000),
-		TokensLimit: ptrI64(1000000),
+		Authoritative: true,
+		FetchedAt:     time.Now(),
+		TokensUsed:    ptrI64(750000),
+		TokensLimit:   ptrI64(1000000),
 	}
 	snap := &schema.Snapshot{}
 	proj := ProjectBudget(au, snap, time.Now(), nil)
@@ -41,8 +45,10 @@ func TestProjectBudget_WatchQuota(t *testing.T) {
 
 func TestProjectBudget_LowQuota(t *testing.T) {
 	au := &schema.AccountUsage{
-		TokensUsed:  ptrI64(870000),
-		TokensLimit: ptrI64(1000000),
+		Authoritative: true,
+		FetchedAt:     time.Now(),
+		TokensUsed:    ptrI64(870000),
+		TokensLimit:   ptrI64(1000000),
 	}
 	snap := &schema.Snapshot{}
 	proj := ProjectBudget(au, snap, time.Now(), nil)
@@ -53,8 +59,10 @@ func TestProjectBudget_LowQuota(t *testing.T) {
 
 func TestProjectBudget_CriticalQuota(t *testing.T) {
 	au := &schema.AccountUsage{
-		TokensUsed:  ptrI64(960000),
-		TokensLimit: ptrI64(1000000),
+		Authoritative: true,
+		FetchedAt:     time.Now(),
+		TokensUsed:    ptrI64(960000),
+		TokensLimit:   ptrI64(1000000),
 	}
 	snap := &schema.Snapshot{}
 	proj := ProjectBudget(au, snap, time.Now(), nil)
@@ -66,6 +74,8 @@ func TestProjectBudget_CriticalQuota(t *testing.T) {
 func TestProjectBudget_RequestBasedFallback(t *testing.T) {
 	// No token limit, but request limit available.
 	au := &schema.AccountUsage{
+		Authoritative: true,
+		FetchedAt:     time.Now(),
 		RequestsUsed:  ptrI64(9000),
 		RequestsLimit: ptrI64(10000),
 	}
@@ -80,8 +90,10 @@ func TestProjectBudget_BurnRateExhaustion(t *testing.T) {
 	used := int64(500000)
 	limit := int64(1000000)
 	au := &schema.AccountUsage{
-		TokensUsed:  &used,
-		TokensLimit: &limit,
+		Authoritative: true,
+		FetchedAt:     time.Now(),
+		TokensUsed:    &used,
+		TokensLimit:   &limit,
 	}
 	// Create observations over 1 hour: 10 requests, each consuming
 	// ~10K tokens total. Burn rate = 100K tokens/hour.
@@ -116,8 +128,10 @@ func TestProjectBudget_BurnRateExhaustion(t *testing.T) {
 
 func TestProjectBudget_InsufficientBurnData(t *testing.T) {
 	au := &schema.AccountUsage{
-		TokensUsed:  ptrI64(500000),
-		TokensLimit: ptrI64(1000000),
+		Authoritative: true,
+		FetchedAt:     time.Now(),
+		TokensUsed:    ptrI64(500000),
+		TokensLimit:   ptrI64(1000000),
 	}
 	// Only 1 observation — not enough for burn rate.
 	snap := &schema.Snapshot{
@@ -134,8 +148,10 @@ func TestProjectBudget_InsufficientBurnData(t *testing.T) {
 func TestProjectBudget_CircuitBreakerOpen(t *testing.T) {
 	now := time.Now()
 	au := &schema.AccountUsage{
-		TokensUsed:  ptrI64(500000),
-		TokensLimit: ptrI64(1000000),
+		Authoritative: true,
+		FetchedAt:     now,
+		TokensUsed:    ptrI64(500000),
+		TokensLimit:   ptrI64(1000000),
 	}
 	snap := &schema.Snapshot{}
 
@@ -161,8 +177,10 @@ func TestProjectBudget_CircuitBreakerOpen(t *testing.T) {
 func TestProjectBudget_CircuitBreakerClosed(t *testing.T) {
 	now := time.Now()
 	au := &schema.AccountUsage{
-		TokensUsed:  ptrI64(500000),
-		TokensLimit: ptrI64(1000000),
+		Authoritative: true,
+		FetchedAt:     now,
+		TokensUsed:    ptrI64(500000),
+		TokensLimit:   ptrI64(1000000),
 	}
 	snap := &schema.Snapshot{}
 
@@ -184,8 +202,10 @@ func TestProjectBudget_CircuitBreakerClosed(t *testing.T) {
 func TestProjectBudget_CircuitBreakerExpired(t *testing.T) {
 	now := time.Now()
 	au := &schema.AccountUsage{
-		TokensUsed:  ptrI64(500000),
-		TokensLimit: ptrI64(1000000),
+		Authoritative: true,
+		FetchedAt:     now,
+		TokensUsed:    ptrI64(500000),
+		TokensLimit:   ptrI64(1000000),
 	}
 	snap := &schema.Snapshot{}
 

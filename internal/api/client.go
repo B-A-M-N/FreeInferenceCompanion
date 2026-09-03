@@ -36,6 +36,7 @@ const (
 	MaxHealthBody  = 1 << 20 // 1 MiB
 	MaxErrorBody   = 64 << 10
 	MaxProbeBody   = 1 << 20
+	MaxRetryAfter  = 7 * 24 * time.Hour
 
 	SyntheticProbeHeader = "X-Probe"
 	SyntheticProbeValue  = "synthetic"
@@ -524,12 +525,21 @@ func (e *HTTPError) Error() string {
 
 // readErrorBody reads a bounded error body and extracts a sanitized message.
 func readErrorBody(resp *http.Response) *HTTPError {
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, MaxErrorBody))
+	body, _ := readBoundedBody(resp.Body, MaxErrorBody)
 	he := &HTTPError{StatusCode: resp.StatusCode}
 
 	if ra := resp.Header.Get("Retry-After"); ra != "" {
-		if secs, err := strconv.Atoi(strings.TrimSpace(ra)); err == nil && secs >= 0 {
+		ra = strings.TrimSpace(ra)
+		if secs, err := strconv.ParseInt(ra, 10, 64); err == nil && secs >= 0 && secs <= int64(MaxRetryAfter/time.Second) {
 			he.RetryAfter = time.Duration(secs) * time.Second
+		} else if retryAt, err := http.ParseTime(ra); err == nil {
+			d := time.Until(retryAt)
+			if d < 0 {
+				d = 0
+			}
+			if d <= MaxRetryAfter {
+				he.RetryAfter = d
+			}
 		}
 	}
 
@@ -540,7 +550,9 @@ func readErrorBody(resp *http.Response) *HTTPError {
 		// key-shaped token in a structured response cannot leak.
 		he.Message = secure.Redact(errResp.Error.Message)
 		if he.RetryAfter == 0 && errResp.Error.RetryAfter != nil && *errResp.Error.RetryAfter >= 0 {
-			he.RetryAfter = time.Duration(*errResp.Error.RetryAfter) * time.Second
+			if int64(*errResp.Error.RetryAfter) <= int64(MaxRetryAfter/time.Second) {
+				he.RetryAfter = time.Duration(*errResp.Error.RetryAfter) * time.Second
+			}
 		}
 		return he
 	}
@@ -554,6 +566,17 @@ func readErrorBody(resp *http.Response) *HTTPError {
 	// headers or auth tokens from a misbehaving upstream.
 	he.Message = secure.Redact(msg)
 	return he
+}
+
+func readBoundedBody(reader io.Reader, max int64) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(reader, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > max {
+		return nil, fmt.Errorf("response body exceeds %d bytes", max)
+	}
+	return body, nil
 }
 
 // ============================================================
@@ -596,6 +619,31 @@ type HealthResponse struct {
 	CycleOk                        bool   `json:"cycleOk"`
 	LastCycleAt                    string `json:"lastCycleAt"`
 	PendingControlPlaneTransitions int    `json:"pendingControlPlaneTransitions"`
+}
+
+// ValidateHealthResponse rejects malformed or contradictory provider health
+// data before it can be cached and rendered as a live green state.
+func ValidateHealthResponse(h *HealthResponse) error {
+	if h == nil {
+		return errors.New("nil health response")
+	}
+	switch h.Status {
+	case "healthy", "degraded", "unreachable", "unknown":
+	default:
+		return fmt.Errorf("invalid status %q", h.Status)
+	}
+	if h.Total < 0 || h.Healthy < 0 || h.Unhealthy < 0 || h.PendingControlPlaneTransitions < 0 {
+		return errors.New("health counts must be non-negative")
+	}
+	if h.Healthy+h.Unhealthy > h.Total {
+		return errors.New("health counts exceed total")
+	}
+	if h.LastCycleAt != "" {
+		if _, err := time.Parse(time.RFC3339Nano, h.LastCycleAt); err != nil {
+			return fmt.Errorf("invalid last cycle timestamp: %w", err)
+		}
+	}
+	return nil
 }
 
 // ============================================================
@@ -641,7 +689,7 @@ func (c *Client) ListModels() ([]Model, error) {
 		return nil, readErrorBody(resp)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxCatalogBody))
+	body, err := readBoundedBody(resp.Body, MaxCatalogBody)
 	if err != nil {
 		return nil, fmt.Errorf("read models response: %w", err)
 	}
@@ -653,6 +701,9 @@ func (c *Client) ListModels() ([]Model, error) {
 			return nil, fmt.Errorf("parse models: %w", err)
 		}
 		return models, nil
+	}
+	if modelsResp.Object != "" && modelsResp.Object != "list" {
+		return nil, fmt.Errorf("parse models: unexpected object %q", modelsResp.Object)
 	}
 	return modelsResp.Data, nil
 }
@@ -696,7 +747,7 @@ func (c *Client) GetHealth(healthURL string) (*HealthResponse, error) {
 		return nil, readErrorBody(resp)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxHealthBody))
+	body, err := readBoundedBody(resp.Body, MaxHealthBody)
 	if err != nil {
 		return nil, fmt.Errorf("read health response: %w", err)
 	}
@@ -704,6 +755,9 @@ func (c *Client) GetHealth(healthURL string) (*HealthResponse, error) {
 	var healthResp HealthResponse
 	if err := json.Unmarshal(body, &healthResp); err != nil {
 		return nil, fmt.Errorf("parse health: %w", err)
+	}
+	if err := ValidateHealthResponse(&healthResp); err != nil {
+		return nil, fmt.Errorf("validate health: %w", err)
 	}
 	return &healthResp, nil
 }
@@ -866,7 +920,7 @@ func (c *Client) GetAccountUsage() (*schema.AccountUsage, schema.AccountUsageCap
 	}
 
 	var bodyBytes []byte
-	bodyBytes, err = io.ReadAll(io.LimitReader(resp.Body, MaxHealthBody))
+	bodyBytes, err = readBoundedBody(resp.Body, MaxHealthBody)
 	if err != nil {
 		return nil, schema.CapabilityUnknown, fmt.Errorf("read account usage response: %w", err)
 	}
@@ -901,6 +955,9 @@ func (c *Client) GetAccountUsage() (*schema.AccountUsage, schema.AccountUsageCap
 		RequestsLimit: usageResp.RequestsLimit,
 		TokensUsed:    usageResp.TokensUsed,
 		TokensLimit:   usageResp.TokensLimit,
+	}
+	if err := schema.ValidateAccountUsage(au); err != nil {
+		return nil, schema.CapabilitySupported, fmt.Errorf("validate account usage: %w", err)
 	}
 	return au, schema.CapabilitySupported, nil
 }

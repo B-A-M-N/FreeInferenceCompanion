@@ -244,6 +244,63 @@ func TestPartialUpdatePreservesSkippedOwnership(t *testing.T) {
 	}
 }
 
+func TestSameVersionPartialInstallCompletesMissingPlugins(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "/usr/bin:/bin")
+	manifestURL, _, server := testServer(t, "v0.2.0", "linux-amd64")
+	defer server.Close()
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Install(Options{ManifestURL: manifestURL, Platform: "linux-amd64", NoPlugin: true}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("binary-only install: %v", err)
+	}
+	result, err := Update(Options{ManifestURL: manifestURL, Platform: "linux-amd64"}, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("same-version completion: %v", err)
+	}
+	if result.AlreadyLatest || !result.ClaudePluginReady || !result.CodexFilesReady {
+		t.Fatalf("same-version completion result = %+v", result)
+	}
+	metadata, found, err := LoadInstallationMetadata(paths.MetadataPath())
+	if err != nil || !found {
+		t.Fatalf("load metadata: found=%v err=%v", found, err)
+	}
+	for name, got := range map[string]string{
+		"binary": metadata.BinaryVersion, "Claude": metadata.ClaudePluginVersion,
+		"Codex": metadata.CodexPluginVersion, "marketplace": metadata.CodexMarketplaceVersion,
+	} {
+		if got != "v0.2.0" {
+			t.Errorf("%s version = %q, want v0.2.0", name, got)
+		}
+	}
+}
+
+func TestBinaryOnlyUpgradeDoesNotHideOldPluginVersions(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "/usr/bin:/bin")
+	firstManifest, _, firstServer := testServer(t, "v0.2.0", "linux-amd64")
+	defer firstServer.Close()
+	if _, err := Install(Options{ManifestURL: firstManifest, Platform: "linux-amd64"}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("initial install: %v", err)
+	}
+	binaryManifest, _, binaryServer := testServer(t, "v0.3.0", "linux-amd64")
+	defer binaryServer.Close()
+	if _, err := Update(Options{ManifestURL: binaryManifest, Platform: "linux-amd64", NoPlugin: true}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("binary-only upgrade: %v", err)
+	}
+	result, err := Update(Options{ManifestURL: binaryManifest, Platform: "linux-amd64"}, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("plugin completion: %v", err)
+	}
+	if result.AlreadyLatest || !result.ClaudePluginReady || !result.CodexFilesReady {
+		t.Fatalf("plugin completion result = %+v", result)
+	}
+}
+
 func TestForceRepairRejectsExistingTargetWithoutOwnership(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -473,6 +530,7 @@ func TestUpdateSkipsWhenLatest(t *testing.T) {
 	result, err := Update(Options{
 		ManifestURL: manifestURL,
 		Platform:    "linux-amd64",
+		NoPlugin:    true,
 	}, stdout, stderr)
 	if err != nil {
 		t.Fatalf("update: %v", err)

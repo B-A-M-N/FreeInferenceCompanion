@@ -341,27 +341,58 @@ func statusJSON(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalState,
 		obj["active"] = *active
 	}
 	activationMatches := snap != nil && (activationID == "" || snap.ActivationID == activationID)
-	if active != nil && *active && activationMatches && snap.Provider.Confirmed && snap.Provider.Name == schema.ProviderFreeInference && gs != nil && gs.PublicStatus != nil {
-		for _, metric := range gs.PublicStatus.Models {
-			if metric.ModelID != snap.Model.ID {
-				continue
-			}
-			monitor := map[string]any{
-				"model":        secure.SanitizeField(metric.ModelID),
-				"uptime_ratio": metric.UptimeRatio,
-			}
-			if metric.Latest != nil {
-				monitor["ok"] = metric.Latest.OK
-				monitor["checked_at"] = metric.Latest.CheckedAt.UTC().Format(time.RFC3339)
-				monitor["latency_ms"] = metric.Latest.LatencyMs
-				monitor["ttft_ms"] = metric.Latest.TTFTMs
-				monitor["throughput_tps"] = metric.Latest.ThroughputTps
-				if metric.Latest.Error != "" {
-					monitor["error"] = secure.SanitizeField(metric.Latest.Error)
+	if active != nil && *active && activationMatches && snap.Provider.Confirmed && snap.Provider.Name == schema.ProviderFreeInference && gs != nil {
+		now := time.Now().UTC()
+		if gs.PublicStatus != nil {
+			for _, metric := range gs.PublicStatus.Models {
+				if metric.ModelID != snap.Model.ID {
+					continue
 				}
+				monitor := map[string]any{
+					"model":        secure.SanitizeField(metric.ModelID),
+					"uptime_ratio": metric.UptimeRatio,
+				}
+				if metric.Latest != nil {
+					age := now.Sub(metric.Latest.CheckedAt)
+					monitor["ok"] = metric.Latest.OK
+					monitor["checked_at"] = metric.Latest.CheckedAt.UTC().Format(time.RFC3339)
+					monitor["age_seconds"] = max(0, int64(age.Seconds()))
+					monitor["stale"] = age < 0 || age > 45*time.Minute
+					monitor["latency_ms"] = metric.Latest.LatencyMs
+					monitor["ttft_ms"] = metric.Latest.TTFTMs
+					monitor["throughput_tps"] = metric.Latest.ThroughputTps
+					if metric.Latest.Error != "" {
+						monitor["error"] = secure.SanitizeField(metric.Latest.Error)
+					}
+				}
+				obj["model_monitor"] = monitor
+				break
 			}
-			obj["model_monitor"] = monitor
-			break
+		}
+		if gs.Health != nil {
+			age := now.Sub(gs.Health.FetchedAt)
+			obj["provider_health"] = map[string]any{
+				"status":      secure.SanitizeField(gs.Health.Status),
+				"checked_at":  gs.Health.FetchedAt.UTC().Format(time.RFC3339),
+				"age_seconds": max(0, int64(age.Seconds())),
+				"stale":       age < 0 || age > schema.DefaultHealthMaxAge,
+			}
+		}
+		if gs.AccountUsage != nil && gs.AccountUsageCapability != nil &&
+			gs.AccountUsageCapability.State == schema.CapabilitySupported && schema.ValidateAccountUsage(gs.AccountUsage) == nil {
+			age := now.Sub(gs.AccountUsage.FetchedAt)
+			usage := map[string]any{
+				"fetched_at":  gs.AccountUsage.FetchedAt.UTC().Format(time.RFC3339),
+				"age_seconds": max(0, int64(age.Seconds())),
+				"stale":       age < 0 || age > schema.DefaultAccountUsageMaxAge,
+			}
+			if !usage["stale"].(bool) {
+				usage["requests_used"] = gs.AccountUsage.RequestsUsed
+				usage["requests_limit"] = gs.AccountUsage.RequestsLimit
+				usage["tokens_used"] = gs.AccountUsage.TokensUsed
+				usage["tokens_limit"] = gs.AccountUsage.TokensLimit
+			}
+			obj["account_usage"] = usage
 		}
 	}
 	if len(historical) > 0 {
@@ -501,8 +532,14 @@ func printFullStatus(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalS
 	}
 
 	if gs != nil && gs.Health != nil && adapters.IsConfirmedFreeInference(snap.Provider) {
+		healthAge := time.Since(gs.Health.FetchedAt)
+		healthStale := healthAge < 0 || healthAge > schema.DefaultHealthMaxAge
 		fmt.Fprintf(stdout, "Provider Health:\n")
-		fmt.Fprintf(stdout, "  Status:  %s\n", gs.Health.Status)
+		status := gs.Health.Status
+		if healthStale {
+			status += " (stale)"
+		}
+		fmt.Fprintf(stdout, "  Status:  %s\n", status)
 		if gs.Health.HealthyCount != nil && gs.Health.UnhealthyCount != nil {
 			fmt.Fprintf(stdout, "  Models:  %d healthy, %d unhealthy\n", *gs.Health.HealthyCount, *gs.Health.UnhealthyCount)
 		}
@@ -510,19 +547,29 @@ func printFullStatus(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalS
 		fmt.Fprintln(stdout)
 	}
 
-	if gs.HasAuthoritativeAccountUsage() && adapters.IsConfirmedFreeInference(snap.Provider) {
+	accountUsable := gs != nil && gs.AccountUsage != nil && gs.AccountUsageCapability != nil &&
+		gs.AccountUsageCapability.State == schema.CapabilitySupported && schema.ValidateAccountUsage(gs.AccountUsage) == nil
+	if accountUsable && adapters.IsConfirmedFreeInference(snap.Provider) {
 		au := gs.AccountUsage
+		age := time.Since(au.FetchedAt)
+		stale := age < 0 || age > schema.DefaultAccountUsageMaxAge
 		fmt.Fprintf(stdout, "Account Usage:\n")
+		if stale {
+			fmt.Fprintln(stdout, "  Status:  stale (not used for budget calculations)")
+		}
 		fmt.Fprintf(stdout, "  Updated: %s\n", au.FetchedAt.Format(time.RFC3339))
-		if au.RequestsUsed != nil || au.RequestsLimit != nil {
+		if !stale && (au.RequestsUsed != nil || au.RequestsLimit != nil) {
 			fmt.Fprintf(stdout, "  Requests: %s\n", formatQuotaPair(au.RequestsUsed, au.RequestsLimit))
 		}
-		if au.TokensUsed != nil || au.TokensLimit != nil {
+		if !stale && (au.TokensUsed != nil || au.TokensLimit != nil) {
 			fmt.Fprintf(stdout, "  Tokens:   %s\n", formatQuotaPair(au.TokensUsed, au.TokensLimit))
 		}
 
 		// Token budget projection — estimates quota exhaustion timeline.
-		proj := engine.ProjectBudget(au, snap, time.Now().UTC(), gs.CircuitBreakers)
+		proj := engine.BudgetProjection{Status: engine.BudgetUnknown}
+		if !stale {
+			proj = engine.ProjectBudget(au, snap, time.Now().UTC(), gs.CircuitBreakers)
+		}
 		if proj.Status != engine.BudgetUnknown {
 			fmt.Fprintf(stdout, "  Budget:   %s %s\n",
 				budgetIcon(proj.Status), strings.ToLower(string(proj.Status)))

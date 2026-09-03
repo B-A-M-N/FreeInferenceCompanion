@@ -66,6 +66,18 @@ func ProjectBudget(au *schema.AccountUsage, snap *schema.Snapshot, now time.Time
 			Detail: "Account usage data not available. Run `freeinference refresh` to fetch.",
 		}
 	}
+	if err := schema.ValidateAccountUsage(au); err != nil {
+		return BudgetProjection{
+			Status: BudgetUnknown,
+			Detail: "Account usage data is invalid and will not be used for budgeting: " + err.Error(),
+		}
+	}
+	if age := now.Sub(au.FetchedAt); age < 0 || age > schema.DefaultAccountUsageMaxAge {
+		return BudgetProjection{
+			Status: BudgetUnknown,
+			Detail: "Account usage data is stale; run `freeinference refresh` to fetch fresh data.",
+		}
+	}
 
 	proj := BudgetProjection{}
 

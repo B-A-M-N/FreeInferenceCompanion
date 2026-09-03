@@ -62,7 +62,7 @@ func installOrUpdate(opts Options, stdout, stderr io.Writer, update bool) (*Resu
 	}
 	if installedVersion != "" {
 		comparison := compareVersions(manifest.Version, installedVersion)
-		if comparison < 0 || (comparison == 0 && !opts.Force) {
+		if comparison < 0 || (comparison == 0 && !opts.Force && requestedComponentsReady(metadata, paths, manifest.Version, opts)) {
 			fmt.Fprintf(stdout, "Already at latest installed version: %s\n", installedVersion)
 			return &Result{Version: installedVersion, OldVersion: installedVersion, AlreadyLatest: true}, nil
 		}
@@ -121,7 +121,7 @@ func installOrUpdate(opts Options, stdout, stderr io.Writer, update bool) (*Resu
 			}
 			if managedBinaryExists(latest, paths) {
 				cmp := compareVersions(manifest.Version, latest.InstalledVersion)
-				if cmp < 0 || (cmp == 0 && !opts.Force) {
+				if cmp < 0 || (cmp == 0 && !opts.Force && requestedComponentsReady(latest, paths, manifest.Version, opts)) {
 					result.Version = latest.InstalledVersion
 					result.OldVersion = latest.InstalledVersion
 					result.AlreadyLatest = true
@@ -189,11 +189,95 @@ func compareVersions(left, right string) int {
 }
 
 func managedBinaryExists(metadata *InstallationMetadata, paths Paths) bool {
-	if metadata == nil || !metadata.ManagedBinaryOwned || metadata.ManagedBinaryPath != paths.BinaryPath {
+	return componentPathReady(metadata, metadataVersion(metadata, "binary"), paths.BinaryPath, true)
+}
+
+func metadataVersion(metadata *InstallationMetadata, component string) string {
+	if metadata == nil {
+		return ""
+	}
+	switch component {
+	case "binary":
+		return metadata.BinaryVersion
+	case "claude":
+		return metadata.ClaudePluginVersion
+	case "codex":
+		return metadata.CodexPluginVersion
+	case "marketplace":
+		return metadata.CodexMarketplaceVersion
+	default:
+		return ""
+	}
+}
+
+func componentPathReady(metadata *InstallationMetadata, componentVersion, expectedPath string, binary bool) bool {
+	if metadata == nil || componentVersion == "" {
 		return false
 	}
-	info, err := os.Lstat(paths.BinaryPath)
-	return err == nil && info.Mode().IsRegular()
+	var owned bool
+	var recordedPath, recordedDigest string
+	if binary {
+		owned = metadata.ManagedBinaryOwned
+		recordedPath, recordedDigest = metadata.ManagedBinaryPath, metadata.ManagedBinarySHA256
+	} else {
+		return false
+	}
+	if !owned || recordedPath != expectedPath || recordedDigest == "" {
+		return false
+	}
+	info, err := os.Lstat(expectedPath)
+	if err != nil || (binary && !info.Mode().IsRegular()) {
+		return false
+	}
+	digest, err := pathDigest(expectedPath)
+	return err == nil && digest == recordedDigest
+}
+
+func directoryComponentReady(metadata *InstallationMetadata, component, expectedPath string) bool {
+	if metadata == nil {
+		return false
+	}
+	var owned bool
+	var recordedPath, recordedDigest string
+	switch component {
+	case "claude":
+		owned, recordedPath, recordedDigest = metadata.ClaudePluginOwned, metadata.ClaudePluginPath, metadata.ClaudePluginSHA256
+	case "codex":
+		owned, recordedPath, recordedDigest = metadata.CodexPluginOwned, metadata.CodexPluginPath, metadata.CodexPluginSHA256
+	case "marketplace":
+		owned, recordedPath, recordedDigest = metadata.CodexMarketplaceOwned, metadata.CodexMarketplacePath, metadata.CodexMarketplaceSHA256
+	default:
+		return false
+	}
+	if !owned || recordedPath != expectedPath || recordedDigest == "" || metadataVersion(metadata, component) == "" {
+		return false
+	}
+	info, err := os.Lstat(expectedPath)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	digest, err := pathDigest(expectedPath)
+	return err == nil && digest == recordedDigest
+}
+
+func requestedComponentsReady(metadata *InstallationMetadata, paths Paths, version string, opts Options) bool {
+	if metadata == nil {
+		return false
+	}
+	if !opts.NoBin && (!componentPathReady(metadata, metadata.BinaryVersion, paths.BinaryPath, true) || metadata.BinaryVersion != version) {
+		return false
+	}
+	if !opts.NoPlugin {
+		if metadata.ClaudePluginVersion != version || metadata.CodexPluginVersion != version || metadata.CodexMarketplaceVersion != version {
+			return false
+		}
+		if !directoryComponentReady(metadata, "claude", paths.claudePluginPath()) ||
+			!directoryComponentReady(metadata, "codex", paths.codexPluginPath()) ||
+			!directoryComponentReady(metadata, "marketplace", paths.CodexMarketplaceDir) {
+			return false
+		}
+	}
+	return true
 }
 
 func validateMetadataPaths(metadata *InstallationMetadata, paths Paths) error {
@@ -303,15 +387,19 @@ func commitRelease(extractDir string, paths Paths, opts Options, manifest *Marke
 		if opts.NoBin {
 			metadata.ManagedBinaryOwned = prior.ManagedBinaryOwned
 			metadata.ManagedBinarySHA256 = prior.ManagedBinarySHA256
+			metadata.BinaryVersion = prior.BinaryVersion
 			metadata.ShimOwned = prior.ShimOwned
 		}
 		if opts.NoPlugin {
 			metadata.ClaudePluginOwned = prior.ClaudePluginOwned
 			metadata.ClaudePluginSHA256 = prior.ClaudePluginSHA256
+			metadata.ClaudePluginVersion = prior.ClaudePluginVersion
 			metadata.CodexPluginOwned = prior.CodexPluginOwned
 			metadata.CodexPluginSHA256 = prior.CodexPluginSHA256
+			metadata.CodexPluginVersion = prior.CodexPluginVersion
 			metadata.CodexMarketplaceOwned = prior.CodexMarketplaceOwned
 			metadata.CodexMarketplaceSHA256 = prior.CodexMarketplaceSHA256
+			metadata.CodexMarketplaceVersion = prior.CodexMarketplaceVersion
 		}
 	}
 	metadataStage, err := stageInstallationMetadata(paths.MetadataPath(), metadata)

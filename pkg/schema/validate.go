@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"time"
+	"unicode"
 )
 
 // SupportedSchemaRange is the range of schema versions this build can safely
@@ -15,6 +17,17 @@ const (
 	// CurrentSchemaVersion mirrors StateVersion; declared separately to avoid
 	// an import cycle in test code.
 	CurrentSchemaVersion = StateVersion
+
+	// Metadata cache freshness is deliberately conservative. These values are
+	// also used by renderers so an old successful response cannot look live.
+	DefaultHealthMaxAge       = 2 * time.Minute
+	DefaultAccountUsageMaxAge = 60 * time.Minute
+
+	MaxCatalogModels       = 512
+	MaxCatalogFeatures     = 64
+	MaxCatalogPricing      = 32
+	MaxCatalogTextBytes    = 512
+	MaxCatalogModelIDBytes = 256
 )
 
 // ErrUnsupportedSchema is returned when a snapshot's schema version is too new
@@ -261,6 +274,162 @@ func ValidatePublicStatusCache(c *PublicStatusCache) error {
 		}
 	}
 	return nil
+}
+
+// ValidateHealthCache checks the authenticated health artifact before it is
+// persisted or used for display. Counts are optional because older providers
+// sometimes return only a status, but supplied counts must be sane.
+func ValidateHealthCache(c *HealthCache) error {
+	if c == nil {
+		return errors.New("nil health cache")
+	}
+	if c.FetchedAt.IsZero() {
+		return errors.New("health cache timestamp is missing")
+	}
+	switch c.Status {
+	case "healthy", "degraded", "unreachable", "unknown":
+	default:
+		return fmt.Errorf("invalid health status %q", c.Status)
+	}
+	if c.HealthyCount != nil && *c.HealthyCount < 0 {
+		return errors.New("health healthy count is negative")
+	}
+	if c.UnhealthyCount != nil && *c.UnhealthyCount < 0 {
+		return errors.New("health unhealthy count is negative")
+	}
+	if len(c.Source) > MaxCatalogTextBytes || !safeMetadataText(c.Source) {
+		return errors.New("health source is invalid")
+	}
+	return nil
+}
+
+// ValidateModelsCache checks the catalog before it is persisted or trusted by
+// the CLI. This bounds upstream-controlled strings and rejects duplicate or
+// contradictory records.
+func ValidateModelsCache(c *ModelsCache) error {
+	if c == nil {
+		return errors.New("nil models cache")
+	}
+	if c.FetchedAt.IsZero() {
+		return errors.New("models cache timestamp is missing")
+	}
+	if len(c.Models) > MaxCatalogModels {
+		return fmt.Errorf("models cache contains too many models: %d", len(c.Models))
+	}
+	seen := make(map[string]struct{}, len(c.Models))
+	for i := range c.Models {
+		m := &c.Models[i]
+		if m.ID == "" || len(m.ID) > MaxCatalogModelIDBytes || !safeMetadataText(m.ID) {
+			return fmt.Errorf("model %d has an invalid id", i)
+		}
+		if _, ok := seen[m.ID]; ok {
+			return fmt.Errorf("models cache contains duplicate model id %q", m.ID)
+		}
+		seen[m.ID] = struct{}{}
+		if len(m.Name) > MaxCatalogTextBytes || !safeMetadataText(m.Name) {
+			return fmt.Errorf("model %q has an invalid name", m.ID)
+		}
+		if m.ContextLength < 0 || m.ContextLength > 1<<30 || m.MaxOutputLength < 0 || m.MaxOutputLength > 1<<30 {
+			return fmt.Errorf("model %q has invalid token limits", m.ID)
+		}
+		switch m.AccessState {
+		case "", AccessAvailable, AccessRestricted, AccessUnknown:
+		default:
+			return fmt.Errorf("model %q has invalid access state %q", m.ID, m.AccessState)
+		}
+		if len(m.Features) > MaxCatalogFeatures {
+			return fmt.Errorf("model %q has too many features", m.ID)
+		}
+		for _, feature := range m.Features {
+			if feature == "" || len(feature) > MaxCatalogTextBytes || !safeMetadataText(feature) {
+				return fmt.Errorf("model %q has an invalid feature", m.ID)
+			}
+		}
+		if len(m.Pricing) > MaxCatalogPricing {
+			return fmt.Errorf("model %q has too many pricing fields", m.ID)
+		}
+		for key, value := range m.Pricing {
+			if key == "" || len(key) > MaxCatalogTextBytes || len(value) > MaxCatalogTextBytes ||
+				!safeMetadataText(key) || !safeMetadataText(value) {
+				return fmt.Errorf("model %q has invalid pricing metadata", m.ID)
+			}
+		}
+	}
+	return nil
+}
+
+// ValidateAccountUsage checks that quota data is explicitly authoritative and
+// internally consistent. A syntactically valid response is not enough to
+// become trusted account state.
+func ValidateAccountUsage(a *AccountUsage) error {
+	if a == nil {
+		return errors.New("nil account usage")
+	}
+	if !a.Authoritative {
+		return errors.New("account usage is not authoritative")
+	}
+	if a.FetchedAt.IsZero() {
+		return errors.New("account usage timestamp is missing")
+	}
+	if a.RequestsUsed == nil && a.RequestsLimit == nil && a.TokensUsed == nil && a.TokensLimit == nil {
+		return errors.New("account usage contains no quota fields")
+	}
+	if err := validateQuotaPair("requests", a.RequestsUsed, a.RequestsLimit); err != nil {
+		return err
+	}
+	return validateQuotaPair("tokens", a.TokensUsed, a.TokensLimit)
+}
+
+func validateQuotaPair(name string, used, limit *int64) error {
+	if used != nil && *used < 0 {
+		return fmt.Errorf("account usage %s used is negative", name)
+	}
+	if limit != nil && *limit < 0 {
+		return fmt.Errorf("account usage %s limit is negative", name)
+	}
+	if used != nil && limit != nil && *used > *limit {
+		return fmt.Errorf("account usage %s used exceeds limit", name)
+	}
+	return nil
+}
+
+// ValidateAccountUsageCapability validates the negotiated endpoint state.
+func ValidateAccountUsageCapability(c *AccountUsageCapability) error {
+	if c == nil {
+		return errors.New("nil account usage capability")
+	}
+	switch c.State {
+	case CapabilityUnknown, CapabilitySupported, CapabilityUnsupported, CapabilityForbidden:
+	default:
+		return fmt.Errorf("invalid account usage capability %q", c.State)
+	}
+	if c.CheckedAt.IsZero() {
+		return errors.New("account usage capability timestamp is missing")
+	}
+	return nil
+}
+
+// HasUsableAccountUsage reports whether quota data is validated, explicitly
+// supported, and fresh enough for current display or ETA calculations.
+func (g *GlobalState) HasUsableAccountUsage(now time.Time, maxAge time.Duration) bool {
+	if g == nil || g.AccountUsage == nil || g.AccountUsageCapability == nil ||
+		g.AccountUsageCapability.State != CapabilitySupported || maxAge <= 0 {
+		return false
+	}
+	if ValidateAccountUsage(g.AccountUsage) != nil || ValidateAccountUsageCapability(g.AccountUsageCapability) != nil {
+		return false
+	}
+	age := now.Sub(g.AccountUsage.FetchedAt)
+	return age >= 0 && age <= maxAge
+}
+
+func safeMetadataText(value string) bool {
+	for _, r := range value {
+		if unicode.IsControl(r) || r == '\u007f' {
+			return false
+		}
+	}
+	return true
 }
 
 func validatePublicStatusCacheSample(sample *PublicStatusSampleCache) error {

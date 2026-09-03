@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	installationMetadataSchema = 2
+	installationMetadataSchema = 3
 	maxInstallationMetadata    = 32 << 10
 )
 
@@ -21,27 +21,31 @@ const (
 // executable used to invoke install/update cannot masquerade as an installed
 // version.
 type InstallationMetadata struct {
-	SchemaVersion          int       `json:"schema_version"`
-	InstalledVersion       string    `json:"installed_version"`
-	ManagedBinaryPath      string    `json:"managed_binary_path"`
-	ManagedBinarySHA256    string    `json:"managed_binary_sha256,omitempty"`
-	ShimPath               string    `json:"shim_path"`
-	ClaudePluginPath       string    `json:"claude_plugin_path"`
-	ClaudePluginSHA256     string    `json:"claude_plugin_sha256,omitempty"`
-	CodexPluginPath        string    `json:"codex_plugin_path"`
-	CodexPluginSHA256      string    `json:"codex_plugin_sha256,omitempty"`
-	CodexMarketplacePath   string    `json:"codex_marketplace_path"`
-	CodexMarketplaceSHA256 string    `json:"codex_marketplace_sha256,omitempty"`
-	InstalledAt            time.Time `json:"installed_at"`
-	InstallerVersion       string    `json:"installer_version"`
-	ManifestOrigin         string    `json:"manifest_origin"`
-	ArtifactSHA256         string    `json:"artifact_sha256"`
-	ShimBackupPath         string    `json:"shim_backup_path,omitempty"`
-	ManagedBinaryOwned     bool      `json:"managed_binary_owned"`
-	ShimOwned              bool      `json:"shim_owned"`
-	ClaudePluginOwned      bool      `json:"claude_plugin_owned"`
-	CodexPluginOwned       bool      `json:"codex_plugin_owned"`
-	CodexMarketplaceOwned  bool      `json:"codex_marketplace_owned"`
+	SchemaVersion           int       `json:"schema_version"`
+	InstalledVersion        string    `json:"installed_version"`
+	BinaryVersion           string    `json:"binary_version,omitempty"`
+	ClaudePluginVersion     string    `json:"claude_plugin_version,omitempty"`
+	CodexPluginVersion      string    `json:"codex_plugin_version,omitempty"`
+	CodexMarketplaceVersion string    `json:"codex_marketplace_version,omitempty"`
+	ManagedBinaryPath       string    `json:"managed_binary_path"`
+	ManagedBinarySHA256     string    `json:"managed_binary_sha256,omitempty"`
+	ShimPath                string    `json:"shim_path"`
+	ClaudePluginPath        string    `json:"claude_plugin_path"`
+	ClaudePluginSHA256      string    `json:"claude_plugin_sha256,omitempty"`
+	CodexPluginPath         string    `json:"codex_plugin_path"`
+	CodexPluginSHA256       string    `json:"codex_plugin_sha256,omitempty"`
+	CodexMarketplacePath    string    `json:"codex_marketplace_path"`
+	CodexMarketplaceSHA256  string    `json:"codex_marketplace_sha256,omitempty"`
+	InstalledAt             time.Time `json:"installed_at"`
+	InstallerVersion        string    `json:"installer_version"`
+	ManifestOrigin          string    `json:"manifest_origin"`
+	ArtifactSHA256          string    `json:"artifact_sha256"`
+	ShimBackupPath          string    `json:"shim_backup_path,omitempty"`
+	ManagedBinaryOwned      bool      `json:"managed_binary_owned"`
+	ShimOwned               bool      `json:"shim_owned"`
+	ClaudePluginOwned       bool      `json:"claude_plugin_owned"`
+	CodexPluginOwned        bool      `json:"codex_plugin_owned"`
+	CodexMarketplaceOwned   bool      `json:"codex_marketplace_owned"`
 }
 
 func installationMetadataPath(home string) string {
@@ -126,6 +130,30 @@ func (m InstallationMetadata) validate() error {
 			if checksum == "" {
 				return fmt.Errorf("installation metadata has no checksum for owned %s", name)
 			}
+			var componentVersion string
+			switch name {
+			case "managed_binary":
+				componentVersion = m.BinaryVersion
+			case "claude_plugin":
+				componentVersion = m.ClaudePluginVersion
+			case "codex_plugin":
+				componentVersion = m.CodexPluginVersion
+			case "codex_marketplace":
+				componentVersion = m.CodexMarketplaceVersion
+			}
+			if !semverPattern.MatchString(componentVersion) {
+				return fmt.Errorf("installation metadata has an invalid version for owned %s", name)
+			}
+		}
+	}
+	for name, componentVersion := range map[string]string{
+		"binary":            m.BinaryVersion,
+		"Claude plugin":     m.ClaudePluginVersion,
+		"Codex plugin":      m.CodexPluginVersion,
+		"Codex marketplace": m.CodexMarketplaceVersion,
+	} {
+		if componentVersion != "" && !semverPattern.MatchString(componentVersion) {
+			return fmt.Errorf("installation metadata has an invalid %s version", name)
 		}
 	}
 	if strings.TrimSpace(m.InstallerVersion) == "" || len(m.InstallerVersion) > 128 || strings.ContainsAny(m.InstallerVersion, "\x00\r\n") {
@@ -299,5 +327,17 @@ func metadataForPaths(paths Paths, version, manifestURL, artifactSHA string, ins
 	metadata.CodexPluginOwned = metadata.CodexPluginSHA256 != ""
 	metadata.ManagedBinaryOwned = metadata.ManagedBinarySHA256 != ""
 	metadata.ShimOwned = metadata.ManagedBinaryOwned
+	if metadata.ManagedBinaryOwned {
+		metadata.BinaryVersion = version
+	}
+	if metadata.ClaudePluginOwned {
+		metadata.ClaudePluginVersion = version
+	}
+	if metadata.CodexPluginOwned {
+		metadata.CodexPluginVersion = version
+	}
+	if metadata.CodexMarketplaceOwned {
+		metadata.CodexMarketplaceVersion = version
+	}
 	return metadata
 }

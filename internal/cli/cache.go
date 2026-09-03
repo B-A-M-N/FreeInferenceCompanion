@@ -137,10 +137,10 @@ func cmdCache(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 
 		if len(diag.CandidateCauses) > 0 {
 			top := diag.CandidateCauses[0]
-			fmt.Fprintf(stdout, "     Possible cause: %s (likelihood: %.0f%%)\n", top.Label, top.Likelihood*100)
+			fmt.Fprintf(stdout, "     Possible cause: %s (heuristic score: %.0f%%)\n", top.Label, top.HeuristicScore*100)
 			if len(diag.CandidateCauses) > 1 {
 				for _, cc := range diag.CandidateCauses[1:] {
-					fmt.Fprintf(stdout, "     Also possible: %s (%.0f%%)\n", cc.Label, cc.Likelihood*100)
+					fmt.Fprintf(stdout, "     Also possible: %s (heuristic score: %.0f%%)\n", cc.Label, cc.HeuristicScore*100)
 				}
 			}
 		}
@@ -276,9 +276,9 @@ func cacheJSON(stdout io.Writer, snap *schema.Snapshot, ca *schema.CacheAnalysis
 			causes := make([]map[string]any, len(dd.CandidateCauses))
 			for i, cc := range dd.CandidateCauses {
 				causes[i] = map[string]any{
-					"reason":     string(cc.Reason),
-					"label":      cc.Label,
-					"likelihood": cc.Likelihood,
+					"reason":          string(cc.Reason),
+					"label":           cc.Label,
+					"heuristic_score": cc.HeuristicScore,
 				}
 			}
 			diagObj["candidate_causes"] = causes

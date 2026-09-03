@@ -140,6 +140,52 @@ func TestRetryAfterParsed(t *testing.T) {
 	}
 }
 
+func TestRetryAfterHTTPDateIsParsedAndBounded(t *testing.T) {
+	retryAt := time.Now().Add(90 * time.Second).UTC()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", retryAt.Format(http.TimeFormat))
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"type":"rate_limit","message":"slow","code":429}}`))
+	}))
+	defer server.Close()
+
+	_, err := newClientLegacy(server.URL, "", 5*time.Second).ListModels()
+	he, ok := err.(*HTTPError)
+	if !ok {
+		t.Fatalf("error type = %T", err)
+	}
+	if he.RetryAfter < 80*time.Second || he.RetryAfter > 95*time.Second {
+		t.Errorf("HTTP-date retry after = %v, want roughly 90s", he.RetryAfter)
+	}
+
+	oversized := &http.Response{StatusCode: http.StatusTooManyRequests, Body: io.NopCloser(strings.NewReader(`{}`)), Header: make(http.Header)}
+	oversized.Header.Set("Retry-After", "999999999")
+	he = readErrorBody(oversized)
+	if he.RetryAfter != 0 {
+		t.Errorf("absurd Retry-After must be ignored, got %v", he.RetryAfter)
+	}
+}
+
+func TestHealthValidationRejectsInconsistentCounts(t *testing.T) {
+	err := ValidateHealthResponse(&HealthResponse{Status: "healthy", Total: 1, Healthy: 2})
+	if err == nil {
+		t.Fatal("health counts above total must be rejected")
+	}
+}
+
+func TestSuccessfulResponseBodiesAreBounded(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(strings.Repeat("x", MaxCatalogBody+1)))
+	}))
+	defer server.Close()
+
+	_, err := newClientLegacy(server.URL, "", 5*time.Second).ListModels()
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized catalog response error = %v", err)
+	}
+}
+
 func TestProbeDoesNotClaimAuth(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(ModelsResponse{Data: []Model{{ID: "m1"}}})

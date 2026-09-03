@@ -121,10 +121,12 @@ package: build-all
 	\
 	for p in $(PLATFORMS); do \
 		bundle_dir="$$staging/installer-$$p"; \
-		mkdir -p "$$bundle_dir/plugins/claude-code/bin/$$p" "$$bundle_dir/plugins/codex/bin/$$p"; \
+		mkdir -p "$$bundle_dir/plugins/claude-code/.claude-plugin" "$$bundle_dir/plugins/codex/.codex-plugin" "$$bundle_dir/plugins/claude-code/bin/$$p" "$$bundle_dir/plugins/codex/bin/$$p"; \
 		install -m 0755 $(BUILD_DIR)/$(BINARY)-$$p "$$bundle_dir/$(BINARY)"; \
-		cp -R plugins/claude-code/.claude-plugin plugins/claude-code/hooks plugins/claude-code/scripts plugins/claude-code/skills "$$bundle_dir/plugins/claude-code/"; \
-		cp -R plugins/codex/.codex-plugin plugins/codex/hooks plugins/codex/scripts plugins/codex/skills "$$bundle_dir/plugins/codex/"; \
+		sed "s/\"version\": \".*\"/\"version\": \"$$REL_VERSION\"/" plugins/claude-code/.claude-plugin/plugin.json > "$$bundle_dir/plugins/claude-code/.claude-plugin/plugin.json"; \
+		sed "s/\"version\": \".*\"/\"version\": \"$$REL_VERSION\"/" plugins/codex/.codex-plugin/plugin.json > "$$bundle_dir/plugins/codex/.codex-plugin/plugin.json"; \
+		cp -R plugins/claude-code/hooks plugins/claude-code/scripts plugins/claude-code/skills "$$bundle_dir/plugins/claude-code/"; \
+		cp -R plugins/codex/hooks plugins/codex/scripts plugins/codex/skills "$$bundle_dir/plugins/codex/"; \
 		install -m 0755 $(BUILD_DIR)/$(BINARY)-$$p "$$bundle_dir/plugins/claude-code/bin/$$p/$(BINARY)"; \
 		install -m 0755 $(BUILD_DIR)/$(BINARY)-$$p "$$bundle_dir/plugins/codex/bin/$$p/$(BINARY)"; \
 		find "$$bundle_dir" -exec touch -h -d "@$$epoch" {} +; \
@@ -267,6 +269,7 @@ package-smoke:
 		test -x "$$idir/$(BINARY)" || { echo "FAIL: $$p installer missing executable"; exit 1; }; \
 		test -f "$$idir/plugins/claude-code/.claude-plugin/plugin.json" || { echo "FAIL: $$p installer missing Claude plugin"; exit 1; }; \
 		test -f "$$idir/plugins/codex/.codex-plugin/plugin.json" || { echo "FAIL: $$p installer missing Codex plugin"; exit 1; }; \
+		python3 -c "import json,sys; expected=sys.argv[1]; paths=sys.argv[2:]; assert all(json.load(open(path))['version'] == expected for path in paths), 'installer plugin version mismatch'" "$$REL_VERSION" "$$idir/plugins/claude-code/.claude-plugin/plugin.json" "$$idir/plugins/codex/.codex-plugin/plugin.json"; \
 		test -f "$$idir/plugins/claude-code/hooks/hooks.json" || { echo "FAIL: $$p installer missing Claude hooks"; exit 1; }; \
 		test -x "$$idir/plugins/claude-code/scripts/run-hook.sh" || { echo "FAIL: $$p installer missing executable Claude hook runner"; exit 1; }; \
 		test -f "$$idir/plugins/codex/hooks/hooks.json" || { echo "FAIL: $$p installer missing Codex hooks"; exit 1; }; \
@@ -280,6 +283,8 @@ package-smoke:
 	mkdir -p "$$extract"; \
 	tar -xzf "$(RELEASE_DIR)/freeinference-companion-$$REL_VERSION-$$cur.tar.gz" -C "$$extract"; \
 	bin="$$extract/freeinference-companion-$$REL_VERSION-$$cur/$(BINARY)"; \
+	version_json="$$($$bin version --json)"; \
+	python3 -c "import json,sys; assert json.loads(sys.argv[1])['version'] == sys.argv[2], 'binary version mismatch'" "$$version_json" "$$REL_VERSION"; \
 	if "$$bin" help >/dev/null 2>&1; then \
 		echo "smoke OK: $$cur (binary executes)"; \
 	else \
@@ -292,6 +297,7 @@ package-smoke:
 		mkdir -p "$$edir"; \
 		unzip -q "$$z" -d "$$edir"; \
 		test -f "$$edir/.claude-plugin/plugin.json" || { echo "FAIL: $$(basename $$z) missing .claude-plugin/plugin.json"; exit 1; }; \
+		python3 -c "import json,sys; assert json.load(open(sys.argv[1]))['version'] == sys.argv[2], 'Claude plugin version mismatch'" "$$edir/.claude-plugin/plugin.json" "$$REL_VERSION"; \
 		test -d "$$edir/hooks" || { echo "FAIL: $$(basename $$z) missing hooks/"; exit 1; }; \
 		test -d "$$edir/scripts" || { echo "FAIL: $$(basename $$z) missing scripts/"; exit 1; }; \
 		test -d "$$edir/skills" || { echo "FAIL: $$(basename $$z) missing skills/"; exit 1; }; \
@@ -303,6 +309,7 @@ package-smoke:
 		mkdir -p "$$edir"; \
 		unzip -q "$$z" -d "$$edir"; \
 		test -f "$$edir/.codex-plugin/plugin.json" || { echo "FAIL: $$(basename $$z) missing .codex-plugin/plugin.json"; exit 1; }; \
+		python3 -c "import json,sys; assert json.load(open(sys.argv[1]))['version'] == sys.argv[2], 'Codex plugin version mismatch'" "$$edir/.codex-plugin/plugin.json" "$$REL_VERSION"; \
 		test -d "$$edir/hooks" || { echo "FAIL: $$(basename $$z) missing hooks/"; exit 1; }; \
 		test -d "$$edir/scripts" || { echo "FAIL: $$(basename $$z) missing scripts/"; exit 1; }; \
 		test -d "$$edir/bin" || { echo "FAIL: $$(basename $$z) missing bundled Codex binaries"; exit 1; }; \

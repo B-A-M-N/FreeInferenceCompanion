@@ -689,14 +689,42 @@ func LoadGlobal(paths Paths) (*schema.GlobalState, error) {
 	if err := readJSONQuarantine(paths.GlobalHealth(), &gs.Health, "health"); err != nil {
 		loadErr = err
 	}
+	if gs.Health != nil {
+		if err := schema.ValidateHealthCache(gs.Health); err != nil {
+			quarantineGlobalFile(paths.GlobalHealth(), "health", schema.QuarantineReason(err))
+			gs.Health = nil
+			loadErr = fmt.Errorf("quarantined health: %w", err)
+		}
+	}
 	if err := readJSONQuarantine(paths.GlobalModels(), &gs.Models, "models"); err != nil {
 		loadErr = err
+	}
+	if gs.Models != nil {
+		if err := schema.ValidateModelsCache(gs.Models); err != nil {
+			quarantineGlobalFile(paths.GlobalModels(), "models", schema.QuarantineReason(err))
+			gs.Models = nil
+			loadErr = fmt.Errorf("quarantined models: %w", err)
+		}
 	}
 	if err := readJSONQuarantine(paths.GlobalAccountUsage(), &gs.AccountUsage, "account-usage"); err != nil {
 		loadErr = err
 	}
+	if gs.AccountUsage != nil {
+		if err := schema.ValidateAccountUsage(gs.AccountUsage); err != nil {
+			quarantineGlobalFile(paths.GlobalAccountUsage(), "account-usage", schema.QuarantineReason(err))
+			gs.AccountUsage = nil
+			loadErr = fmt.Errorf("quarantined account-usage: %w", err)
+		}
+	}
 	if err := readJSONQuarantine(paths.GlobalAccountUsageCapability(), &gs.AccountUsageCapability, "account-usage-capability"); err != nil {
 		loadErr = err
+	}
+	if gs.AccountUsageCapability != nil {
+		if err := schema.ValidateAccountUsageCapability(gs.AccountUsageCapability); err != nil {
+			quarantineGlobalFile(paths.GlobalAccountUsageCapability(), "account-usage-capability", schema.QuarantineReason(err))
+			gs.AccountUsageCapability = nil
+			loadErr = fmt.Errorf("quarantined account-usage-capability: %w", err)
+		}
 	}
 	if err := readJSONQuarantine(paths.GlobalPublicStatus(), &gs.PublicStatus, "public-status"); err != nil {
 		loadErr = err
@@ -742,6 +770,9 @@ func quarantineGlobalFile(path, resourceName, reason string) {
 
 // SaveHealth writes the health cache atomically.
 func SaveHealth(paths Paths, h *schema.HealthCache) error {
+	if err := schema.ValidateHealthCache(h); err != nil {
+		return fmt.Errorf("validate health cache: %w", err)
+	}
 	if err := paths.EnsureDirs(); err != nil {
 		return err
 	}
@@ -750,6 +781,9 @@ func SaveHealth(paths Paths, h *schema.HealthCache) error {
 
 // SaveModels writes the models cache atomically.
 func SaveModels(paths Paths, m *schema.ModelsCache) error {
+	if err := schema.ValidateModelsCache(m); err != nil {
+		return fmt.Errorf("validate models cache: %w", err)
+	}
 	if err := paths.EnsureDirs(); err != nil {
 		return err
 	}
@@ -758,6 +792,9 @@ func SaveModels(paths Paths, m *schema.ModelsCache) error {
 
 // SaveAccountUsage writes the account usage cache atomically.
 func SaveAccountUsage(paths Paths, a *schema.AccountUsage) error {
+	if err := schema.ValidateAccountUsage(a); err != nil {
+		return fmt.Errorf("validate account usage: %w", err)
+	}
 	if err := paths.EnsureDirs(); err != nil {
 		return err
 	}
@@ -767,6 +804,9 @@ func SaveAccountUsage(paths Paths, a *schema.AccountUsage) error {
 // SaveAccountUsageCapability writes the negotiated account-usage capability
 // cache atomically.
 func SaveAccountUsageCapability(paths Paths, c *schema.AccountUsageCapability) error {
+	if err := schema.ValidateAccountUsageCapability(c); err != nil {
+		return fmt.Errorf("validate account usage capability: %w", err)
+	}
 	if err := paths.EnsureDirs(); err != nil {
 		return err
 	}

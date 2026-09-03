@@ -212,8 +212,11 @@ func TestFIStatusNormalizesRealPublicFixture(t *testing.T) {
 	if bge.Status != fiModelUp || bge.TTFTMs != nil || bge.Throughput != nil || bge.UptimePct == nil {
 		t.Fatalf("embedding telemetry = %+v", bge)
 	}
-	if diffusion.Status != fiModelDown || diffusion.Error != "timeout" || diffusion.CurrentStateFor == nil || *diffusion.CurrentStateFor != 360 || diffusion.StateDurationAtLeast {
+	if diffusion.Status != fiModelDown || diffusion.Error != "timeout" || diffusion.CurrentStateFor == nil || *diffusion.CurrentStateFor != 0 || diffusion.StateDurationAtLeast {
 		t.Fatalf("down model telemetry = %+v", diffusion)
+	}
+	if diffusion.ObservedStateFor == nil || *diffusion.ObservedStateFor != 0 || diffusion.StateTransitionInterval == nil || *diffusion.StateTransitionInterval < 1190 {
+		t.Fatalf("down model observed duration = %+v", diffusion)
 	}
 	if qwen.Throughput == nil || *qwen.Throughput != 254.53 || qwen.LatencyMs == nil || *qwen.LatencyMs != 1194 {
 		t.Fatalf("generation telemetry = %+v", qwen)

@@ -183,6 +183,12 @@ func cmdTraceCodexLifecycle(operation string, args []string, stdout, stderr io.W
 			}
 			i++
 			clientType = args[i]
+		case "codex":
+			if clientType != "" {
+				fmt.Fprintln(stderr, "usage error: Codex client specified more than once")
+				return 2
+			}
+			clientType = schema.ClientCodex
 		case "--help", "-h", "help":
 			printTraceUsage(stdout)
 			return 0

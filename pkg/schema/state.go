@@ -326,11 +326,12 @@ type EvidenceItem struct {
 	Source      string `json:"source"` // "provider", "client_observed", "inferred"
 }
 
-// RankedCause is one possible cause with a likelihood score.
+// RankedCause is one possible cause with a heuristic evidence score. It is
+// intentionally not a probability and must not be presented as one.
 type RankedCause struct {
-	Reason     CacheReasonCode `json:"reason"`
-	Label      string          `json:"label"`
-	Likelihood float64         `json:"likelihood"` // 0.0 to 1.0
+	Reason         CacheReasonCode `json:"reason"`
+	Label          string          `json:"label"`
+	HeuristicScore float64         `json:"heuristic_score"` // 0.0 to 1.0
 }
 
 // CacheDiagnosis is the complete structured diagnosis for cache behavior.
@@ -503,13 +504,10 @@ type AccountUsage struct {
 	TokensLimit   *int64    `json:"tokens_limit"`
 }
 
-// HasAuthoritativeAccountUsage reports whether this provider state contains
-// quota data backed by an explicitly supported capability and a validated,
-// authoritative response.
+// HasAuthoritativeAccountUsage is retained for compatibility and now applies
+// the same validation/freshness gate as the safe display/calculation path.
 func (g *GlobalState) HasAuthoritativeAccountUsage() bool {
-	return g != nil && g.AccountUsage != nil && g.AccountUsage.Authoritative &&
-		g.AccountUsageCapability != nil &&
-		g.AccountUsageCapability.State == CapabilitySupported
+	return g.HasUsableAccountUsage(time.Now().UTC(), DefaultAccountUsageMaxAge)
 }
 
 // CircuitBreaker tracks per-endpoint circuit breaker state.

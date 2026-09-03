@@ -2,10 +2,9 @@
 
 ## Supported versions
 
-Until the first stable tag, the default branch is pre-release and support is
-best effort. After the first stable tag, the latest tagged release on the
-default branch is supported; older releases may not contain current
-activation, credential-safety, or state-migration fixes.
+Beginning with v0.1.0, the latest tagged release is supported. Older releases
+may not contain current activation, credential-safety, or state-migration
+fixes.
 
 ## Private reports
 
@@ -23,6 +22,29 @@ authorization headers, prompts, responses, transcripts, or raw error bodies.
 Local state may contain sanitized model/session metadata, nullable token
 measurements, cache shares, lifecycle timestamps, and short failure categories.
 Session identifiers are masked in normal output and hashed in event logs.
+
+### Defense in depth
+
+- Reports and account-usage renders use explicit allowlists; unknown upstream
+  fields are dropped rather than redacted after the fact.
+- Persisted strings pass through pattern-based redaction for key shapes such
+  as `hyi-*`, `sk-*`, bearer tokens, environment assignments, and labeled JSON
+  secret fields.
+- State files are `0600`, state directories are `0700`, and session directory
+  names are SHA-256 hashes of session IDs. Path-shaped client inputs such as
+  `cwd` and `transcript_path` are not persisted.
+- Catalog responses are bounded at 2 MiB, health responses at 1 MiB, error
+  bodies at 64 KiB, and synthetic probe bodies at 1 MiB.
+
+There is no encryption at rest in v0.1.0 because the local state contains no
+credentials and an encryption key stored on the same machine would generally
+be available to an attacker who can read the cache directory. File ownership
+is the boundary; an OS keystore would be the appropriate next step if the
+companion ever needed to persist refresh tokens.
+
+`TestSecretNeverPersistsOrRenders` in `cmd/fi/security_test.go` walks persisted
+files and output paths as a regression guard against secret-shaped data
+appearing in state, events, reports, doctor output, or renders.
 
 Automatic hooks and status-line updates make no inference or monitoring
 network calls. `fi-status` is the exception: it makes one unauthenticated GET

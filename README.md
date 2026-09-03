@@ -6,10 +6,52 @@ Lightweight observability layer for FreeInference-powered coding-agent sessions.
 
 Community-built and unofficial. Not affiliated with or endorsed by FreeInference.
 
+## Why this exists
+
+I built this after using FreeInference for inference access during development.
+I wanted a small, inspectable companion that helps people understand context
+pressure, cache behavior, model availability, and failures from the telemetry
+their client already exposes. The goal is to make day-to-day use easier while
+keeping the provider's inference path direct and leaving users in control of
+any optional refresh or trace-correlation behavior.
+
+This is an independent, unofficial community project. FreeInference did not
+ask for it, commission it, direct it, fund it, pay for it, review it, or
+approve it. Nothing here implies sponsorship, partnership, endorsement, or
+representation by FreeInference or an affiliated organization. HarvardMadSys,
+if mentioned as part of the project's motivation, is not a reviewer, approver,
+funder, or sponsor.
+
+If FreeInference is useful to you, please support FreeInference directly:
+use its [official documentation](https://doc.freeinference.org/), send provider
+feedback through its official channels, contribute where the project accepts
+contributions, and support its work financially if and where the maintainers
+provide that option. This companion is meant to complement the service, not
+replace or impersonate it.
+
+## Find your depth
+
+Start here for the short version. The supporting docs keep the technical
+details available without turning installation and everyday use into a design
+document:
+
+- [Install the release or Codex plugin](docs/INSTALL.md)
+- [Understand network behavior and freshness](docs/OBSERVABILITY.md)
+- [Read cache diagnoses and heuristic limits](docs/CACHE_DIAGNOSTICS.md)
+- [Configure Codex with FreeInference](docs/codex.md)
+- [Trace correlation and privacy](docs/TRACING.md)
+- [Compatibility and unsupported telemetry](docs/COMPATIBILITY.md)
+- [Security and vulnerability reporting](SECURITY.md)
+- [Build, test, package, and validate](docs/DEVELOPMENT.md)
+
 ## Quick start
 
+For a published release, follow [INSTALL.md](docs/INSTALL.md) to download and
+verify the checksummed artifact. From a source checkout, use `make
+install` as described in [DEVELOPMENT.md](docs/DEVELOPMENT.md).
+
 ```bash
-# Install the CLI into ~/.local/bin
+# Source-checkout development install into ~/.local/bin
 make install
 
 # Run diagnostics
@@ -40,8 +82,10 @@ The release binary is fully static (`CGO_ENABLED=0`, verified with `ldd`).
 ```
 freeinference CLI (Go, static binary)
   ├── reads/writes ~/.cache/freeinference-companion/
-  │   ├── global/          # Provider health, model catalog, public-status,
-  │   │                    # circuit breakers, session index, refresh locks
+  │   ├── providers/<activation-id>/global/ # Provider health, models,
+  │   │                                      # public status, breakers, locks
+  │   ├── global/          # Legacy unnamespaced global state
+  │   ├── sessions-index/  # Cross-provider session discovery index
   │   └── sessions/        # Per-session snapshots and advisory locks
   ├── commands: status, sessions, snapshot, render, models, doctor,
   │             report, failures, dashboard, context, cache, fi-status, run, trace,
@@ -52,8 +96,8 @@ Claude Code plugin → scripts/run-hook.sh → freeinference hook claude-code <e
 Codex plugin       → hooks/scripts + skills → local lifecycle recording and diagnostics
 ```
 
-Plugin hooks resolve the `freeinference` binary from `PATH`, the plugin-bundled `bin/freeinference`,
-or `~/.local/bin/freeinference` — and exit 0 no matter what. Hook handlers only record local
+Plugin hooks resolve the plugin-bundled platform binary first, then a generic
+plugin binary, then `freeinference` from `PATH` — and exit 0 no matter what. Hook handlers only record local
 state. Session start/end request no upstream work by default. If `FI_AUTO_REFRESH=1` is set,
 stale metadata workers share a one-minute request spacing guard and provider-wide cooldown after
 a rate limit.
@@ -180,143 +224,28 @@ from the OpenAI-compatible route.
 The Codex provider setup, model profiles, model-catalog rules, and companion
 plugin behavior are documented separately in [Codex with FreeInference](docs/codex.md).
 
-## State model
+## What you can observe
 
-The plugin uses three separate concepts for metrics:
+The companion keeps live client observations, provider metadata, and account
+usage as separate sources. Missing values stay unknown, stale provider data is
+labeled stale, and quota projections are suppressed unless the provider has
+returned a validated, authoritative response.
 
-| Source | Authoritative | Description |
-|--------|:---:|-------------|
-| `live_context` | ✓ | Latest Claude status-line snapshot; total-token semantics are recorded as current-context, cumulative-session, or unknown |
-| `usage_observations` | ✗ | Up to 20 retained observations with request identity/epoch metadata; observed, analyzed, and usable counts are separate |
-| `account_usage` | ✓ when capability is supported | Provider quota data, omitted unless a validated account-usage capability response is available |
+It can show context pressure, cache-read patterns, model health, and an
+optional budget projection. Cache diagnoses and confidence labels are local
+heuristics, not provider-confirmed causes or probabilities. All warnings are
+advisory and the status line remains width-aware.
 
-Missing fields are `null` — never converted to zero. A zero-token field remains zero; a missing field remains null.
-
-Cache-low warnings fire under these hypothetical conditions: 3+ usable
-observations, ≥50K active context, read share <20% for 3 sequential observations, confirmed
-FreeInference provider, and a 30-minute cooldown. They resolve after 3
-sequential observations above 40%. The warning includes likely diagnosis
-(see below).
-
-Projection warnings qualify when active context is at least 60% of the
-model's window and the projected next request (active + estimated prompt +
-tool overhead + safety margin) would leave less than the configured output
-reserve (default 16,000 tokens). Confidence is labeled `low` or `medium` —
-never `high` in v0.1.0 because the companion does not see the full request
-body the client sends.
-
-Cache-TTL expiry warnings are emitted only when a provider-confirmed TTL is
-available. Without provider TTL telemetry, Companion does not infer cache
-expiry from idle time. When the provider confirms expiry, the warning says
-the next request may need to rebuild the cached prefix. Gated on ≥10K active
-context and a 30-minute cooldown.
-
-### Cache miss pattern attribution
-
-`freeinference cache` classifies cache miss patterns with likely diagnosis instead of
-generic diagnostics:
-
-| Pattern | Meaning | Example cause |
-|---------|---------|---------------|
-| **Thrashing** | High cache creation, low cache read | Dynamic content at the start of the system prompt; prefix keeps being rewritten |
-| **No caching** | Almost all fresh input, negligible cache activity | Client not using `cache_control` breakpoints |
-| **Decay** | Read share was good but is declining | Conversation growing past the cached prefix |
-| **Intermittent** | Alternating good/bad observations | Tool results inserted before the cached prefix on some turns |
-
-The inline cache-low warning also includes the diagnosis so the user gets
-the likely cause at the moment it fires.
-
-### Token budget projection
-
-`freeinference status` and `freeinference report` show account quota status with a projected
-exhaustion timeline only after the provider has returned a schema-valid,
-authoritative account-usage response. The capability is recorded as
-`supported`, `unsupported`, `forbidden`, or `unknown`; known unsupported and
-forbidden endpoints are not retried automatically. When unavailable, no quota
-or budget projection is rendered.
-
-When the capability is supported, projection uses the session's observed token
-burn rate:
-
-```
-Account Usage:
-  Updated: 2026-07-29T15:30:00Z
-  Requests: 4.2K / 10K (42.0%)
-  Tokens:   1.2M / 5.0M (24.0%)
-  Budget:   🟢 healthy — At current rate (~127K tok/hr over 1.2h), quota lasts until Jul 30 09:14.
-```
-
-Status tiers: healthy (>30% remaining), watch (15-30%), low (5-15%),
-critical (<5%). Falls back to request-based quota when token limits aren't
-reported.
-
-### Status line rendering
-
-The collapsed status line is width-aware and adapts to terminal column
-count via the `COLUMNS` environment variable (set by Claude Code):
-
-| Width | Segments shown |
-|-------|---------------|
-| **Wide (100+)** | Model, shield, cache read %, fresh tokens, context %, pressure |
-| **Medium (60-99)** | Model, shield, cache read %, fresh tokens, context %, pressure |
-| **Narrow (<60)** | Shield, cache read %, context % |
-
-The shield icon `🛡` color tracks context usage: white when empty, orange
-when getting high (60%+), red when critical (85%+). Unknown telemetry
-renders as `—` (em dash), never fabricated as `0%`.
-
-Detailed status surfaces may include cached public monitor data for the
-current model (health, uptime, latency, and check age). The monitor is read
-from `global/public-status.json`; hook processes and status-line paths never
-fetch it (an explicitly opted-in detached worker may refresh it)
-synchronously.
-
-### Reporting levels
-
-Ask the coding agent for a quick, normal, or detailed FreeInference check, or
-use the matching CLI level directly:
-
-```bash
-freeinference status --level summary   # one line for an at-a-glance check
-freeinference status --level standard  # current session essentials
-freeinference status --level detailed  # essentials plus history and account diagnostics
-```
-
-Set the preferred default once with `freeinference config set reporting.level
-standard`; `FI_REPORTING_LEVEL` can override it for a single shell or host.
-`--compact` remains reserved for status-line integrations, and `--json`
-remains the stable machine-readable contract.
-
-### Sanitized event log
-
-Each session has a bounded `events.jsonl` recording only lifecycle event
-types (`session_started`, `status_observed`, `prompt_submitted`,
-`turn_stopped`, `turn_failed`, `compaction_started`, `compaction_completed`,
-`model_switch`, `session_ended`, `warning_shown`, `warning_resolved`) and short sanitized
-details. Rotation kicks in past 256 KiB or 1,000 events per session.
-Sessions older than 30 days become eligible for cleanup. The explicit
-`refresh` maintenance command invokes `CleanupStaleSessions`; normal hooks do
-not scan or delete session history.
-
-Use `freeinference failures` to aggregate retained incidents by category,
-model, and client. Categories cover rate limits, authentication and
-permission failures, invalid requests, timeouts, model-not-found, overload,
-gateway/server errors, network/TLS errors, cancellation, and output limits.
-Error bodies are never included.
+For thresholds, state semantics, reporting levels, event retention, and the
+full cache-pattern table, see [Observability](docs/OBSERVABILITY.md) and
+[Cache diagnostics](docs/CACHE_DIAGNOSTICS.md). The stable machine-readable
+surfaces are `snapshot --json`, `render --mode line`, and `report --format
+json`.
 
 ## Development
 
-```bash
-make build      # Static build into build/freeinference (ldd-verified)
-make test       # Run tests
-make test-race  # Run tests with the race detector
-make vet        # Run go vet
-make fmt-check  # Verify gofmt cleanliness
-make bench      # Run performance benchmarks (average latency gate; not p95)
-make check      # fmt + vet + test + race + plugin validation + git diff --check
-make release    # Cross-compile all platforms + checksums
-make smoke      # Quick smoke test
-```
+See [DEVELOPMENT.md](docs/DEVELOPMENT.md) for build, test, release, and Codex
+plugin validation commands.
 
 ## Project layout
 
@@ -358,80 +287,13 @@ FreeInferenceCompanion/
 
 ## Security model
 
-The companion handles API keys and (eventually) account-usage data. The
-security model is layered and intentional.
+The companion keeps credentials in memory for individual requests, never
+persists API keys, and writes only bounded, sanitized local metadata. State
+files are owner-only; prompts, responses, transcript paths, raw headers, and
+raw error bodies are not retained. See [SECURITY.md](SECURITY.md) for the
+threat model, response bounds, trace-correlation tradeoff, and private
+vulnerability-reporting process.
 
-**Credential handling:**
-- The FreeInference API key is read from the environment at request time and
-  lives only in the in-process `api.Client.APIKey` field for the duration of
-  a request.
-- It is **never** persisted to disk by any code path.
-- It is sent only in `Authorization: Bearer` headers to the configured
-  FreeInference endpoint.
-- It does not appear in any `Snapshot`, `Event`, `GlobalState`, report,
-  doctor output, log line, or error message.
-
-**Defense in depth (output):**
-- **Allowlist construction** — reports and account-usage renders are built
-  only from explicitly-named fields. Unknown upstream fields are silently
-  dropped, never redacted-after-the-fact. A future endpoint adding a
-  `billing_email` or `api_key_hint` field will not leak.
-- **Pattern-based redaction** (`internal/secure`) — any string leaving the
-  process through state, an event, or a report passes through a redactor
-  that recognizes key shapes (`hyi-*`, `sk-*`, `Bearer *`,
-  `*_API_KEY=...`, labeled JSON secret fields).
-- **Identifier obfuscation** — session IDs are SHA-256-hashed for the
-  on-disk directory name; `secure.ShortHash` / `MaskSessionID` utilities
-  are available for any future display context that does not need the full ID.
-
-**Defense in depth (filesystem):**
-- All state files are `0600` (owner read/write only).
-- All state directories are `0700`.
-- The session directory name is a SHA-256 of the session ID, preventing
-  path-traversal and hiding the raw ID from a casual `ls`.
-- Path-shaped client inputs (`transcript_path`, `cwd`, `current_dir`,
-  `project_dir`) are never copied into persisted state.
-
-**Response bounds:**
-- Catalog response bounded at 2 MiB, health at 1 MiB.
-- Error bodies bounded at 64 KiB and run through the redactor before
-  entering our error type.
-- The synthetic inference probe body is bounded at 1 MiB.
-
-**Why no encryption-at-rest:** Local state is already `0600` and contains no
-secrets. Encrypting it would require a key stored on the same machine (env
-var, keyfile, or OS keystore); an attacker who can read the cache directory
-can almost certainly read the key too. We treat OS-level file permissions as
-the boundary and skip encryption-at-rest as security theatre. When account
-usage lands, the same model applies: the persisted fields are numeric
-quotas and timestamps — not secrets — and the API key still never touches
-disk. An OS keystore integration (macOS Keychain / Linux secret-service)
-would be the meaningful next step if we ever needed to persist a refresh
-token, which v0.1.0 does not.
-
-**Verifying the model:**
-`TestSecretNeverPersistsOrRenders` in `cmd/fi/security_test.go` walks every
-persisted file and every output path (status, snapshot, render, report,
-events, doctor) and fails if any secret-shaped string appears. It is the
-regression guard for the security model.
-
-## Acknowledgment
-
-This project was developed independently using FreeInference for inference
-access during development. FreeInference did not commission, direct, fund, or
-pay for this work. No representative of FreeInference reviewed or approved
-this contribution, and this acknowledgment does not indicate sponsorship,
-partnership, or endorsement by FreeInference or any affiliated organization.
-
-I am acknowledging the service because access to capable inference
-infrastructure can make meaningful open-source development more accessible
-to developers and researchers who do not have the hardware or budget to run
-these models themselves.
-
-Organizations able to provide GPU capacity, hardware, cloud credits,
-research funding, or other infrastructure resources should consider
-supporting FreeInference so that it can continue making this capability
-available for open-source development, research, and education.
 
 ## License
 

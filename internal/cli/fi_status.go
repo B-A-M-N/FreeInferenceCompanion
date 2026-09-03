@@ -34,22 +34,27 @@ const (
 )
 
 type fiStatusModel struct {
-	ID                   string   `json:"id"`
-	Status               string   `json:"status"`
-	CheckedAt            string   `json:"checked_at,omitempty"`
-	CheckAgeSeconds      int64    `json:"check_age_seconds,omitempty"`
-	LatencyMs            *int64   `json:"latency_ms,omitempty"`
-	TTFTMs               *int64   `json:"ttft_ms,omitempty"`
-	CompletionTokens     *int64   `json:"completion_tokens,omitempty"`
-	Throughput           *float64 `json:"throughput_tps,omitempty"`
-	UptimePct            *float64 `json:"uptime_pct,omitempty"`
-	CurrentStateFor      *int64   `json:"current_state_for_seconds,omitempty"`
-	StateDurationAtLeast bool     `json:"state_duration_at_least,omitempty"`
-	LatencyMinMs         *int64   `json:"latency_min_ms,omitempty"`
-	LatencyMaxMs         *int64   `json:"latency_max_ms,omitempty"`
-	TTFTMinMs            *int64   `json:"ttft_min_ms,omitempty"`
-	TTFTMaxMs            *int64   `json:"ttft_max_ms,omitempty"`
-	Error                string   `json:"error,omitempty"`
+	ID               string   `json:"id"`
+	Status           string   `json:"status"`
+	CheckedAt        string   `json:"checked_at,omitempty"`
+	CheckAgeSeconds  int64    `json:"check_age_seconds,omitempty"`
+	LatencyMs        *int64   `json:"latency_ms,omitempty"`
+	TTFTMs           *int64   `json:"ttft_ms,omitempty"`
+	CompletionTokens *int64   `json:"completion_tokens,omitempty"`
+	Throughput       *float64 `json:"throughput_tps,omitempty"`
+	UptimePct        *float64 `json:"uptime_pct,omitempty"`
+	// CurrentStateFor is retained as an in-process compatibility alias. The
+	// serialized contract uses observed_state_for_seconds to make clear that
+	// duration is bounded by monitor samples, not by fetch time.
+	CurrentStateFor         *int64 `json:"-"`
+	ObservedStateFor        *int64 `json:"observed_state_for_seconds,omitempty"`
+	StateDurationAtLeast    bool   `json:"state_duration_at_least,omitempty"`
+	StateTransitionInterval *int64 `json:"state_transition_interval_seconds,omitempty"`
+	LatencyMinMs            *int64 `json:"latency_min_ms,omitempty"`
+	LatencyMaxMs            *int64 `json:"latency_max_ms,omitempty"`
+	TTFTMinMs               *int64 `json:"ttft_min_ms,omitempty"`
+	TTFTMaxMs               *int64 `json:"ttft_max_ms,omitempty"`
+	Error                   string `json:"error,omitempty"`
 }
 
 type fiMonitorOutput struct {
@@ -357,12 +362,23 @@ func addHistoryMetrics(result *fiStatusModel, model api.PublicStatusModel, lates
 		oldest = points[index].at
 		index--
 	}
-	duration := int64(now.Sub(oldest) / time.Second)
+	// `latestAt` is the observation boundary. Using fetch time would silently
+	// add network/scheduling delay to the reported state duration.
+	_ = now
+	duration := int64(latestAt.Sub(oldest) / time.Second)
 	if duration < 0 {
 		duration = 0
 	}
 	result.CurrentStateFor = &duration
+	result.ObservedStateFor = &duration
 	result.StateDurationAtLeast = index < 0
+	if index >= 0 {
+		transition := int64(latestAt.Sub(points[index].at) / time.Second)
+		if transition < 0 {
+			transition = 0
+		}
+		result.StateTransitionInterval = &transition
+	}
 }
 
 func minMaxInt64(minimum, maximum, value *int64) (*int64, *int64) {
@@ -500,11 +516,14 @@ func renderFIStatusDetails(stdout io.Writer, model fiStatusModel) {
 	fmt.Fprintf(stdout, "  Throughput:    %s\n", formatThroughput(model.Throughput))
 	fmt.Fprintf(stdout, "  Monitor uptime: %s\n", formatUptime(model.UptimePct))
 	if model.CurrentStateFor != nil {
-		prefix := ""
+		prefix := "observed "
 		if model.StateDurationAtLeast {
-			prefix = "≥"
+			prefix = "observed ≥"
 		}
-		fmt.Fprintf(stdout, "  State for:     %s%s\n", prefix, formatDuration(*model.CurrentStateFor))
+		fmt.Fprintf(stdout, "  State for:     %s %s\n", prefix, formatDuration(*model.CurrentStateFor))
+		if model.StateTransitionInterval != nil {
+			fmt.Fprintf(stdout, "  Transition interval: %s\n", formatDuration(*model.StateTransitionInterval))
+		}
 	}
 	if model.LatencyMinMs != nil && model.LatencyMaxMs != nil {
 		fmt.Fprintf(stdout, "  Latency range: %s – %s\n", formatMilliseconds(model.LatencyMinMs), formatMilliseconds(model.LatencyMaxMs))

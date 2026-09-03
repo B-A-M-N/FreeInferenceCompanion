@@ -206,6 +206,47 @@ func TestValidatePublicStatusCacheRejectsDuplicateModels(t *testing.T) {
 	}
 }
 
+func TestValidateAccountUsageRejectsNonsensicalQuota(t *testing.T) {
+	used, limit := int64(11), int64(10)
+	usage := &AccountUsage{
+		Authoritative: true,
+		FetchedAt:     nowForSchemaTest(),
+		RequestsUsed:  &used,
+		RequestsLimit: &limit,
+	}
+	if err := ValidateAccountUsage(usage); err == nil {
+		t.Fatal("usage above limit must be rejected")
+	}
+}
+
+func TestHasUsableAccountUsageRequiresFreshSupportedData(t *testing.T) {
+	used, limit := int64(1), int64(10)
+	now := nowForSchemaTest()
+	gs := &GlobalState{
+		AccountUsage:           &AccountUsage{Authoritative: true, FetchedAt: now, RequestsUsed: &used, RequestsLimit: &limit},
+		AccountUsageCapability: &AccountUsageCapability{State: CapabilitySupported, CheckedAt: now},
+	}
+	if !gs.HasUsableAccountUsage(now, DefaultAccountUsageMaxAge) {
+		t.Fatal("fresh supported usage should be usable")
+	}
+	if gs.HasUsableAccountUsage(now.Add(DefaultAccountUsageMaxAge+time.Second), DefaultAccountUsageMaxAge) {
+		t.Fatal("stale usage must not be usable")
+	}
+}
+
+func TestValidateModelsCacheRejectsUnsafeDuplicateCatalog(t *testing.T) {
+	cache := &ModelsCache{
+		FetchedAt: nowForSchemaTest(),
+		Models: []CatalogModel{
+			{ID: "same", AccessState: AccessUnknown},
+			{ID: "same", AccessState: AccessUnknown},
+		},
+	}
+	if err := ValidateModelsCache(cache); err == nil {
+		t.Fatal("duplicate model ids must be rejected")
+	}
+}
+
 func nowForSchemaTest() time.Time {
 	return time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
 }

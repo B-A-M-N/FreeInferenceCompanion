@@ -28,8 +28,11 @@ const (
 // Cache TTLs.
 const (
 	ModelsTTL       = 6 * time.Hour
-	HealthTTL       = 120 * time.Second
-	AccountUSageTTL = 60 * time.Minute
+	HealthTTL       = schema.DefaultHealthMaxAge
+	AccountUsageTTL = schema.DefaultAccountUsageMaxAge
+	// AccountUSageTTL is kept as a source-compatibility alias for older
+	// embedders; new code should use AccountUsageTTL.
+	AccountUSageTTL = AccountUsageTTL
 	PublicStatusTTL = 20 * time.Minute
 
 	// AutomaticRefreshMinInterval is shared by all authenticated metadata
@@ -272,17 +275,30 @@ func StaleWorkersWithClient(paths state.Paths, healthURL string, apiKey string) 
 		stale = append(stale, WorkerModels)
 	}
 	if healthURL != "" && healthStale(gs, now) && !breakerOpen(gs, WorkerHealth, now) {
-		stale = append(stale, WorkerHealth)
-	}
-	if apiKey != "" && accountUsageCapabilityRefreshable(gs) && !breakerOpen(gs, WorkerAccountUsage, now) {
-		if accountUsageStale(gs, now) {
-			stale = append(stale, WorkerAccountUsage)
+		// Automatic authenticated metadata refreshes share one provider slot.
+		// Pick a deterministic priority so several stale resources cannot race
+		// and cause a burst or starve the model catalog unpredictably.
+		if !containsWorker(stale, WorkerModels) {
+			stale = append(stale, WorkerHealth)
 		}
+	}
+	if apiKey != "" && accountUsageCapabilityRefreshable(gs) && !breakerOpen(gs, WorkerAccountUsage, now) &&
+		accountUsageStale(gs, now) && !containsWorker(stale, WorkerModels) && !containsWorker(stale, WorkerHealth) {
+		stale = append(stale, WorkerAccountUsage)
 	}
 	if publicStatusStale(gs, now) && !breakerOpen(gs, WorkerPublicStatus, now) {
 		stale = append(stale, WorkerPublicStatus)
 	}
 	return stale
+}
+
+func containsWorker(workers []string, wanted string) bool {
+	for _, worker := range workers {
+		if worker == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 // SpawnDetachedWorkers launches one detached `freeinference refresh --worker <name>`
@@ -388,13 +404,13 @@ func (r *Refresher) refreshModels(result *RefreshResult, now time.Time) {
 	catalog := make([]schema.CatalogModel, 0, len(models))
 	for _, m := range models {
 		catalog = append(catalog, schema.CatalogModel{
-			ID:              m.ID,
-			Name:            m.Name,
+			ID:              secure.SanitizeField(m.ID),
+			Name:            secure.SanitizeField(m.Name),
 			ContextLength:   m.ContextLength,
 			MaxOutputLength: m.MaxOutputLength,
 			AccessState:     schema.AccessUnknown,
-			Pricing:         m.Pricing,
-			Features:        m.SupportedFeatures,
+			Pricing:         sanitizeCatalogPricing(m.Pricing),
+			Features:        sanitizeCatalogStrings(m.SupportedFeatures, schema.MaxCatalogFeatures),
 		})
 	}
 
@@ -768,6 +784,43 @@ func (r *Refresher) forceRefreshModels(result *RefreshResult, now time.Time) {
 	r.refreshModels(result, now)
 }
 
+// ForceWorkerRefresh explicitly refreshes exactly one requested resource.
+// This is used by resource-specific commands such as `models --refresh`; it
+// must never fan out into health, account, or public-status requests.
+func (r *Refresher) ForceWorkerRefresh(worker string) *RefreshResult {
+	result := &RefreshResult{Worker: worker}
+	switch worker {
+	case WorkerModels, WorkerHealth, WorkerAccountUsage, WorkerPublicStatus:
+	default:
+		result.Error = "unknown worker"
+		return result
+	}
+	if err := r.Paths.EnsureDirs(); err != nil {
+		result.Error = "ensure dirs"
+		return result
+	}
+	now := time.Now()
+	switch worker {
+	case WorkerModels:
+		r.forceRefreshModels(result, now)
+	case WorkerHealth:
+		if r.HealthURL == "" {
+			result.Error = "no health source configured"
+			return result
+		}
+		r.forceRefreshHealth(result, now)
+	case WorkerAccountUsage:
+		if r.Client == nil || r.Client.APIKey() == "" {
+			result.Error = "no API key configured"
+			return result
+		}
+		r.forceRefreshAccountUsage(result, now)
+	case WorkerPublicStatus:
+		r.forceRefreshPublicStatus(result, now)
+	}
+	return result
+}
+
 // forceRefreshHealth refreshes health under the worker lock but without the
 // staleness / circuit-breaker gates. Used by ForceRefresh.
 func (r *Refresher) forceRefreshHealth(result *RefreshResult, now time.Time) {
@@ -785,6 +838,41 @@ func (r *Refresher) forceRefreshHealth(result *RefreshResult, now time.Time) {
 	r.refreshHealth(result, now)
 }
 
+func sanitizeCatalogStrings(values []string, max int) []string {
+	if len(values) > max {
+		values = values[:max]
+	}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		clean := secure.SanitizeField(value)
+		if clean != "" {
+			result = append(result, clean)
+		}
+	}
+	return result
+}
+
+func sanitizeCatalogPricing(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make(map[string]string, minInt(len(values), schema.MaxCatalogPricing))
+	count := 0
+	for key, value := range values {
+		if count == schema.MaxCatalogPricing {
+			break
+		}
+		key = secure.SanitizeField(key)
+		value = secure.Redact(secure.SanitizeField(value))
+		if key == "" {
+			continue
+		}
+		result[key] = value
+		count++
+	}
+	return result
+}
+
 // ============================================================
 // Account usage
 // ============================================================
@@ -794,7 +882,7 @@ func accountUsageStale(gs *schema.GlobalState, now time.Time) bool {
 		return true
 	}
 	fetched := schema.SanitizeTimestamp(gs.AccountUsage.FetchedAt, now)
-	return now.Sub(fetched) > AccountUSageTTL
+	return now.Sub(fetched) > AccountUsageTTL
 }
 
 func accountUsageCapabilityRefreshable(gs *schema.GlobalState) bool {

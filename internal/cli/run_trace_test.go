@@ -179,6 +179,25 @@ func TestPrepareLaunchCodexVerifiesExplicitProfile(t *testing.T) {
 	tracing.RemoveLaunchReceipt(prepared.ReceiptPath)
 }
 
+func TestTraceCodexLifecycleAcceptsBothClientForms(t *testing.T) {
+	clearRunTraceEnv(t)
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	configPath := filepath.Join(home, "config.toml")
+	if err := os.WriteFile(configPath, []byte("model_provider = \"freeinference\"\n\n[model_providers.freeinference]\nbase_url = \"https://freeinference.org/v1\"\nenv_key = \"CODEX_FI_KEY\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CODEX_FI_KEY", "codex-key")
+	paths := state.NewPathsWithDir(t.TempDir())
+
+	for _, args := range [][]string{{"setup", "codex"}, {"uninstall", "--client", "codex"}} {
+		var stdout, stderr strings.Builder
+		if code := cmdTrace(paths, args, &stdout, &stderr); code != 0 {
+			t.Fatalf("cmdTrace(%v) code=%d stdout=%q stderr=%q", args, code, stdout.String(), stderr.String())
+		}
+	}
+}
+
 func TestReportIncludesTraceOnlyForValidActiveTrace(t *testing.T) {
 	snap := &schema.Snapshot{
 		Client:   schema.ClientInfo{Type: schema.ClientClaudeCode},

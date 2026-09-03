@@ -352,18 +352,6 @@ func budgetIcon(status engine.BudgetStatus) string {
 	}
 }
 
-// accessSymbol renders a catalog access state.
-func accessSymbol(state string) string {
-	switch state {
-	case schema.AccessAvailable:
-		return "✓"
-	case schema.AccessRestricted:
-		return "⊘"
-	default:
-		return "?"
-	}
-}
-
 // repeat is strings.Repeat exposed for command files.
 func repeat(s string, n int) string {
 	return strings.Repeat(s, n)
