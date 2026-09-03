@@ -286,6 +286,24 @@ func TestAutomaticRefreshRequiresExplicitOptIn(t *testing.T) {
 	}
 }
 
+func TestNormalLifecycleRefreshDoesNotSpawnWorkers(t *testing.T) {
+	t.Setenv("FI_AUTO_REFRESH", "")
+	t.Setenv("FI_NO_BACKGROUND", "")
+	activation := runtime.Activation{
+		Active: true,
+		Client: runtime.ClientClaudeCode,
+		Origin: "https://freeinference.org",
+	}
+	spawned := false
+	maybeRequestDetachedRefreshWith(state.NewPathsWithDir(t.TempDir()), activation, func(string, []string) error {
+		spawned = true
+		return nil
+	})
+	if spawned {
+		t.Fatal("normal lifecycle operation must not spawn refresh workers")
+	}
+}
+
 func TestClaudeHookStillDispatchesStopFailure(t *testing.T) {
 	paths := state.NewPathsWithDir(t.TempDir())
 	var out strings.Builder

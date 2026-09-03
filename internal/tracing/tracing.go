@@ -208,7 +208,15 @@ func validateReceipt(r LaunchReceipt) error {
 }
 
 func receiptDir() string {
-	return filepath.Join(os.TempDir(), "freeinference-companion", "traces")
+	// macOS commonly exposes its per-user temporary directory through /var,
+	// which is itself a system symlink to /private/var. Resolve that trusted OS
+	// temp root first so descriptor-based no-follow creation can protect the
+	// Companion-owned components without rejecting the platform's normal path.
+	tempDir := os.TempDir()
+	if resolved, err := filepath.EvalSymlinks(tempDir); err == nil {
+		tempDir = resolved
+	}
+	return filepath.Join(tempDir, "freeinference-companion", "traces")
 }
 
 func ensurePrivateDir(path string) error {

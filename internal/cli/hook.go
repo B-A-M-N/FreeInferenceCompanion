@@ -197,6 +197,13 @@ func consumeTraceForHook(client string, activation runtime.Activation) *schema.T
 // alone is insufficient because environment or configuration may change
 // between spawn and child exec.
 func maybeRequestDetachedRefresh(paths state.Paths, activation runtime.Activation) {
+	maybeRequestDetachedRefreshWith(paths, activation, background.SpawnDetachedWorkers)
+}
+
+// maybeRequestDetachedRefreshWith is split out so the default-off contract can
+// be tested without starting a child process. The production callback is the
+// only implementation that can launch refresh workers.
+func maybeRequestDetachedRefreshWith(paths state.Paths, activation runtime.Activation, spawn func(string, []string) error) {
 	if os.Getenv("FI_NO_BACKGROUND") == "1" || !automaticRefreshEnabled() {
 		return
 	}
@@ -211,7 +218,7 @@ func maybeRequestDetachedRefresh(paths state.Paths, activation runtime.Activatio
 	if err != nil {
 		return
 	}
-	_ = background.SpawnDetachedWorkers(exe, stale)
+	_ = spawn(exe, stale)
 }
 
 func automaticRefreshEnabled() bool {
