@@ -316,11 +316,11 @@ func statusJSON(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalState,
 
 	var modelID string
 	if model != "" {
-		modelID = secure.SanitizeField(model)
+		modelID = secure.SafeField(model)
 	}
 	var provName string
 	if providerName != "" {
-		provName = secure.SanitizeField(providerName)
+		provName = secure.SafeField(providerName)
 	}
 	if snap != nil && !snap.Provider.Confirmed {
 		provName = "unknown (unconfirmed)"
@@ -355,7 +355,7 @@ func statusJSON(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalState,
 					continue
 				}
 				monitor := map[string]any{
-					"model":        secure.SanitizeField(metric.ModelID),
+					"model":        secure.SafeField(metric.ModelID),
 					"uptime_ratio": metric.UptimeRatio,
 				}
 				if metric.Latest != nil {
@@ -368,7 +368,7 @@ func statusJSON(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalState,
 					monitor["ttft_ms"] = metric.Latest.TTFTMs
 					monitor["throughput_tps"] = metric.Latest.ThroughputTps
 					if metric.Latest.Error != "" {
-						monitor["error"] = secure.SanitizeField(metric.Latest.Error)
+						monitor["error"] = secure.SafeField(metric.Latest.Error)
 					}
 				}
 				obj["model_monitor"] = monitor
@@ -378,7 +378,7 @@ func statusJSON(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalState,
 		if gs.Health != nil {
 			age := now.Sub(gs.Health.FetchedAt)
 			obj["provider_health"] = map[string]any{
-				"status":      secure.SanitizeField(gs.Health.Status),
+				"status":      secure.SafeField(gs.Health.Status),
 				"checked_at":  gs.Health.FetchedAt.UTC().Format(time.RFC3339),
 				"age_seconds": max(0, int64(age.Seconds())),
 				"stale":       age < 0 || age > schema.DefaultHealthMaxAge,
@@ -437,12 +437,12 @@ func statusJSON(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalState,
 func printFullStatus(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalState, reveal bool, showTrace ...bool) {
 	fmt.Fprintf(stdout, "FreeInference Companion %s\n", Version)
 	fmt.Fprintf(stdout, "Session:  %s (%s)\n", displaySessionID(snap.Session.ID, reveal), snap.Session.Status)
-	fmt.Fprintf(stdout, "Client:   %s\n", snap.Client.Type)
-	provider := snap.Provider.Name
+	fmt.Fprintf(stdout, "Client:   %s\n", secure.SafeField(snap.Client.Type))
+	provider := secure.SafeField(snap.Provider.Name)
 	if !snap.Provider.Confirmed {
 		provider = "unknown (unconfirmed)"
 	}
-	fmt.Fprintf(stdout, "Provider: %s (source: %s)\n", provider, snap.Provider.Source)
+	fmt.Fprintf(stdout, "Provider: %s (source: %s)\n", provider, secure.SafeField(snap.Provider.Source))
 	traceVisible := len(showTrace) == 0 || showTrace[0]
 	if traceVisible && snap.Trace != nil && snap.Trace.Enabled && snap.Trace.Verified && snap.Provider.Confirmed && snap.Provider.Name == schema.ProviderFreeInference &&
 		snap.Trace.Provider == schema.ProviderFreeInference && (snap.Trace.Client == "" || snap.Trace.Client == snap.Client.Type) &&
@@ -450,9 +450,9 @@ func printFullStatus(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalS
 		fmt.Fprintln(stdout, "Tracing:  active (X-Session-ID)")
 	}
 	if snap.Model.ContextLength != nil {
-		fmt.Fprintf(stdout, "Model:    %s (%s context)\n", snap.Model.ID, formatTokenCount(*snap.Model.ContextLength))
+		fmt.Fprintf(stdout, "Model:    %s (%s context)\n", secure.SafeField(snap.Model.ID), formatTokenCount(*snap.Model.ContextLength))
 	} else {
-		fmt.Fprintf(stdout, "Model:    %s (context unknown)\n", snap.Model.ID)
+		fmt.Fprintf(stdout, "Model:    %s (context unknown)\n", secure.SafeField(snap.Model.ID))
 	}
 	fmt.Fprintln(stdout)
 

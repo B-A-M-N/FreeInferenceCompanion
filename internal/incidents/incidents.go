@@ -127,21 +127,21 @@ func Collect(paths state.Paths, filter Filter, now time.Time) (*Report, error) {
 			}
 			incident := Incident{
 				At:                event.At.UTC(),
-				Client:            secure.SanitizeField(entry.Client),
+				Client:            secure.SafeField(entry.Client),
 				SessionID:         secure.MaskSessionID(entry.SessionID),
-				Model:             secure.SanitizeField(event.Model),
-				Provider:          secure.SanitizeField(event.Provider),
-				Category:          secure.SanitizeField(event.Detail),
+				Model:             secure.SafeField(event.Model),
+				Provider:          secure.SafeField(event.Provider),
+				Category:          secure.SafeField(event.Detail),
 				HTTPStatus:        event.HTTPStatus,
 				Retryable:         event.Retryable,
-				TransportClass:    secure.SanitizeField(event.TransportClass),
-				ProviderErrorType: secure.SanitizeField(event.ProviderErrorType),
-				ErrorOrigin:       secure.SanitizeField(event.ErrorOrigin),
+				TransportClass:    secure.SafeField(event.TransportClass),
+				ProviderErrorType: secure.SafeField(event.ProviderErrorType),
+				ErrorOrigin:       secure.SafeField(event.ErrorOrigin),
 				RetryAfterSeconds: event.RetryAfterSeconds,
-				RequestReference:  secure.SanitizeField(event.RequestReference),
+				RequestReference:  secure.SafeField(event.RequestReference),
 			}
 			if incident.Model == "" {
-				incident.Model = secure.SanitizeField(entry.ModelID)
+				incident.Model = secure.SafeField(entry.ModelID)
 			}
 			if incident.Category == "" {
 				incident.Category = "unknown"
@@ -254,5 +254,5 @@ func FailureCategory(snap *schema.Snapshot) string {
 	if snap == nil || snap.LastFailure == nil || snap.LastFailure.Category == "" {
 		return ""
 	}
-	return secure.SanitizeField(snap.LastFailure.Category)
+	return secure.SafeField(snap.LastFailure.Category)
 }

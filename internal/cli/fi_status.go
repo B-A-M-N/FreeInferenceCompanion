@@ -276,7 +276,7 @@ func normalizeMonitor(status api.PublicStatusResponse, fetchedAt time.Time) fiMo
 }
 
 func normalizeFIStatusModel(model api.PublicStatusModel, fetchedAt time.Time) fiStatusModel {
-	id := secure.SanitizeField(strings.TrimSpace(model.ModelID))
+	id := secure.SafeField(strings.TrimSpace(model.ModelID))
 	if id == "" {
 		id = "unknown"
 	}

@@ -583,11 +583,11 @@ func BuildViewModel(version string, snap *schema.Snapshot, gs *schema.GlobalStat
 		return vm
 	}
 
-	vm.Client = secure.SanitizeField(snap.Client.Type)
+	vm.Client = secure.SafeField(snap.Client.Type)
 	vm.SessionID = secure.MaskSessionID(snap.Session.ID)
-	vm.SessionStatus = secure.SanitizeField(snap.Session.Status)
-	vm.ModelID = secure.SanitizeField(snap.Model.ID)
-	vm.ProviderName = secure.SanitizeField(snap.Provider.Name)
+	vm.SessionStatus = secure.SafeField(snap.Session.Status)
+	vm.ModelID = secure.SafeField(snap.Model.ID)
+	vm.ProviderName = secure.SafeField(snap.Provider.Name)
 	vm.ProviderConfirmed = snap.Provider.Confirmed && snap.Provider.Name == schema.ProviderFreeInference
 	if snap.Trace != nil && snap.Trace.Enabled && snap.Trace.Verified && vm.ProviderConfirmed &&
 		(snap.Trace.Client == "" || snap.Trace.Client == snap.Client.Type) &&
@@ -595,9 +595,9 @@ func BuildViewModel(version string, snap *schema.Snapshot, gs *schema.GlobalStat
 		snap.Trace.Source != schema.TraceSourceNone && tracing.ValidateTraceID(snap.Trace.SessionID) {
 		vm.TraceActive = true
 		vm.TraceSessionID = secure.MaskSessionID(snap.Trace.SessionID)
-		vm.TraceSource = secure.SanitizeField(snap.Trace.Source)
-		vm.TraceProvider = secure.SanitizeField(snap.Trace.Provider)
-		vm.TraceHeader = secure.SanitizeField(snap.Trace.Header)
+		vm.TraceSource = secure.SafeField(snap.Trace.Source)
+		vm.TraceProvider = secure.SafeField(snap.Trace.Provider)
+		vm.TraceHeader = secure.SafeField(snap.Trace.Header)
 		if !snap.Trace.StartedAt.IsZero() {
 			started := snap.Trace.StartedAt
 			vm.TraceStartedAt = &started
@@ -658,14 +658,14 @@ func BuildViewModel(version string, snap *schema.Snapshot, gs *schema.GlobalStat
 	}
 
 	if snap.LastFailure != nil {
-		vm.LastFailureCategory = secure.SanitizeField(snap.LastFailure.Category)
+		vm.LastFailureCategory = secure.SafeField(snap.LastFailure.Category)
 	}
 
 	// Health is only surfaced for confirmed FreeInference sessions — never
 	// show a green FreeInference health symbol for an unknown provider.
 	// P0-5: also require activation identity match.
 	if vm.ProviderConfirmed && activationMatches && gs != nil && gs.Health != nil {
-		vm.HealthStatus = secure.SanitizeField(gs.Health.Status)
+		vm.HealthStatus = secure.SafeField(gs.Health.Status)
 		delta := now.Sub(gs.Health.FetchedAt)
 		age := max(int64(0), int64(delta.Seconds()))
 		vm.HealthAgeSecs = &age
@@ -690,7 +690,7 @@ func BuildViewModel(version string, snap *schema.Snapshot, gs *schema.GlobalStat
 				vm.ModelMonitorThroughputTps = metric.Latest.ThroughputTps
 				checked := metric.Latest.CheckedAt
 				vm.ModelMonitorCheckedAt = &checked
-				vm.ModelMonitorError = secure.SanitizeField(metric.Latest.Error)
+				vm.ModelMonitorError = secure.SafeField(metric.Latest.Error)
 			} else if !gs.PublicStatus.CheckedAt.IsZero() {
 				checked := gs.PublicStatus.CheckedAt
 				vm.ModelMonitorCheckedAt = &checked
@@ -707,7 +707,7 @@ func BuildViewModel(version string, snap *schema.Snapshot, gs *schema.GlobalStat
 	if snap.Compaction.LastResult != nil {
 		r := snap.Compaction.LastResult
 		vm.CompactionLastResultAt = &r.At
-		vm.CompactionLastResultTrigger = secure.SanitizeField(r.Trigger)
+		vm.CompactionLastResultTrigger = secure.SafeField(r.Trigger)
 		vm.CompactionLastResultPreTokens = r.PreTokens
 		vm.CompactionLastResultPostTokens = r.PostTokens
 		vm.CompactionLastResultReductionPct = r.ReductionPct
@@ -721,8 +721,8 @@ func BuildViewModel(version string, snap *schema.Snapshot, gs *schema.GlobalStat
 		vm.CircuitBreakers = make([]CircuitBreakerInfo, 0, len(gs.CircuitBreakers))
 		for _, cb := range gs.CircuitBreakers {
 			vm.CircuitBreakers = append(vm.CircuitBreakers, CircuitBreakerInfo{
-				Endpoint:      secure.SanitizeField(cb.Endpoint),
-				State:         secure.SanitizeField(cb.State),
+				Endpoint:      secure.SafeField(cb.Endpoint),
+				State:         secure.SafeField(cb.State),
 				FailureCount:  cb.FailureCount,
 				LastFailureAt: cb.LastFailureAt,
 				NextRetryAt:   cb.NextRetryAt,

@@ -34,7 +34,7 @@ func (a *CodexAdapter) ParseHookInput(r io.Reader) (*schema.CodexHookInput, erro
 
 // newCodexSnapshot builds a fresh snapshot for a newly seen Codex session.
 func newCodexSnapshot(sessionID, modelID, source string, now time.Time) *schema.Snapshot {
-	modelID = secure.SanitizeField(modelID)
+	modelID = secure.SafeField(modelID)
 	if modelID == "" {
 		modelID = "unknown"
 	}
@@ -96,7 +96,7 @@ func (a *CodexAdapter) HandleSessionStartWithTrace(input *schema.CodexHookInput,
 	}
 	now := time.Now().UTC()
 	provider := activation.ProviderInfo()
-	modelID := secure.SanitizeField(input.Model)
+	modelID := secure.SafeField(input.Model)
 	source := normalizeCodexStartSource(input.Source)
 	created := false
 	wasActive := false
@@ -283,7 +283,7 @@ func (a *CodexAdapter) HandlePreCompact(input *schema.CodexHookInput, sessionID 
 			snap.Compaction.Pending = true
 			snap.Compaction.InitiatedAt = &now
 			if input != nil && input.Trigger != "" {
-				trigger := secure.SanitizeField(input.Trigger)
+				trigger := secure.SafeField(input.Trigger)
 				snap.Compaction.Trigger = &trigger
 			}
 			snap.Session.LastEventAt = now
@@ -320,7 +320,7 @@ func (a *CodexAdapter) HandlePostCompact(input *schema.CodexHookInput, sessionID
 				trigger = *snap.Compaction.Trigger
 			}
 			if input != nil && input.Trigger != "" {
-				trigger = secure.SanitizeField(input.Trigger)
+				trigger = secure.SafeField(input.Trigger)
 			}
 			snap.Compaction.Pending = false
 			snap.Compaction.AwaitingPostObservation = false
@@ -364,7 +364,7 @@ func normalizeCodexStartSource(source string) string {
 }
 
 func observeCodexModel(snap *schema.Snapshot, rawModel, _ string, now time.Time) bool {
-	model := secure.SanitizeField(rawModel)
+	model := secure.SafeField(rawModel)
 	if snap == nil || model == "" {
 		return false
 	}
@@ -382,7 +382,7 @@ func codexInputModel(input *schema.CodexHookInput) string {
 	if input == nil {
 		return ""
 	}
-	return secure.SanitizeField(input.Model)
+	return secure.SafeField(input.Model)
 }
 
 func firstCodexInput(inputs []*schema.CodexHookInput) *schema.CodexHookInput {
@@ -412,7 +412,7 @@ func codexTurnDetail(input *schema.CodexHookInput) string {
 }
 
 func codexDetail(trigger string, input *schema.CodexHookInput) string {
-	trigger = secure.SanitizeField(trigger)
+	trigger = secure.SafeField(trigger)
 	if turn := codexTurnDetail(input); turn != "" {
 		if trigger != "" {
 			return trigger + " " + turn

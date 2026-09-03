@@ -60,6 +60,17 @@ func TestRedactLeavesBenignTextAlone(t *testing.T) {
 	}
 }
 
+func TestSafeFieldRedactsAfterSanitizing(t *testing.T) {
+	in := "model\x1b[31m=hyi-secret-key-abcdef0123456789"
+	out := SafeField(in)
+	if strings.Contains(out, "hyi-secret-key-abcdef0123456789") {
+		t.Fatalf("secret-shaped field leaked: %q", out)
+	}
+	if strings.ContainsAny(out, "\x1b\n\r\t") {
+		t.Fatalf("control character leaked: %q", out)
+	}
+}
+
 func TestLooksLikeSecret(t *testing.T) {
 	cases := map[string]bool{
 		"":                     false,

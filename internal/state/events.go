@@ -118,10 +118,10 @@ func AppendEvent(paths Paths, clientType, sessionID string, ev Event) error {
 	// is the caller's (keyed by hash on disk anyway), but its raw form may
 	// still appear in the JSON line — strip control sequences so it cannot
 	// break terminal output when the log is later tailed.
-	ev.Client = secure.SanitizeField(ev.Client)
+	ev.Client = secure.SafeField(ev.Client)
 	ev.SessionID = sessionKey(sessionID)
-	ev.Model = secure.SanitizeField(ev.Model)
-	ev.Provider = secure.SanitizeField(ev.Provider)
+	ev.Model = secure.SafeField(ev.Model)
+	ev.Provider = secure.SafeField(ev.Provider)
 	ev.TransportClass = sanitizeEventField(ev.TransportClass)
 	ev.ProviderErrorType = sanitizeEventField(ev.ProviderErrorType)
 	ev.ErrorOrigin = sanitizeEventField(ev.ErrorOrigin)
@@ -134,7 +134,7 @@ func AppendEvent(paths Paths, clientType, sessionID string, ev Event) error {
 	}
 	ev.At = time.Now().UTC()
 	if ev.Client == "" {
-		ev.Client = secure.SanitizeField(clientType)
+		ev.Client = secure.SafeField(clientType)
 	}
 
 	path := paths.SessionEvents(clientType, sessionID)
