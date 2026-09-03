@@ -442,7 +442,11 @@ func commitRelease(extractDir string, paths Paths, opts Options, manifest *Marke
 		// recoverable and must not be reported as an install failure that invites
 		// rollback of a state which can no longer be rolled back atomically.
 		result.PartiallyInstalled = true
-		result.Warnings = append(result.Warnings, fmt.Sprintf("cleanup of installation rollback files failed: %v", err))
+		warning := fmt.Sprintf("cleanup of installation rollback files failed: %v", err)
+		result.Warnings = append(result.Warnings, warning)
+		if stdout != nil {
+			fmt.Fprintf(stdout, "  Warning: %s\n", warning)
+		}
 	}
 	if result.CodexFilesReady {
 		registered, warnings := registerCodexMarketplaceStatus(paths, stdout)

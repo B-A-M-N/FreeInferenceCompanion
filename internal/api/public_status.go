@@ -31,6 +31,11 @@ const PublicStatusExpectedInterval = 20 * time.Minute
 // an old snapshot as the current service state.
 const PublicStatusStaleAfter = 45 * time.Minute
 
+// PublicStatusClockSkewTolerance allows a small amount of clock drift between
+// the status service and the local machine. Accepted future timestamps are
+// clamped when cached so local freshness calculations never become optimistic.
+const PublicStatusClockSkewTolerance = 2 * time.Minute
+
 // PublicStatusResponse is the current public status payload shape.
 type PublicStatusResponse struct {
 	Models    []PublicStatusModel `json:"models"`
@@ -158,7 +163,7 @@ func (s *PublicStatusResponse) Validate() error {
 		checkedAt, err := parsePublicStatusTime(s.Cycle.CheckedAt)
 		if err != nil {
 			s.Cycle.ValidationError = "cycle checked_at is invalid"
-		} else if checkedAt.After(time.Now().UTC()) {
+		} else if checkedAt.After(time.Now().UTC().Add(PublicStatusClockSkewTolerance)) {
 			s.Cycle.ValidationError = "cycle checked_at is in the future"
 		}
 	} else {

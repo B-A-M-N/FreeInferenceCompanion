@@ -177,7 +177,7 @@ func IsApprovedCredentialHost(host string) bool {
 func isApprovedCredentialHost(host string) bool { return IsApprovedCredentialHost(host) }
 
 func isApprovedCredentialURL(u *url.URL) bool {
-	if u == nil || !isApprovedCredentialHost(u.Hostname()) {
+	if u == nil || u.User != nil || u.RawQuery != "" || u.Fragment != "" || !isApprovedCredentialHost(u.Hostname()) {
 		return false
 	}
 	return u.Scheme == "https" && (u.Port() == "" || u.Port() == "443")

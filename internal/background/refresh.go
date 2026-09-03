@@ -394,7 +394,7 @@ func publicStatusStale(gs *schema.GlobalState, now time.Time) bool {
 	if now.Sub(fetched) > PublicStatusTTL {
 		return true
 	}
-	if gs.PublicStatus.CheckedAt.IsZero() || now.Sub(schema.SanitizeTimestamp(gs.PublicStatus.CheckedAt, now)) > api.PublicStatusStaleAfter {
+	if gs.PublicStatus.CheckedAt.IsZero() || now.Before(schema.SanitizeTimestamp(gs.PublicStatus.CheckedAt, now)) || now.Sub(schema.SanitizeTimestamp(gs.PublicStatus.CheckedAt, now)) > api.PublicStatusStaleAfter {
 		return true
 	}
 	return false
@@ -538,8 +538,11 @@ func publicStatusCache(status *api.PublicStatusResponse, now time.Time) (*schema
 	if err != nil {
 		return nil, errors.New("public status cycle timestamp is invalid")
 	}
-	if checkedAt.After(now.UTC()) {
+	if checkedAt.After(now.UTC().Add(api.PublicStatusClockSkewTolerance)) {
 		return nil, errors.New("public status cycle timestamp is in the future")
+	}
+	if checkedAt.After(now.UTC()) {
+		checkedAt = now.UTC()
 	}
 	if now.Sub(checkedAt) > api.PublicStatusStaleAfter {
 		return nil, errors.New("public status cycle is stale")

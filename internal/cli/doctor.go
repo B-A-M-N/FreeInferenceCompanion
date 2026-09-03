@@ -690,18 +690,18 @@ func checkCodexHooksFeature() api.CheckResult {
 }
 
 func readDoctorFile(path string, maxBytes int64) ([]byte, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return nil, err
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("file is not a regular file")
-	}
-	f, err := os.Open(path)
+	f, err := openDoctorFile(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("file is not a regular file")
+	}
 	data, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
 	if err != nil {
 		return nil, err

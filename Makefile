@@ -118,7 +118,15 @@ package: build-all
 		if tar --version 2>/dev/null | grep -q 'GNU tar'; then \
 			tar --sort=name --mtime="@$$epoch" --owner=0 --group=0 --numeric-owner --use-compress-program='gzip -n' -cf "$$archive" -C "$$staging" "$$archive_name"; \
 		else \
-			( cd "$$staging" && COPYFILE_DISABLE=1 tar -cf - "$$archive_name" | gzip -n > "$$archive" ); \
+			tmp_archive="$$archive.tmp"; \
+			rm -f "$$tmp_archive" "$$archive"; \
+			if ( cd "$$staging" && LC_ALL=C find "$$archive_name" -print | LC_ALL=C sort | COPYFILE_DISABLE=1 tar --format=ustar --mtime="@$$epoch" --uid=0 --gid=0 --uname=root --gname=root -cf "$$tmp_archive" -T - ) && gzip -n < "$$tmp_archive" > "$$archive"; then \
+				rm -f "$$tmp_archive"; \
+			else \
+				rm -f "$$tmp_archive" "$$archive"; \
+				echo "failed to package $$archive_name" >&2; \
+				exit 1; \
+			fi; \
 		fi; \
 		echo "packaged $$archive"; \
 	done; \
