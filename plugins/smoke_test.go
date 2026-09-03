@@ -551,7 +551,7 @@ func buildTestBinary(t *testing.T) string {
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "freeinference")
 	modRoot := filepath.Dir(pluginRoot())
-	cmd := exec.Command("go", "build", "-o", bin, filepath.Join(modRoot, "cmd", "fi"))
+	cmd := exec.Command("go", "build", "-buildvcs=false", "-o", bin, filepath.Join(modRoot, "cmd", "fi"))
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("build freeinference: %v", err)
@@ -703,6 +703,35 @@ func runFI(t *testing.T, binary, home, cacheDir string, args ...string) (stdout,
 	return "", "", -1
 }
 
+func requiredSkillNames() []string {
+	return []string{
+		"freeinference",
+		"freeinference-status",
+		"freeinference-models",
+		"freeinference-doctor",
+		"freeinference-report",
+		"freeinference-cache",
+		"freeinference-sessions",
+		"freeinference-refresh",
+	}
+}
+
+func assertRequiredSkills(t *testing.T, client string, skillNames []string) {
+	t.Helper()
+	for _, required := range requiredSkillNames() {
+		found := false
+		for _, name := range skillNames {
+			if name == required {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected native %s skill %q, got: %v", client, required, skillNames)
+		}
+	}
+}
+
 func TestClaudeCodeSkillsInventory(t *testing.T) {
 	skillsDir := filepath.Join(pluginDir("claude-code"), "skills")
 	entries, err := os.ReadDir(skillsDir)
@@ -717,26 +746,7 @@ func TestClaudeCodeSkillsInventory(t *testing.T) {
 	}
 	// Verify the router and high-value diagnostic surfaces are directly
 	// discoverable from the native Claude Code skill picker.
-	required := map[string]bool{
-		"freeinference":          false,
-		"freeinference-status":   false,
-		"freeinference-models":   false,
-		"freeinference-doctor":   false,
-		"freeinference-report":   false,
-		"freeinference-cache":    false,
-		"freeinference-sessions": false,
-		"freeinference-refresh":  false,
-	}
-	for _, name := range skillNames {
-		if _, ok := required[name]; ok {
-			required[name] = true
-		}
-	}
-	for name, found := range required {
-		if !found {
-			t.Errorf("expected native Claude skill %q, got: %v", name, skillNames)
-		}
-	}
+	assertRequiredSkills(t, "Claude", skillNames)
 	// The public fi-status skill is intentionally namespaced by Claude Code;
 	// older unnamespaced aliases are not part of the plugin.
 	for _, name := range skillNames {
@@ -758,26 +768,7 @@ func TestCodexSkillsInventory(t *testing.T) {
 			skillNames = append(skillNames, e.Name())
 		}
 	}
-	required := map[string]bool{
-		"freeinference":          false,
-		"freeinference-status":   false,
-		"freeinference-models":   false,
-		"freeinference-doctor":   false,
-		"freeinference-report":   false,
-		"freeinference-cache":    false,
-		"freeinference-sessions": false,
-		"freeinference-refresh":  false,
-	}
-	for _, name := range skillNames {
-		if _, ok := required[name]; ok {
-			required[name] = true
-		}
-	}
-	for name, found := range required {
-		if !found {
-			t.Errorf("expected native Codex skill %q, got: %v", name, skillNames)
-		}
-	}
+	assertRequiredSkills(t, "Codex", skillNames)
 	for _, name := range skillNames {
 		if strings.HasPrefix(name, "fi-") && name != "fi-status" {
 			t.Errorf("old fi-* skill still present: %s — should be removed", name)

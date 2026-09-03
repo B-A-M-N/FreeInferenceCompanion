@@ -51,7 +51,8 @@ When the user wants to adjust a setting:
 
 - Boolean settings: `true` or `false`
 - Integer settings: positive integers (e.g., `300` for 5-minute interval)
-- Threshold settings: values between 0 and 100 (percentage)
+- Context thresholds: values between 0 and 100 (percentage)
+- Cache warning/recovery thresholds: values between 0 and 1 (fractions; defaults are 0.20 and 0.40)
 - Model settings: must match a name from `freeinference models` catalog
 - Reporting level: `summary`, `standard`, or `detailed`
 

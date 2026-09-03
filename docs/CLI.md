@@ -29,7 +29,7 @@ and plugin setup, see [Codex with FreeInference](codex.md).
 | `freeinference uninstall` | Remove installer-owned files while preserving local history |
 | `freeinference config show\|set\|reset\|path` | Manage local Companion configuration |
 | `freeinference companion status\|enable\|disable` | Inspect or change the local Companion kill switch |
-| `freeinference hook <client> <event>` | Process a Claude lifecycle event; hooks are fail-open and local-only |
+| `freeinference hook <client> <event>` | Process a Claude Code or Codex lifecycle event; hooks are fail-open and local-only |
 | `freeinference version [--json]` | Show binary and state-schema version information |
 
 The `--refresh` options and `refresh` command are explicit network operations.

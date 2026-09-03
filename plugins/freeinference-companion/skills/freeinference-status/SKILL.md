@@ -16,8 +16,9 @@ freeinference context --client codex
 freeinference cache --client codex --json
 ```
 
-Use `--level summary` or `--level detailed` for the status command; add
-`--json` when a machine-readable result is needed. The status command reports
+Use `--level summary` or `--level detailed` for the status command; these
+cannot be combined with `--json`. Use `--json` instead when a machine-readable
+result is needed. The status command reports
 verified provider configuration even when no Codex lifecycle snapshot exists.
 
 This marketplace plugin is skill-only and installs no Codex lifecycle hooks.

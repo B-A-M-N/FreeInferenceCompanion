@@ -28,7 +28,7 @@ full transcript or per-turn history.
 [
   {
     "client": "claude-code",
-    "session_id": "sess_…abc123",
+    "session_id": "sess...c123",
     "model_id": "minimax-m3",
     "status": "active",
     "last_event_at": "2026-07-29T15:45:00Z"

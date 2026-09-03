@@ -124,6 +124,7 @@ package: build-all
 		install -m 0755 $(BUILD_DIR)/$(BINARY)-$$p "$$stage_dir/$(BINARY)"; \
 		cp LICENSE SECURITY.md CHANGELOG.md README.md "$$stage_dir/"; \
 		cp -R docs "$$stage_dir/"; \
+		rm -f "$$stage_dir"/docs/audit-*.md; \
 		archive="$(CURDIR)/$(RELEASE_DIR)/$$archive_name.tar.gz"; \
 		if tar --version 2>/dev/null | grep -q 'GNU tar'; then \
 			tar --sort=name --mtime="@$$epoch" --owner=0 --group=0 --numeric-owner --use-compress-program='gzip -n' -cf "$$archive" -C "$$staging" "$$archive_name"; \
@@ -271,6 +272,7 @@ package-smoke: package
 			echo "FAIL: $$p archive missing release documentation"; exit 1; \
 		fi; \
 		test -f "$$extract/$$archive_name/docs/INSTALL.md" || { echo "FAIL: $$p archive missing installation documentation"; exit 1; }; \
+		test -z "$$(find "$$extract/$$archive_name/docs" -maxdepth 1 -type f -name 'audit-*.md' -print -quit)" || { echo "FAIL: $$p archive contains internal audit documentation"; exit 1; }; \
 		test -f "$$extract/$$archive_name/docs/images/claude-code-native.png" || { echo "FAIL: $$p archive missing Claude native screenshot"; exit 1; }; \
 		test -f "$$extract/$$archive_name/docs/images/codex-native.png" || { echo "FAIL: $$p archive missing Codex native screenshot"; exit 1; }; \
 		echo "archive OK: $$p"; \
