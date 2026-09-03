@@ -268,7 +268,11 @@ func pathDigestWithFraming(path string, framed bool) (string, error) {
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return "", fmt.Errorf("cannot fingerprint unsupported path")
 	}
-	var files []string
+	type digestEntry struct {
+		rel  string
+		kind byte
+	}
+	var entries []digestEntry
 	var total uint64
 	if err := filepath.Walk(path, func(current string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
@@ -277,46 +281,85 @@ func pathDigestWithFraming(path string, framed bool) (string, error) {
 		if info.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("cannot fingerprint symlink")
 		}
+		if current == path {
+			return nil
+		}
 		if info.Mode().IsRegular() {
 			rel, err := filepath.Rel(path, current)
 			if err != nil {
 				return err
 			}
-			files = append(files, rel)
-		} else if !info.IsDir() {
+			entries = append(entries, digestEntry{rel: rel, kind: 'f'})
+		} else if info.IsDir() {
+			rel, err := filepath.Rel(path, current)
+			if err != nil {
+				return err
+			}
+			entries = append(entries, digestEntry{rel: rel, kind: 'd'})
+		} else {
 			return fmt.Errorf("cannot fingerprint unsupported path")
 		}
 		return nil
 	}); err != nil {
 		return "", err
 	}
-	sort.Strings(files)
-	for _, rel := range files {
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].rel != entries[j].rel {
+			return entries[i].rel < entries[j].rel
+		}
+		return entries[i].kind < entries[j].kind
+	})
+	for _, entry := range entries {
+		rel := entry.rel
 		// Frame both path and content lengths. Without framing, a crafted
 		// directory can make (path A, data B) hash identically to a different
 		// path/data concatenation.
 		var length [8]byte
 		if framed {
+			_, _ = h.Write([]byte{entry.kind})
 			binary.BigEndian.PutUint64(length[:], uint64(len(rel)))
 			_, _ = h.Write(length[:])
 		}
 		_, _ = io.WriteString(h, rel)
-		data, err := os.ReadFile(filepath.Join(path, rel))
+		if entry.kind == 'd' {
+			if framed {
+				binary.BigEndian.PutUint64(length[:], 0)
+				_, _ = h.Write(length[:])
+			}
+			continue
+		}
+		f, err := os.Open(filepath.Join(path, rel))
 		if err != nil {
 			return "", err
 		}
-		if len(data) > maxArchiveFileBytes {
+		fileInfo, statErr := f.Stat()
+		if statErr != nil {
+			_ = f.Close()
+			return "", statErr
+		}
+		if fileInfo.Size() > maxArchiveFileBytes {
+			_ = f.Close()
 			return "", fmt.Errorf("file exceeds the fingerprint size limit")
 		}
-		total += uint64(len(data))
+		if framed {
+			binary.BigEndian.PutUint64(length[:], uint64(fileInfo.Size()))
+			_, _ = h.Write(length[:])
+		}
+		n, copyErr := io.Copy(h, io.LimitReader(f, maxArchiveFileBytes+1))
+		closeErr := f.Close()
+		if copyErr != nil {
+			return "", copyErr
+		}
+		if closeErr != nil {
+			return "", closeErr
+		}
+		if n > maxArchiveFileBytes || n != fileInfo.Size() {
+			return "", fmt.Errorf("file changed during fingerprinting")
+		}
+		total += uint64(n)
 		if total > maxArchiveTotalBytes {
 			return "", fmt.Errorf("directory exceeds the fingerprint size limit")
 		}
-		if framed {
-			binary.BigEndian.PutUint64(length[:], uint64(len(data)))
-			_, _ = h.Write(length[:])
-		}
-		_, _ = h.Write(data)
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }

@@ -17,7 +17,11 @@ ARCHIVE="freeinference-companion-${VERSION}-${PLATFORM}.tar.gz"
 
 curl -fLO "https://github.com/b-a-m-n/freeinference-companion/releases/download/v${VERSION}/${ARCHIVE}"
 curl -fLO "https://github.com/b-a-m-n/freeinference-companion/releases/download/v${VERSION}/checksums.txt"
-grep "  ${ARCHIVE}$" checksums.txt | sha256sum -c -
+if command -v sha256sum >/dev/null 2>&1; then
+  grep "  ${ARCHIVE}$" checksums.txt | sha256sum -c -
+else
+  grep "  ${ARCHIVE}$" checksums.txt | shasum -a 256 -c -
+fi
 
 tar -xzf "${ARCHIVE}"
 install -d -m 755 "$HOME/.local/bin"

@@ -28,6 +28,7 @@ type codexTraceOwnership struct {
 	CreatedNestedTable      bool      `json:"created_nested_table"`
 	Inline                  bool      `json:"inline"`
 	OriginalTrailingNewline *bool     `json:"original_trailing_newline"`
+	OriginalTrailingLineEnd string    `json:"original_trailing_line_end,omitempty"`
 	BeforeFingerprint       string    `json:"before_fingerprint"`
 	AfterFingerprint        string    `json:"after_fingerprint"`
 	InstalledAt             time.Time `json:"installed_at"`
@@ -180,6 +181,7 @@ func ownershipForTrace(path, providerID string, before, after string, mapping Co
 		CreatedNestedTable:      mapping.CreatedTable,
 		Inline:                  mapping.Inline,
 		OriginalTrailingNewline: boolPointer(strings.HasSuffix(before, "\n")),
+		OriginalTrailingLineEnd: trailingLineEnding(before),
 		BeforeFingerprint:       fingerprintCodexConfig(before),
 		AfterFingerprint:        fingerprintCodexConfig(after),
 		InstalledAt:             time.Now().UTC(),
@@ -188,6 +190,19 @@ func ownershipForTrace(path, providerID string, before, after string, mapping Co
 
 func boolPointer(value bool) *bool {
 	return &value
+}
+
+func trailingLineEnding(contents string) string {
+	switch {
+	case strings.HasSuffix(contents, "\r\n"):
+		return "\r\n"
+	case strings.HasSuffix(contents, "\n"):
+		return "\n"
+	case strings.HasSuffix(contents, "\r"):
+		return "\r"
+	default:
+		return ""
+	}
 }
 
 func (m codexTraceOwnership) expectedMapping(header string) (string, error) {

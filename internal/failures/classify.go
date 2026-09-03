@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/secure"
 )
@@ -45,10 +46,14 @@ type Metadata struct {
 }
 
 var (
-	statusMarkerPattern = regexp.MustCompile(`(?i)\b(?:https?\s+status|http\s+error|status(?:_code)?|code|error)\s*[:=]?\s*([1-5][0-9]{2})\b`)
-	statusPattern       = regexp.MustCompile(`\b(400|401|403|404|408|409|429|500|501|502|503|504|520|521|522|523|524|529)\b`)
-	retryAfterPattern   = regexp.MustCompile(`(?i)\bretry[- ]after\s*[:=]?\s*([0-9]{1,6})\b`)
-	requestRefPattern   = regexp.MustCompile(`(?i)\b(?:request[- _]?(?:id|reference)|cf[- _]?ray)\s*[:=]\s*([A-Za-z0-9._:/-]{1,128})\b`)
+	statusMarkerPattern = regexp.MustCompile(`(?i)\b(?:https?\s+(?:status|error|code)|http|status(?:_code)?|code|error)\s*[:=]?\s*([1-5][0-9]{2})\b`)
+	// A bare status is accepted only at the beginning of the message. This
+	// keeps useful strings such as "503 service unavailable" while avoiding
+	// treating an arbitrary number embedded in a request ID as an HTTP code.
+	bareStatusPattern = regexp.MustCompile(`^(400|401|403|404|408|409|429|500|501|502|503|504|520|521|522|523|524|529)(?:\s|$)`)
+	retryAfterPattern = regexp.MustCompile(`(?i)\bretry[- ]after\s*[:=]?\s*([0-9]{1,6})\b`)
+	requestRefPattern = regexp.MustCompile(`(?i)\b(?:request[- _]?(?:id|reference)|cf[- _]?ray)\s*[:=]\s*([A-Za-z0-9._:/-]{1,128})\b`)
+	requestIDPattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 )
 
 type structuredFields struct {
@@ -78,7 +83,7 @@ func Normalize(raw string) Metadata {
 	meta := Metadata{
 		HTTPStatus:        optionalStatus(status),
 		ProviderErrorType: safeScalar(structured.providerErrorType, 128),
-		RequestReference:  safeScalar(structured.requestReference, 128),
+		RequestReference:  safeRequestReference(structured.requestReference),
 	}
 	if structured.hasRetryAfter {
 		meta.RetryAfterSeconds = optionalRetryAfter(structured.retryAfter)
@@ -90,7 +95,7 @@ func Normalize(raw string) Metadata {
 	}
 	if meta.RequestReference == "" {
 		if matches := requestRefPattern.FindStringSubmatch(text); len(matches) == 2 {
-			meta.RequestReference = safeScalar(matches[1], 128)
+			meta.RequestReference = safeRequestReference(matches[1])
 		}
 	}
 
@@ -201,7 +206,7 @@ func parseHTTPStatus(raw string) int {
 			return status
 		}
 	}
-	if matches := statusPattern.FindStringSubmatch(raw); len(matches) == 2 {
+	if matches := bareStatusPattern.FindStringSubmatch(strings.TrimSpace(raw)); len(matches) == 2 {
 		status, _ := strconv.Atoi(matches[1])
 		return status
 	}
@@ -352,6 +357,11 @@ func safeScalar(value string, max int) string {
 	if value == "" || secure.LooksLikeSecret(value) {
 		return ""
 	}
+	for _, r := range value {
+		if unicode.Is(unicode.C, r) || r > unicode.MaxASCII {
+			return ""
+		}
+	}
 	value = secure.Redact(secure.SanitizeField(value))
 	if value == secure.RedactedPlaceholder {
 		return ""
@@ -360,4 +370,12 @@ func safeScalar(value string, max int) string {
 		value = value[:max]
 	}
 	return value
+}
+
+func safeRequestReference(value string) string {
+	value = strings.TrimSpace(value)
+	if !requestIDPattern.MatchString(value) || secure.LooksLikeSecret(value) {
+		return ""
+	}
+	return safeScalar(value, 128)
 }

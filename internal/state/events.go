@@ -244,7 +244,6 @@ func rotateEventsLocked(dir, path string) error {
 		return err
 	}
 	if info.Size() <= MaxEventBytesPerSession {
-		// Byte limit not exceeded — but check line count anyway.
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return err
@@ -253,8 +252,7 @@ func rotateEventsLocked(dir, path string) error {
 		if len(lines) <= MaxEventsPerSession {
 			return nil
 		}
-		// Over line count but under byte limit — still rotate.
-		return writeLines(dir, path, lines[len(lines)-MaxEventsPerSession:])
+		return writeLines(dir, path, retainedEventLines(lines))
 	}
 
 	data, err := os.ReadFile(path)
@@ -263,11 +261,27 @@ func rotateEventsLocked(dir, path string) error {
 	}
 	// Split and keep the most recent lines.
 	lines := splitLines(data)
-	if len(lines) > MaxEventsPerSession {
-		lines = lines[len(lines)-MaxEventsPerSession:]
-	}
+	return writeLines(dir, path, retainedEventLines(lines))
+}
 
-	return writeLines(dir, path, lines)
+func retainedEventLines(lines [][]byte) [][]byte {
+	if len(lines) == 0 {
+		return nil
+	}
+	start := len(lines)
+	var bytes int
+	for start > 0 && len(lines)-start < MaxEventsPerSession {
+		candidate := len(lines[start-1]) + 1
+		if bytes > 0 && bytes+candidate > MaxEventBytesPerSession {
+			break
+		}
+		if bytes == 0 && candidate > MaxEventBytesPerSession {
+			break
+		}
+		bytes += candidate
+		start--
+	}
+	return lines[start:]
 }
 
 // writeLines writes the given lines to path atomically via temp file + rename.
@@ -475,7 +489,11 @@ func isStale(dir string, now time.Time) bool {
 		}
 	}
 	if newest.IsZero() {
-		return false
+		info, err := os.Stat(dir)
+		if err != nil {
+			return false
+		}
+		return now.Sub(info.ModTime()) > MaxSessionAge
 	}
 	return now.Sub(newest) > MaxSessionAge
 }

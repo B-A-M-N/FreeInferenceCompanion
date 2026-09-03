@@ -219,7 +219,7 @@ func cacheJSON(stdout io.Writer, snap *schema.Snapshot, ca *schema.CacheAnalysis
 		obj["client"] = resolved.Client
 	}
 
-	if ca != nil && (ca.ObservationCount > 0 || ca.RequestSamples > 0) {
+	if ca != nil {
 		cacheObj := map[string]any{
 			"observed_samples": ca.ObservationCount,
 			"analyzed_samples": ca.AnalysisWindowCount,

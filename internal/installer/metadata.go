@@ -13,7 +13,7 @@ import (
 
 const (
 	installationMetadataSchema = 3
-	installationDigestFormat   = "framed-v1"
+	installationDigestFormat   = "framed-v2"
 	maxInstallationMetadata    = 32 << 10
 )
 
@@ -67,7 +67,11 @@ func (p Paths) MetadataPath() string {
 }
 
 func (p Paths) lockPath() string {
-	return filepath.Join(filepath.Dir(p.MetadataPath()), "installer.lock")
+	metadataPath := p.MetadataPath()
+	if metadataPath == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(metadataPath), "installer.lock")
 }
 
 func (p Paths) shimPath() string {

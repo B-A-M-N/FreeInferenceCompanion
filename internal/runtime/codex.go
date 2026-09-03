@@ -234,6 +234,7 @@ func parseCodexConfig(contents string) codexConfig {
 	result := codexConfig{Providers: make(map[string]codexProviderConfig)}
 	table := ""
 	scanner := bufio.NewScanner(strings.NewReader(contents))
+	scanner.Buffer(make([]byte, 64*1024), maxCodexConfigBytes+1)
 	for scanner.Scan() {
 		line := strings.TrimSpace(stripTomlComment(scanner.Text()))
 		if line == "" {

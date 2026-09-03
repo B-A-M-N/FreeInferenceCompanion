@@ -511,6 +511,14 @@ func validateTraceInfo(t *TraceInfo) error {
 				return fmt.Errorf("invalid trace session id")
 			}
 		}
+		// The final base32 symbol carries only three bits of the 128-bit
+		// value. Reject non-zero padding bits so schema validation agrees with
+		// tracing.ValidateTraceID and cannot persist an impossible ID.
+		const alphabet = "abcdefghijklmnopqrstuvwxyz234567"
+		value := strings.IndexByte(alphabet, t.SessionID[len(t.SessionID)-1])
+		if value < 0 || value&3 != 0 {
+			return fmt.Errorf("invalid trace session id")
+		}
 	}
 	if !t.Enabled && t.SessionID != "" {
 		return fmt.Errorf("disabled trace cannot have a session id")

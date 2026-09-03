@@ -673,7 +673,7 @@ func checkCodexHooksFeature() api.CheckResult {
 	if err != nil {
 		return api.CheckResult{State: api.CheckUnknown, Detail: "Codex config path unavailable"}
 	}
-	data, err := os.ReadFile(path)
+	data, err := readDoctorFile(path, 1<<20)
 	if os.IsNotExist(err) {
 		return api.CheckResult{State: api.CheckPass, Detail: "hooks enabled by default (no config override)"}
 	}
@@ -687,6 +687,29 @@ func checkCodexHooksFeature() api.CheckResult {
 		return api.CheckResult{State: api.CheckPass, Detail: "hooks enabled in Codex config"}
 	}
 	return api.CheckResult{State: api.CheckPass, Detail: "hooks enabled by default (no config override)"}
+}
+
+func readDoctorFile(path string, maxBytes int64) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("file is not a regular file")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("file exceeds the supported size limit")
+	}
+	return data, nil
 }
 
 func codexHooksFeatureOverride(contents string) (bool, bool) {

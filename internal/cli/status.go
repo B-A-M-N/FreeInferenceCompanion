@@ -90,6 +90,11 @@ func cmdStatus(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 	// For interactive mode, resolve the explicitly requested client so Codex
 	// provider configuration is not lost by a second generic evaluation.
 	activation := activationForCLICommand("status", passthroughArgs)
+	if stdinHasData(stdin) && clientType == schema.ClientCodex {
+		// stdin status payloads are Claude's status-line contract. Do not label
+		// that payload as Codex merely because the selector requested Codex.
+		return 0
+	}
 	if stdinHasData(stdin) {
 		activation = runtime.EvaluateForClient(runtime.ClientClaudeCode)
 	}

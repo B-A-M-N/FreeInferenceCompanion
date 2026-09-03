@@ -309,10 +309,11 @@ func (a *CodexAdapter) HandlePostCompact(input *schema.CodexHookInput, sessionID
 		return nil
 	}
 	now := time.Now().UTC()
+	modelChanged := false
 	err := state.UpdateSnapshot(a.Paths, schema.ClientCodex, sessionID, nil,
 		func(snap *schema.Snapshot) error {
 			if input != nil {
-				observeCodexModel(snap, codexInputModel(input), "PostCompact", now)
+				modelChanged = observeCodexModel(snap, codexInputModel(input), "PostCompact", now)
 			}
 			trigger := ""
 			if snap.Compaction.Trigger != nil {
@@ -331,6 +332,9 @@ func (a *CodexAdapter) HandlePostCompact(input *schema.CodexHookInput, sessionID
 			return nil
 		})
 	if err == nil {
+		if modelChanged {
+			appendCodexEvent(a.Paths, sessionID, state.Event{Type: state.EventModelSwitch, Model: codexInputModel(input), Detail: "source=codex:PostCompact"})
+		}
 		appendCodexEvent(a.Paths, sessionID, state.Event{Type: state.EventCompactionCompleted, Model: codexInputModel(input), Detail: codexTurnDetail(input)})
 	}
 	return err

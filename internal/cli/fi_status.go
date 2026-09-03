@@ -612,7 +612,7 @@ func formatDuration(seconds int64) string {
 }
 
 func sanitizeStatusError(value string) string {
-	value = strings.TrimSpace(secure.SanitizeField(value))
+	value = strings.TrimSpace(secure.Redact(secure.SanitizeField(value)))
 	if len(value) > 160 {
 		return value[:160]
 	}

@@ -185,39 +185,20 @@ func compareVersions(left, right string) int {
 	return 0
 }
 
-func managedBinaryExists(metadata *InstallationMetadata, paths Paths) bool {
-	return componentPathReady(metadata, metadataVersion(metadata, "binary"), paths.BinaryPath, true)
-}
-
-// installedComponentsVersion returns the highest version among every component
-// this operation may replace, provided all of those components are intact.
-// Component versions are independent because partial updates can leave a
-// newer binary beside older plugins (or vice versa).
+// installedComponentsVersion returns the highest version recorded for every
+// component this operation may replace. Readiness is checked separately:
+// retaining a recorded version here prevents a missing or modified component
+// from silently bypassing the no-downgrade guard.
 func installedComponentsVersion(metadata *InstallationMetadata, found bool, paths Paths, opts Options) string {
 	if !found || metadata == nil {
 		return ""
 	}
 	versions := make([]string, 0, 4)
 	if !opts.NoBin {
-		if !managedBinaryExists(metadata, paths) {
-			return ""
-		}
 		versions = append(versions, metadata.BinaryVersion)
 	}
 	if !opts.NoPlugin {
-		for _, component := range []struct {
-			name string
-			path string
-		}{
-			{name: "claude", path: paths.claudePluginPath()},
-			{name: "codex", path: paths.codexPluginPath()},
-			{name: "marketplace", path: paths.CodexMarketplaceDir},
-		} {
-			if !directoryComponentReady(metadata, component.name, component.path) {
-				return ""
-			}
-			versions = append(versions, metadataVersion(metadata, component.name))
-		}
+		versions = append(versions, metadata.ClaudePluginVersion, metadata.CodexPluginVersion, metadata.CodexMarketplaceVersion)
 	}
 	return highestVersion(versions)
 }
@@ -457,7 +438,11 @@ func commitRelease(extractDir string, paths Paths, opts Options, manifest *Marke
 		return failed(fmt.Errorf("commit installation metadata: %w", err))
 	}
 	if err := tx.finalize(); err != nil {
-		return fmt.Errorf("clean installation rollback files: %w", err)
+		// The target files and metadata are already committed. Cleanup failure is
+		// recoverable and must not be reported as an install failure that invites
+		// rollback of a state which can no longer be rolled back atomically.
+		result.PartiallyInstalled = true
+		result.Warnings = append(result.Warnings, fmt.Sprintf("cleanup of installation rollback files failed: %v", err))
 	}
 	if result.CodexFilesReady {
 		registered, warnings := registerCodexMarketplaceStatus(paths, stdout)
@@ -760,7 +745,7 @@ func UninstallWithResult(paths Paths, stdout, stderr io.Writer) (*UninstallResul
 			return failed(fmt.Errorf("remove installation metadata: %w", err))
 		}
 		if err := tx.finalize(); err != nil {
-			return err
+			result.Warnings = append(result.Warnings, fmt.Sprintf("cleanup of uninstall rollback files failed: %v", err))
 		}
 		_ = os.Remove(filepath.Dir(paths.BinaryPath))
 		_ = os.Remove(paths.InstallDir)

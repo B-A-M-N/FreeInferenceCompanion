@@ -166,6 +166,7 @@ func printIncidentCounts(w io.Writer, label string, counts []incidents.Count) {
 	}
 	fmt.Fprintf(w, "%s:\n", label)
 	for _, count := range counts {
-		fmt.Fprintf(w, "  %-28s %d\n", count.Name, count.Count)
+		name := secure.Redact(secure.SanitizeField(count.Name))
+		fmt.Fprintf(w, "  %-28s %d\n", name, count.Count)
 	}
 }

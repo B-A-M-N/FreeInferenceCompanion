@@ -41,11 +41,16 @@ var (
 func initThresholds() {
 	mgr, err := config.NewManager()
 	if err != nil {
-		// If we can't create a manager, fall through with defaults.
+		// Pressure calculations must remain safe when configuration is
+		// unavailable; a nil threshold pointer would panic on first use.
+		thresholds = defaultThresholds()
 		return
 	}
 	eff, err := mgr.Resolve()
 	if err != nil {
+		// Interactive callers still receive the configuration error, but hook
+		// callers need a usable fail-open fallback.
+		thresholds = defaultThresholds()
 		return
 	}
 

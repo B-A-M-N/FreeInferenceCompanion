@@ -155,8 +155,11 @@ func (s *PublicStatusResponse) Validate() error {
 		model.ValidationError = validatePublicStatusModel(*model)
 	}
 	if s.Cycle.CheckedAt != "" {
-		if _, err := parsePublicStatusTime(s.Cycle.CheckedAt); err != nil {
+		checkedAt, err := parsePublicStatusTime(s.Cycle.CheckedAt)
+		if err != nil {
 			s.Cycle.ValidationError = "cycle checked_at is invalid"
+		} else if checkedAt.After(time.Now().UTC()) {
+			s.Cycle.ValidationError = "cycle checked_at is in the future"
 		}
 	} else {
 		s.Cycle.ValidationError = "cycle checked_at is missing"
@@ -209,9 +212,11 @@ func validatePublicStatusSample(sample PublicStatusSample, requireTimestamp bool
 }
 
 func parsePublicStatusTime(value string) (time.Time, error) {
-	value = strings.TrimSpace(value)
 	if value == "" {
 		return time.Time{}, errors.New("timestamp is missing")
+	}
+	if value != strings.TrimSpace(value) {
+		return time.Time{}, errors.New("timestamp contains surrounding whitespace")
 	}
 	parsed, err := time.Parse(time.RFC3339Nano, value)
 	if err != nil {

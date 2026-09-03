@@ -214,6 +214,10 @@ func printSnapshot(stdout, stderr io.Writer, snap *schema.Snapshot, gs *schema.G
 }
 
 func writeHistoricalSnapshotJSON(stdout io.Writer, snap *schema.Snapshot, reveal, runtimeActive bool, reason string) {
+	provider := secure.SanitizeField(snap.Provider.Name)
+	if !snap.Provider.Confirmed {
+		provider = "unknown (unconfirmed)"
+	}
 	obj := map[string]any{
 		"historical":     true,
 		"runtime_active": runtimeActive,
@@ -222,7 +226,7 @@ func writeHistoricalSnapshotJSON(stdout io.Writer, snap *schema.Snapshot, reveal
 		"client":         secure.SanitizeField(snap.Client.Type),
 		"session_status": secure.SanitizeField(snap.Session.Status),
 		"model_id":       secure.SanitizeField(snap.Model.ID),
-		"provider":       secure.SanitizeField(snap.Provider.Name),
+		"provider":       provider,
 	}
 	enc := json.NewEncoder(stdout)
 	enc.SetIndent("", "  ")

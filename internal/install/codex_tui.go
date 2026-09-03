@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -38,6 +39,8 @@ type codexTUIMetadata struct {
 	PreviousLine            string    `json:"previous_line,omitempty"`
 	OwnedItems              []string  `json:"owned_items"`
 	OriginalTrailingNewline bool      `json:"original_trailing_newline"`
+	OriginalTrailingLineEnd string    `json:"original_trailing_line_end,omitempty"`
+	CreatedTUITable         bool      `json:"created_tui_table,omitempty"`
 }
 
 func codexTUIMetadataPath(home string) string {
@@ -85,6 +88,9 @@ func installCodexTUILocked(home, configPath string, stdout io.Writer) error {
 	}
 	previousLine, _ := codexTUIStatusLineLine(contents)
 	originalTrailingNewline := strings.HasSuffix(contents, "\n")
+	originalTrailingLineEnd := trailingLineEnding(contents)
+	_, hadTUITable := findCodexTUITable(contents)
+	createdTUITable := !hadTUITable
 
 	metaPath := codexTUIMetadataPath(home)
 	existing, haveExisting, err := loadCodexTUIMetadata(metaPath)
@@ -108,6 +114,10 @@ func installCodexTUILocked(home, configPath string, stdout io.Writer) error {
 		hadPrevious = existing.HadPrevious
 		previousLine = existing.PreviousLine
 		originalTrailingNewline = existing.OriginalTrailingNewline
+		if existing.OriginalTrailingLineEnd != "" {
+			originalTrailingLineEnd = existing.OriginalTrailingLineEnd
+		}
+		createdTUITable = existing.CreatedTUITable
 	}
 	owned := appendUniqueCodexTUIItems(current, "model-with-reasoning", "context-remaining", "current-dir")
 	newContents, err := setCodexTUIStatusLine(contents, owned)
@@ -134,6 +144,8 @@ func installCodexTUILocked(home, configPath string, stdout io.Writer) error {
 		PreviousLine:            previousLine,
 		OwnedItems:              owned,
 		OriginalTrailingNewline: originalTrailingNewline,
+		OriginalTrailingLineEnd: originalTrailingLineEnd,
+		CreatedTUITable:         createdTUITable,
 	}
 	metaBytes, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
@@ -200,15 +212,29 @@ func UninstallCodexTUI(home, configPath string, stdout io.Writer) error {
 			} else {
 				restored, err = setCodexTUIStatusLine(contents, meta.PreviousItems)
 			}
+		} else if meta.CreatedTUITable {
+			withoutStatus, removeErr := removeCodexTUIStatusLine(contents)
+			if removeErr != nil {
+				err = removeErr
+			} else {
+				restored, err = removeCreatedCodexTUITable(withoutStatus)
+			}
 		} else {
 			restored, err = removeCodexTUIStatusLine(contents)
 		}
 		if err != nil {
 			return err
 		}
-		if !meta.OriginalTrailingNewline {
-			restored = strings.TrimSuffix(restored, "\n")
-			restored = strings.TrimSuffix(restored, "\r")
+		if meta.CreatedTUITable {
+			lineEnd := meta.OriginalTrailingLineEnd
+			if lineEnd == "" && meta.OriginalTrailingNewline {
+				lineEnd = "\n"
+			}
+			if lineEnd != "\n" && lineEnd != "\r\n" {
+				// A newly-created [tui] table is separated from a file ending in
+				// no newline or a bare CR by one LF added during installation.
+				restored = strings.TrimSuffix(restored, "\n")
+			}
 		}
 		if err := writeFileAtomic(configPath, []byte(restored), mode); err != nil {
 			return fmt.Errorf("restore codex config: %w", err)
@@ -226,7 +252,12 @@ func UninstallCodexTUI(home, configPath string, stdout io.Writer) error {
 
 // InspectCodexTUI reports native footer state without changing files.
 func InspectCodexTUI(home, configPath string) (CodexTUIStatus, error) {
-	status := CodexTUIStatus{ConfigPath: configPath, Status: "not_configured"}
+	canonicalPath, err := canonicalCodexConfigPath(configPath)
+	if err != nil {
+		return CodexTUIStatus{ConfigPath: configPath, Status: "not_configured"}, err
+	}
+	status := CodexTUIStatus{ConfigPath: canonicalPath, Status: "not_configured"}
+	configPath = canonicalPath
 	contents, _, err := readCodexTUIConfig(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -246,6 +277,13 @@ func InspectCodexTUI(home, configPath string) (CodexTUIStatus, error) {
 		return status, err
 	}
 	if !haveMeta {
+		if found {
+			status.Status = "configured_unmanaged"
+		}
+		return status, nil
+	}
+	recordedPath, pathErr := canonicalCodexConfigPath(meta.ConfigPath)
+	if pathErr != nil || recordedPath != status.ConfigPath {
 		if found {
 			status.Status = "configured_unmanaged"
 		}
@@ -353,8 +391,8 @@ func parseCodexTUIStatusLine(contents string) ([]string, bool, error) {
 		if !strings.HasPrefix(value, "[") || !strings.HasSuffix(value, "]") {
 			return nil, false, errors.New("codex tui.status_line is not a supported single-line string array")
 		}
-		var items []string
-		if err := json.Unmarshal([]byte(value), &items); err != nil {
+		items, err := parseCodexTUIItems(value)
+		if err != nil {
 			return nil, false, fmt.Errorf("parse codex tui.status_line: %w", err)
 		}
 		if err := validateCodexTUIItems(items); err != nil {
@@ -491,6 +529,113 @@ func removeCodexTUIStatusLine(contents string) (string, error) {
 	return contents, nil
 }
 
+func findCodexTUITable(contents string) (int, bool) {
+	lines := strings.SplitAfter(contents, "\n")
+	for i, line := range lines {
+		plain := strings.TrimRight(line, "\r\n")
+		code, _ := splitCodexTOMLComment(plain)
+		trimmed := strings.TrimSpace(code)
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") &&
+			strings.TrimSpace(trimmed[1:len(trimmed)-1]) == "tui" {
+			return i, true
+		}
+	}
+	return -1, false
+}
+
+func removeCreatedCodexTUITable(contents string) (string, error) {
+	lines := strings.SplitAfter(contents, "\n")
+	start, found := findCodexTUITable(contents)
+	if !found {
+		return "", errors.New("codex tui table disappeared during uninstall")
+	}
+	end := len(lines)
+	for i := start + 1; i < len(lines); i++ {
+		plain := strings.TrimRight(lines[i], "\r\n")
+		code, _ := splitCodexTOMLComment(plain)
+		trimmed := strings.TrimSpace(code)
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			end = i
+			break
+		}
+	}
+	for _, line := range lines[start+1 : end] {
+		plain := strings.TrimSpace(strings.TrimRight(line, "\r\n"))
+		if plain != "" {
+			return "", errors.New("created codex tui table contains unexpected user content")
+		}
+	}
+	return strings.Join(append(lines[:start], lines[end:]...), ""), nil
+}
+
+func trailingLineEnding(contents string) string {
+	switch {
+	case strings.HasSuffix(contents, "\r\n"):
+		return "\r\n"
+	case strings.HasSuffix(contents, "\n"):
+		return "\n"
+	case strings.HasSuffix(contents, "\r"):
+		return "\r"
+	default:
+		return ""
+	}
+}
+
+func parseCodexTUIItems(value string) ([]string, error) {
+	trimmed := strings.TrimSpace(value)
+	if len(trimmed) < 2 || trimmed[0] != '[' || trimmed[len(trimmed)-1] != ']' {
+		return nil, errors.New("value is not a single-line string array")
+	}
+	inner := strings.TrimSpace(trimmed[1 : len(trimmed)-1])
+	if inner == "" {
+		return []string{}, nil
+	}
+	// TOML permits a trailing comma in an inline array; JSON does not.
+	if strings.HasSuffix(inner, ",") {
+		inner = strings.TrimSpace(strings.TrimSuffix(inner, ","))
+	}
+	items := make([]string, 0)
+	for len(inner) > 0 {
+		if inner[0] != '"' {
+			return nil, errors.New("array item is not a quoted string")
+		}
+		end := -1
+		for i := 1; i < len(inner); i++ {
+			if inner[i] != '"' {
+				continue
+			}
+			backslashes := 0
+			for j := i - 1; j >= 0 && inner[j] == '\\'; j-- {
+				backslashes++
+			}
+			if backslashes%2 == 0 {
+				end = i
+				break
+			}
+		}
+		if end < 0 {
+			return nil, errors.New("unterminated string array item")
+		}
+		item, err := strconv.Unquote(inner[:end+1])
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+		inner = strings.TrimSpace(inner[end+1:])
+		if inner == "" {
+			break
+		}
+		if inner[0] != ',' {
+			return nil, errors.New("array items must be comma separated")
+		}
+		inner = strings.TrimSpace(inner[1:])
+		if inner == "" {
+			break
+		}
+	}
+	return items, nil
+}
+
 func replaceCodexTUIValue(line, encoded string) string {
 	newline := ""
 	if strings.HasSuffix(line, "\r\n") {
@@ -516,7 +661,11 @@ func splitCodexTOMLComment(line string) (string, string) {
 	for i, r := range line {
 		switch r {
 		case '"':
-			if i == 0 || line[i-1] != '\\' {
+			backslashes := 0
+			for j := i - 1; j >= 0 && line[j] == '\\'; j-- {
+				backslashes++
+			}
+			if backslashes%2 == 0 {
 				quoted = !quoted
 			}
 		case '#':

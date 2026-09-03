@@ -114,8 +114,12 @@ package: build-all
 		mkdir -p "$$stage_dir"; \
 		install -m 0755 $(BUILD_DIR)/$(BINARY)-$$p "$$stage_dir/$(BINARY)"; \
 		cp LICENSE README.md "$$stage_dir/"; \
-		archive="$(RELEASE_DIR)/$$archive_name.tar.gz"; \
-		tar --sort=name --mtime="@$$epoch" --owner=0 --group=0 --numeric-owner --use-compress-program='gzip -n' -cf "$$archive" -C "$$staging" "$$archive_name"; \
+		archive="$(CURDIR)/$(RELEASE_DIR)/$$archive_name.tar.gz"; \
+		if tar --version 2>/dev/null | grep -q 'GNU tar'; then \
+			tar --sort=name --mtime="@$$epoch" --owner=0 --group=0 --numeric-owner --use-compress-program='gzip -n' -cf "$$archive" -C "$$staging" "$$archive_name"; \
+		else \
+			( cd "$$staging" && COPYFILE_DISABLE=1 tar -cf - "$$archive_name" | gzip -n > "$$archive" ); \
+		fi; \
 		echo "packaged $$archive"; \
 	done; \
 	\
@@ -409,11 +413,13 @@ lint: vet staticcheck
 # calendar release as 2026.1.
 staticcheck:
 	@STATICCHECK_VERSION=v0.7.0; \
-	if ! command -v staticcheck >/dev/null 2>&1; then \
+	bin="$$(go env GOBIN)"; \
+	if [ -z "$$bin" ]; then bin="$$(go env GOPATH)/bin"; fi; \
+	if [ ! -x "$$bin/staticcheck" ]; then \
 		echo "installing staticcheck $$STATICCHECK_VERSION..."; \
-		go install honnef.co/go/tools/cmd/staticcheck@$$STATICCHECK_VERSION; \
-	fi
-	staticcheck ./...
+		GOBIN="$$bin" go install honnef.co/go/tools/cmd/staticcheck@$$STATICCHECK_VERSION; \
+	fi; \
+	"$$bin/staticcheck" ./...
 
 fmt-check:
 	@test -z "$$(gofmt -l .)" || (echo "unformatted files:"; gofmt -l .; exit 1)

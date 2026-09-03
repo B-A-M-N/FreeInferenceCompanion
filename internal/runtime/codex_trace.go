@@ -559,9 +559,14 @@ func removeOwnedCodexMappings(contents, providerID string, ownership codexTraceO
 		removeEmptyCodexNestedTable(lines, nestedTable, nestedTableQuoted)
 	}
 	updated := strings.Join(lines, "")
-	if ownership.OriginalTrailingNewline != nil && !*ownership.OriginalTrailingNewline {
+	lineEnd := ownership.OriginalTrailingLineEnd
+	if lineEnd == "" && ownership.OriginalTrailingNewline != nil && *ownership.OriginalTrailingNewline {
+		lineEnd = "\n"
+	}
+	if lineEnd != "\n" && lineEnd != "\r\n" {
+		// Setup adds one LF when the original file did not end in a TOML
+		// newline. Remove that separator without deleting an original bare CR.
 		updated = strings.TrimSuffix(updated, "\n")
-		updated = strings.TrimSuffix(updated, "\r")
 	}
 	return updated, nil
 }

@@ -109,9 +109,9 @@ type EndpointIdentity struct {
 //   - Must not have a fragment.
 //   - Query strings are NOT persisted (they may carry secrets).
 //
-// Returns an error if the URL is invalid. A valid non-FreeInference URL returns
-// a non-nil identity with IsFI=false and no error — callers decide whether to
-// accept unapproved hosts.
+// Returns an error if the URL is invalid. IsFI is true only for the same
+// HTTPS/port policy used when attaching credentials, so activation and API
+// requests cannot disagree about whether a route is approved.
 func NormalizeEndpoint(rawURL string) (*EndpointIdentity, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -147,7 +147,7 @@ func NormalizeEndpoint(rawURL string) (*EndpointIdentity, error) {
 		Host:       host,
 		Origin:     origin,
 		RequestURL: requestURL,
-		IsFI:       isApprovedCredentialHost(host),
+		IsFI:       isApprovedCredentialURL(u),
 	}, nil
 }
 func isLoopbackHost(host string) bool {
@@ -182,6 +182,10 @@ func isApprovedCredentialURL(u *url.URL) bool {
 	}
 	return u.Scheme == "https" && (u.Port() == "" || u.Port() == "443")
 }
+
+// IsApprovedCredentialURL reports whether a parsed endpoint satisfies the
+// production FreeInference credential-routing policy.
+func IsApprovedCredentialURL(u *url.URL) bool { return isApprovedCredentialURL(u) }
 
 // CredentialError is returned when a credential would be sent to a host that
 // is not an approved FreeInference endpoint and the user has not explicitly
@@ -289,11 +293,15 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	identity, err := NormalizeEndpoint(normalized)
+	if err != nil {
+		return nil, err
+	}
 
 	dialer := &net.Dialer{Timeout: DialTimeout}
 	return &Client{
 		baseURL:          normalized,
-		endpointIdentity: &EndpointIdentity{Host: extractHost(normalized), Origin: extractOrigin(normalized), RequestURL: normalized, IsFI: isApprovedCredentialHost(extractHost(normalized))},
+		endpointIdentity: identity,
 		apiKey:           cfg.APIKey,
 		version:          version.Version,
 		customEndpoint:   customCfg,
@@ -312,24 +320,6 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 			},
 		},
 	}, nil
-}
-
-// extractHost extracts the host from a normalized URL string.
-func extractHost(u string) string {
-	parsed, err := url.Parse(u)
-	if err != nil {
-		return ""
-	}
-	return parsed.Hostname()
-}
-
-// extractOrigin extracts the origin (scheme://host) from a normalized URL string.
-func extractOrigin(u string) string {
-	parsed, err := url.Parse(u)
-	if err != nil {
-		return ""
-	}
-	return parsed.Scheme + "://" + parsed.Host
 }
 
 // approvedBaseURL validates a base URL and, when an API key is present,

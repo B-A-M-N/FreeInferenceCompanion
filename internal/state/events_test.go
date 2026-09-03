@@ -140,15 +140,32 @@ func TestRotateEventsBoundsSize(t *testing.T) {
 	if err := paths.EnsureSessionDir(schema.ClientClaudeCode, "s1"); err != nil {
 		t.Fatal(err)
 	}
-	// Write more lines than MaxEventsPerSession and force the file size past
-	// the byte bound by giving each event a sizeable detail.
+	// Write more lines than MaxEventsPerSession. AppendEvent opportunistically
+	// applies line-count retention, so append a second valid batch directly to
+	// create the oversized fixture that explicit rotation must handle.
 	for i := 0; i < MaxEventsPerSession+50; i++ {
 		if err := AppendEvent(paths, schema.ClientClaudeCode, "s1",
 			Event{Type: EventPromptSubmitted, Detail: strings.Repeat("a", 300)}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	info, _ := os.Stat(paths.SessionEvents(schema.ClientClaudeCode, "s1"))
+	path := paths.SessionEvents(schema.ClientClaudeCode, "s1")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	info, _ := os.Stat(path)
 	if info.Size() < MaxEventBytesPerSession {
 		t.Fatalf("precondition: file too small (%d bytes)", info.Size())
 	}

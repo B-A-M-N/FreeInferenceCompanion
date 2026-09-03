@@ -25,9 +25,6 @@ func ensurePrivateDirNoFollow(path string) error {
 	if clean == root {
 		return errors.New("trace receipt directory path cannot be a volume root")
 	}
-	if err := os.MkdirAll(clean, 0700); err != nil {
-		return err
-	}
 	relative := strings.TrimPrefix(clean, root)
 	if relative == clean || relative == "" {
 		return errors.New("trace receipt directory path is not beneath its volume root")
@@ -36,8 +33,17 @@ func ensurePrivateDirNoFollow(path string) error {
 	components := strings.Split(relative, string(filepath.Separator))
 	privateStart := len(components) - 2
 	for i, component := range components {
+		if component == "" || component == "." || component == ".." {
+			return errors.New("trace receipt directory path contains an unsafe component")
+		}
 		current = filepath.Join(current, component)
 		info, err := os.Lstat(current)
+		if os.IsNotExist(err) {
+			if err := os.Mkdir(current, 0700); err != nil {
+				return err
+			}
+			info, err = os.Lstat(current)
+		}
 		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			return errors.New("trace receipt directory is not a private directory")
 		}

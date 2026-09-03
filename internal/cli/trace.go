@@ -97,6 +97,7 @@ func cmdTrace(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 		Source:  string(tracing.SourceNone),
 		Note:    "Trace correlation is per Companion launch; request content and credentials are not recorded.",
 	}
+	explicitSession := explicitSessionRequested(args)
 	if clientType == "" {
 		if inherited, ok := tracing.EnvironmentTrace(); ok {
 			clientType = inherited.Client
@@ -121,7 +122,7 @@ func cmdTrace(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 		if trace := currentTraceInfo(resolved.Snap, resolved.Client, activation); trace != nil && status.Enabled {
 			applyTraceStatus(&status, trace)
 		}
-	} else if status.Enabled {
+	} else if status.Enabled && !explicitSession {
 		if trace := environmentTraceInfo(clientType, activation); trace != nil {
 			applyTraceStatus(&status, trace)
 		}

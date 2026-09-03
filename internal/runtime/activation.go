@@ -53,7 +53,6 @@ const (
 	ReasonCredentialInvalid       ActivationReason = "credential_invalid"
 	ReasonConflictingEndpoints    ActivationReason = "conflicting_runtime_endpoints"
 	ReasonClientEvidenceRequired  ActivationReason = "client_evidence_required"
-	ReasonCodexProviderInactive   ActivationReason = "codex_provider_inactive"
 	ReasonCodexProviderUnverified ActivationReason = "codex_provider_unverified"
 	ReasonUnsafeForced            ActivationReason = "unsafe_force_activation"
 )

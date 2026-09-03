@@ -169,12 +169,18 @@ func cmdReport(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if resolved != nil {
+		// Resolve activation for the client that owns the selected snapshot;
+		// the command's inherited activation may describe a different client.
+		activation = runtime.EvaluateForClient(runtime.ClientKind(resolved.Client))
+		report.RuntimeActive = activation.Active
 		report.Client = resolved.Client
 		report.Historical = !activation.Active && !activation.Disabled
 		report.Session = buildReportSession(resolved.Snap, reveal)
 		incidentFilter.Client = resolved.Client
 		incidentFilter.SessionID = resolved.SessionID
-		report.ModelMonitor = buildReportModelMonitor(gs, resolved.Snap.Model.ID, now)
+		if currentID, idErr := activationID(activation); idErr == nil {
+			report.ModelMonitor = buildReportModelMonitorForActivation(gs, resolved.Snap, currentID, now)
+		}
 
 		// Compute budget projection for the markdown report.
 		if report.AccountUsage != nil && !report.AccountUsage.Stale {
@@ -195,7 +201,9 @@ func cmdReport(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 			traceActivation = runtime.EvaluateForClient(runtime.ClientKind(inherited.Client))
 		}
 		if traceActivation.Active && resolved != nil {
-			report.Trace = buildReportTrace(resolved.Snap)
+			if currentID, idErr := activationID(activation); idErr == nil {
+				report.Trace = buildReportTraceForActivation(resolved.Snap, currentID)
+			}
 			if report.Trace != nil && !reveal {
 				report.Trace.TraceID = displaySessionID(report.Trace.TraceID, false)
 			}
@@ -300,6 +308,14 @@ func buildReportModelMonitor(gs *schema.GlobalState, modelID string, now time.Ti
 	return nil
 }
 
+func buildReportModelMonitorForActivation(gs *schema.GlobalState, snap *schema.Snapshot, currentActivationID string, now time.Time) *reportModelMonitor {
+	if snap == nil || !snap.Provider.Confirmed || snap.Provider.Name != schema.ProviderFreeInference ||
+		currentActivationID == "" || snap.ActivationID == "" || snap.ActivationID != currentActivationID {
+		return nil
+	}
+	return buildReportModelMonitor(gs, snap.Model.ID, now)
+}
+
 func buildReportTrace(snap *schema.Snapshot) *reportTrace {
 	if snap == nil || snap.Trace == nil || !snap.Trace.Verified || !snap.Provider.Confirmed || snap.Provider.Name != schema.ProviderFreeInference {
 		return nil
@@ -308,6 +324,13 @@ func buildReportTrace(snap *schema.Snapshot) *reportTrace {
 		return nil
 	}
 	return buildReportTraceInfo(snap.Trace)
+}
+
+func buildReportTraceForActivation(snap *schema.Snapshot, currentActivationID string) *reportTrace {
+	if snap == nil || currentActivationID == "" || snap.ActivationID == "" || snap.ActivationID != currentActivationID {
+		return nil
+	}
+	return buildReportTrace(snap)
 }
 
 func buildReportTraceInfo(trace *schema.TraceInfo) *reportTrace {
