@@ -117,6 +117,8 @@ package: build-all
 		mkdir -p "$$stage_dir"; \
 		install -m 0755 $(BUILD_DIR)/$(BINARY)-$$p "$$stage_dir/$(BINARY)"; \
 		cp LICENSE README.md "$$stage_dir/"; \
+		mkdir -p "$$stage_dir/docs/images"; \
+		cp docs/images/*.svg "$$stage_dir/docs/images/"; \
 		archive="$(CURDIR)/$(RELEASE_DIR)/$$archive_name.tar.gz"; \
 		if tar --version 2>/dev/null | grep -q 'GNU tar'; then \
 			tar --sort=name --mtime="@$$epoch" --owner=0 --group=0 --numeric-owner --use-compress-program='gzip -n' -cf "$$archive" -C "$$staging" "$$archive_name"; \
@@ -263,6 +265,8 @@ package-smoke: package
 		if [ ! -f "$$extract/$$archive_name/README.md" ] || [ ! -f "$$extract/$$archive_name/LICENSE" ]; then \
 			echo "FAIL: $$p archive missing README.md or LICENSE"; exit 1; \
 		fi; \
+		test -f "$$extract/$$archive_name/docs/images/claude-code-companion.svg" || { echo "FAIL: $$p archive missing Claude screenshot"; exit 1; }; \
+		test -f "$$extract/$$archive_name/docs/images/codex-companion.svg" || { echo "FAIL: $$p archive missing Codex screenshot"; exit 1; }; \
 		echo "archive OK: $$p"; \
 		installer="$(RELEASE_DIR)/$$archive_name.zip"; \
 		test -f "$$installer" || { echo "FAIL: $$p installer archive missing: $$installer"; exit 1; }; \
