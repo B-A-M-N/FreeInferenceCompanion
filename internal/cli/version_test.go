@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/adapters"
@@ -12,12 +11,9 @@ import (
 )
 
 func TestDefaultManifestURLUsesCanonicalRepository(t *testing.T) {
-	wantPrefix := version.RepositoryURL + "/releases/"
-	if !strings.HasPrefix(defaultManifestURL, wantPrefix) {
-		t.Fatalf("defaultManifestURL = %q, want prefix %q", defaultManifestURL, wantPrefix)
-	}
-	if !strings.HasSuffix(defaultManifestURL, "/latest/download/marketplace.json") {
-		t.Fatalf("defaultManifestURL = %q, want latest marketplace manifest", defaultManifestURL)
+	const want = "https://github.com/B-A-M-N/FreeInferenceCompanion/releases/latest/download/marketplace.json"
+	if defaultManifestURL != want {
+		t.Fatalf("defaultManifestURL = %q, want %q", defaultManifestURL, want)
 	}
 }
 
