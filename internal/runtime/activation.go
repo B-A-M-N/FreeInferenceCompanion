@@ -27,6 +27,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,6 +59,12 @@ const (
 )
 
 const companionDisabledMarker = ".companion-disabled"
+
+// ProxyUpstreamEnv is an explicit integration attestation for clients that
+// intentionally route through a local FreeInference compatibility proxy. A
+// loopback URL alone is never enough to activate the companion, and this
+// variable is ignored unless the Claude runtime endpoint is loopback.
+const ProxyUpstreamEnv = "FI_PROXY_UPSTREAM_URL"
 
 // RuntimeKind identifies which coding-agent runtime the activation targets.
 type RuntimeKind string
@@ -161,6 +169,11 @@ type Activation struct {
 	// or fragments. Management requests use ManagementBaseURL instead because
 	// FreeInference's Anthropic runtime path is distinct from its /v1 catalog API.
 	EndpointURL string `json:"endpoint_url,omitempty"`
+	// ProxyActive indicates that Claude reaches FreeInference through an
+	// explicitly attested loopback compatibility proxy. ProxyUpstreamURL is the
+	// sanitized upstream route used for provider identity and management calls.
+	ProxyActive      bool   `json:"proxy_active,omitempty"`
+	ProxyUpstreamURL string `json:"proxy_upstream_url,omitempty"`
 	// RuntimeKind: which runtime matched (anthropic/openai/freeinference).
 	RuntimeKind RuntimeKind `json:"runtime_kind,omitempty"`
 	// InactiveReason: machine code from ActivationReason.
@@ -452,12 +465,48 @@ func evaluateClaudeActivation(a Activation, evidence ClientEvidence) Activation 
 	a.Origin = id.Origin
 	a.EndpointURL = id.RequestURL
 	if !id.IsFI {
-		a.InactiveReason = ReasonEndpointNotApproved
-		return a
+		// HarvardClaude and similar explicit integrations may put a local
+		// compatibility proxy between Claude Code and FreeInference. Do not
+		// treat every loopback endpoint as FI: require a separately declared,
+		// approved HTTPS upstream route. This keeps ordinary local proxies and
+		// unrelated Claude sessions completely silent.
+		if !isLoopbackEndpoint(anthropicURL) {
+			a.InactiveReason = ReasonEndpointNotApproved
+			return a
+		}
+		upstreamRaw := strings.TrimSpace(os.Getenv(ProxyUpstreamEnv))
+		upstream, upstreamErr := api.NormalizeEndpoint(upstreamRaw)
+		if upstreamErr != nil || upstream == nil || !upstream.IsFI || !isClaudeRoute(upstream) {
+			a.InactiveReason = ReasonEndpointNotApproved
+			return a
+		}
+		a.ProxyActive = true
+		a.ProxyUpstreamURL = upstream.RequestURL
+		a.Origin = upstream.Origin
 	}
 	a.Active = true
 	a.capturedCredential = credValue
 	return a
+}
+
+func isLoopbackEndpoint(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u == nil || u.Host == "" {
+		return false
+	}
+	host := strings.TrimSpace(strings.ToLower(u.Hostname()))
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func isClaudeRoute(id *api.EndpointIdentity) bool {
+	if id == nil {
+		return false
+	}
+	return strings.TrimRight(id.RequestURL, "/") == strings.TrimRight(id.Origin, "/")+"/anthropic"
 }
 
 func evaluateCodexActivation(a Activation, evidence ClientEvidence) Activation {

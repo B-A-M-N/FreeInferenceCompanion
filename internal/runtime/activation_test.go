@@ -15,6 +15,7 @@ func clearActivationEnv(t *testing.T) {
 		"FREEINFERENCE_BASE_URL", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL",
 		"FREEINFERENCE_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
 		"FI_ALLOW_CUSTOM_API_ENDPOINT", "FI_ALLOW_INSECURE_LOCALHOST",
+		ProxyUpstreamEnv,
 		"CODEX_HOME", "CODEX_PROFILE",
 	} {
 		t.Setenv(env, "")
@@ -388,6 +389,51 @@ func TestActivation_DocumentedClaudeCodeCredential_Active(t *testing.T) {
 	}
 	if got := a.ManagementBaseURL(); got != "https://freeinference.org/v1" {
 		t.Errorf("ManagementBaseURL = %q, want https://freeinference.org/v1", got)
+	}
+}
+
+func TestActivation_ClaudeLocalProxyRequiresExplicitApprovedUpstream(t *testing.T) {
+	clearActivationEnv(t)
+	t.Setenv("FI_ALLOW_INSECURE_LOCALHOST", "1")
+	t.Setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:8765")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "free-inference-test")
+	if a := EvaluateForClient(ClientClaudeCode); a.Active {
+		t.Fatalf("loopback Claude route without upstream attestation must stay inactive: %+v", a)
+	}
+
+	t.Setenv(ProxyUpstreamEnv, "https://api.example.com/anthropic")
+	if a := EvaluateForClient(ClientClaudeCode); a.Active {
+		t.Fatalf("unapproved proxy upstream must stay inactive: %+v", a)
+	}
+
+	t.Setenv(ProxyUpstreamEnv, "https://freeinference.org/anthropic")
+	a := EvaluateForClient(ClientClaudeCode)
+	if !a.Active || !a.ProxyActive {
+		t.Fatalf("approved proxy route should activate: %+v", a)
+	}
+	if a.Origin != "https://freeinference.org" || a.ProxyUpstreamURL != "https://freeinference.org/anthropic" {
+		t.Fatalf("proxy identity = %+v", a)
+	}
+	if got := a.ManagementBaseURL(); got != "https://freeinference.org/v1" {
+		t.Fatalf("proxy management URL = %q", got)
+	}
+}
+
+func TestActivation_ClaudeProxyAttestationDoesNotActivateDirectOrUnrelatedRoutes(t *testing.T) {
+	clearActivationEnv(t)
+	t.Setenv(ProxyUpstreamEnv, "https://freeinference.org/anthropic")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "runtime-key")
+
+	t.Setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+	if a := EvaluateForClient(ClientClaudeCode); a.Active {
+		t.Fatalf("proxy attestation must not activate ordinary Claude: %+v", a)
+	}
+
+	t.Setenv("FI_ALLOW_INSECURE_LOCALHOST", "1")
+	t.Setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:8765")
+	t.Setenv(ProxyUpstreamEnv, "https://freeinference.org/v1")
+	if a := EvaluateForClient(ClientClaudeCode); a.Active {
+		t.Fatalf("non-Anthropic proxy route must stay inactive: %+v", a)
 	}
 }
 

@@ -243,6 +243,7 @@ Many commands accept `--json` for machine-readable JSON output and `--help` for 
 - `FI_CACHE_DIR` — Cache directory (default: `~/.cache/freeinference-companion`)
 - `FI_SESSION_ID` — Explicit session override
 - `FI_PROVIDER` — Attribution metadata only; it does not activate the companion
+- `FI_PROXY_UPSTREAM_URL` — Explicit approved FreeInference upstream for an intentional local Claude compatibility proxy; loopback alone does not activate
 - `FI_AUTO_REFRESH` — Set to `1` to opt in to stale metadata refreshes from lifecycle hooks
 - `FI_NO_BACKGROUND` — Disable detached background refresh after opting in
 - `FI_DISABLED` — Set to `1` to disable all companion features

@@ -53,3 +53,21 @@ The plugin contributes local lifecycle recording and diagnostic skills. It
 does not proxy inference traffic or make background API requests by default.
 Use `FI_AUTO_REFRESH=1` only when you explicitly want stale metadata refresh;
 those refreshes are throttled, coalesced, and circuit-breaker protected.
+
+## HarvardClaude and other local proxies
+
+If a launcher routes Claude through a local compatibility proxy, install or
+load the Claude plugin in that launcher's profile and have the launcher export
+the verified upstream route:
+
+```bash
+ANTHROPIC_BASE_URL=http://127.0.0.1:8765 \
+FI_PROXY_UPSTREAM_URL=https://freeinference.org/anthropic \
+FI_ALLOW_INSECURE_LOCALHOST=1
+```
+
+`FI_PROXY_UPSTREAM_URL` is required in addition to the loopback URL. This is
+an explicit integration declaration, not a provider guess: the Companion
+ignores `FI_PROVIDER` and a bare localhost endpoint. When the declaration is
+valid, status and lifecycle surfaces identify the effective FreeInference
+origin; when it is absent or wrong, they remain silent.
