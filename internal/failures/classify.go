@@ -276,7 +276,7 @@ func classify(raw string, status int, providerType string) (string, string) {
 	if strings.Contains(lower, "network") || strings.Contains(lower, "transport") || strings.Contains(lower, "unexpected eof") {
 		return NetworkError, "network"
 	}
-	if strings.Contains(lower, "rate limit") || strings.Contains(lower, "too many requests") || strings.Contains(lower, "throttl") || strings.Contains(lower, "quota exceeded") || strings.Contains(lower, "error 1015") {
+	if strings.Contains(lower, "rate limit") || strings.Contains(lower, "rate_limit") || strings.Contains(lower, "too many requests") || strings.Contains(lower, "throttl") || strings.Contains(lower, "quota exceeded") || strings.Contains(lower, "error 1015") {
 		return RateLimit, ""
 	}
 	if strings.Contains(lower, "overload") || strings.Contains(lower, "capacity") {

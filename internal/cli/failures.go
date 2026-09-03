@@ -136,12 +136,18 @@ func printFailureReport(w io.Writer, report *incidents.Report) {
 	printIncidentCounts(w, "By HTTP status", report.ByStatus)
 	printIncidentCounts(w, "By model", report.ByModel)
 	printIncidentCounts(w, "By client", report.ByClient)
+	if len(report.Warnings) > 0 {
+		fmt.Fprintln(w, "Warnings:")
+		for _, warning := range report.Warnings {
+			fmt.Fprintf(w, "  %s\n", secure.SanitizeField(warning))
+		}
+	}
 	if len(report.Recent) > 0 {
 		fmt.Fprintln(w, "Recent:")
 		for _, incident := range report.Recent {
 			fmt.Fprintf(w, "  %s %-12s %-18s %s", incident.At.Format(time.RFC3339), incident.Client, incident.Category, incident.SessionID)
 			if incident.Model != "" {
-				fmt.Fprintf(w, " model=%s", incident.Model)
+				fmt.Fprintf(w, " model=%s", secure.Redact(secure.SanitizeField(incident.Model)))
 			}
 			if incident.HTTPStatus != nil {
 				fmt.Fprintf(w, " http=%d", *incident.HTTPStatus)

@@ -542,6 +542,10 @@ func evaluateCodexActivation(a Activation, evidence ClientEvidence) Activation {
 		a.InactiveReason = ReasonEndpointNotApproved
 		return a
 	}
+	if strings.TrimRight(id.RequestURL, "/") != id.Origin+"/v1" {
+		a.InactiveReason = ReasonEndpointInvalid
+		return a
+	}
 	if evidence.ProviderEnvKey == "" || evidence.CredentialSource != CredentialSource(evidence.ProviderEnvKey) {
 		a.InactiveReason = ReasonCodexProviderUnverified
 		return a

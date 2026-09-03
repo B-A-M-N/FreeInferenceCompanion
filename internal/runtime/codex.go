@@ -72,6 +72,17 @@ func resolveCodexProviderConfiguration(profile string) (ClientEvidence, error) {
 			providerID = strings.TrimSpace(profileConfig.ModelProvider)
 		}
 		selectionSource = "CODEX_PROFILE:" + profile
+	} else if codexProfilesPresent(home) {
+		// Codex does not export a CLI-selected profile to child hook
+		// processes. If profiles exist, the root model_provider is not proof
+		// of the provider used by this session; fail closed rather than
+		// attributing an OpenAI-profile request to FreeInference.
+		return ClientEvidence{
+			Client:                    ClientCodex,
+			ProviderID:                providerID,
+			ProviderSelectionVerified: false,
+			ProviderSelectionSource:   "codex profile selection unavailable",
+		}, errors.New("active Codex profile is not exposed to the Companion")
 	}
 
 	provider, ok := base.Providers[providerID]
@@ -99,6 +110,15 @@ func resolveCodexProviderConfiguration(profile string) (ClientEvidence, error) {
 			ProviderSelectionSource:   selectionSource,
 		}, errors.New("selected codex provider contains an invalid identifier")
 	}
+	endpoint, endpointErr := api.NormalizeEndpoint(provider.BaseURL)
+	if endpointErr != nil || (endpoint.IsFI && strings.TrimRight(endpoint.RequestURL, "/") != endpoint.Origin+"/v1") {
+		return ClientEvidence{
+			Client:                    ClientCodex,
+			ProviderID:                providerID,
+			ProviderSelectionVerified: false,
+			ProviderSelectionSource:   selectionSource,
+		}, errors.New("selected Codex provider is not an approved FreeInference /v1 endpoint")
+	}
 
 	credentialSource := CredentialSource(strings.TrimSpace(provider.EnvKey))
 	credentialValue := os.Getenv(string(credentialSource))
@@ -113,6 +133,22 @@ func resolveCodexProviderConfiguration(profile string) (ClientEvidence, error) {
 		ProviderSelectionVerified: true,
 		ProviderSelectionSource:   selectionSource,
 	}, nil
+}
+
+func codexProfilesPresent(home string) bool {
+	entries, err := os.ReadDir(home)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || entry.Name() == "config.toml" {
+			continue
+		}
+		if strings.HasSuffix(entry.Name(), ".config.toml") && len(strings.TrimSuffix(entry.Name(), ".config.toml")) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // CodexProviderConfiguration returns the non-secret provider configuration

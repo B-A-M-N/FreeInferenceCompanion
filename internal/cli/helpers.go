@@ -58,7 +58,7 @@ func newAPIClient() (*api.Client, error) {
 		// Codex stores its selected provider in ~/.codex/config.toml rather
 		// than exporting the runtime endpoint. Use that resolver only when the
 		// ordinary provider-level environment did not produce a client.
-		if baseURL == "" || apiKey == "" {
+		if !activation.Disabled && (baseURL == "" || apiKey == "") {
 			if evidence, resolveErr := runtime.ResolveCodexProviderConfiguration(); resolveErr == nil && evidence.CredentialValue != "" {
 				if endpoint, normalizeErr := api.NormalizeEndpoint(evidence.EndpointURL); normalizeErr == nil && endpoint.IsFI {
 					baseURL = endpoint.Origin + "/v1"
@@ -139,11 +139,12 @@ func parseClientSessionFlags(args []string) (clientType, sessionID, format strin
 // from an automatic/current-session command. FI_SESSION_ID is equivalent to
 // --session for the diagnostic commands.
 func explicitSessionRequested(args []string) bool {
-	_, sessionID, _, _, _, err := parseClientSessionFlags(args)
-	if err != nil {
-		return false
+	for i, arg := range args {
+		if arg == "--session" && i+1 < len(args) && strings.TrimSpace(args[i+1]) != "" {
+			return true
+		}
 	}
-	return sessionID != "" || strings.TrimSpace(os.Getenv("FI_SESSION_ID")) != ""
+	return strings.TrimSpace(os.Getenv("FI_SESSION_ID")) != ""
 }
 
 // resolvedSession pairs a session identity with its loaded snapshot.

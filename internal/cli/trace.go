@@ -206,25 +206,24 @@ func cmdTraceCodexLifecycle(operation string, args []string, stdout, stderr io.W
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-	evidence, err := runtime.ResolveCodexProviderConfiguration()
-	if err != nil || !evidence.ProviderSelectionVerified {
-		if err == nil {
-			err = fmt.Errorf("selected Codex provider is not fully configured")
-		}
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
-	}
-	endpoint, err := normalizeCodexTraceEndpoint(evidence.EndpointURL)
-	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
-	}
-	if !endpoint.IsFI {
-		fmt.Fprintln(stderr, "error: selected Codex provider is not a FreeInference endpoint")
-		return 1
-	}
-
 	if operation == "setup" {
+		evidence, err := runtime.ResolveCodexProviderConfiguration()
+		if err != nil || !evidence.ProviderSelectionVerified {
+			if err == nil {
+				err = fmt.Errorf("selected Codex provider is not fully configured")
+			}
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
+		}
+		endpoint, err := normalizeCodexTraceEndpoint(evidence.EndpointURL)
+		if err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
+		}
+		if !endpoint.IsFI {
+			fmt.Fprintln(stderr, "error: selected Codex provider is not a FreeInference endpoint")
+			return 1
+		}
 		mapping, err := runtime.SetupCodexTraceConfig(path, evidence.ProviderID)
 		if err != nil {
 			fmt.Fprintf(stderr, "error: Codex trace setup: %v\n", err)
@@ -240,7 +239,10 @@ func cmdTraceCodexLifecycle(operation string, args []string, stdout, stderr io.W
 		return 0
 	}
 
-	if err := runtime.RestoreCodexTraceConfig(path, evidence.ProviderID); err != nil {
+	// Uninstall is ownership-driven. The current Codex provider may have
+	// changed since setup, but the ownership record still identifies exactly
+	// which provider mapping Companion may remove.
+	if err := runtime.RestoreCodexTraceConfig(path, ""); err != nil {
 		fmt.Fprintf(stderr, "error: Codex trace uninstall: %v\n", err)
 		return 1
 	}

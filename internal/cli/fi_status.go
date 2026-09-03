@@ -246,6 +246,11 @@ func normalizeMonitor(status api.PublicStatusResponse, fetchedAt time.Time) fiMo
 		monitor.exitFailure = true
 		return monitor
 	}
+	if checkedAt.After(time.Now().UTC()) {
+		monitor.Error = "monitor cycle timestamp is in the future"
+		monitor.exitFailure = true
+		return monitor
+	}
 	monitor.CheckedAt = checkedAt.Format(time.RFC3339Nano)
 	monitor.AgeSeconds = statusAgeSeconds(fetchedAt, checkedAt)
 	if status.Cycle.Error != "" {
@@ -287,6 +292,10 @@ func normalizeFIStatusModel(model api.PublicStatusModel, fetchedAt time.Time) fi
 		result.Error = "invalid check timestamp"
 		return result
 	}
+	if checkedAt.After(time.Now().UTC()) {
+		result.Error = "model check timestamp is in the future"
+		return result
+	}
 	result.CheckedAt = checkedAt.Format(time.RFC3339Nano)
 	result.CheckAgeSeconds = statusAgeSeconds(fetchedAt, checkedAt)
 	if result.CheckAgeSeconds > int64(api.PublicStatusStaleAfter/time.Second) {
@@ -323,7 +332,7 @@ func addHistoryMetrics(result *fiStatusModel, model api.PublicStatusModel, lates
 	historyPoints := 0
 	for _, sample := range model.History {
 		at, ok := parseStatusTime(sample.CheckedAt)
-		if !ok || sample.OK == nil {
+		if !ok || sample.OK == nil || at.After(time.Now().UTC()) {
 			continue
 		}
 		state := fiModelDown

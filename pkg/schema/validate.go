@@ -235,7 +235,7 @@ func ValidatePublicStatusCache(c *PublicStatusCache) error {
 		}
 	}
 	if c.Total < 0 || c.Healthy < 0 || c.Unhealthy < 0 ||
-		(c.Total > 0 && (c.Healthy > c.Total || c.Unhealthy > c.Total || c.Healthy+c.Unhealthy > c.Total)) {
+		c.Healthy > c.Total || c.Unhealthy > c.Total-c.Healthy {
 		return errors.New("public status cache contains inconsistent model counts")
 	}
 	if c.ConsecutiveFailure < 0 || c.ConsecutiveFailure > 1000 {
@@ -559,6 +559,15 @@ func MigrateSnapshot(s *Snapshot) error {
 				}
 				if s.CacheAnalysis.Availability == "" {
 					s.CacheAnalysis.Availability = CacheTelemetryUnavailable
+				}
+			}
+			if s.CacheDiagnosis != nil {
+				for i := range s.CacheDiagnosis.CandidateCauses {
+					cause := &s.CacheDiagnosis.CandidateCauses[i]
+					if cause.Likelihood != nil {
+						cause.HeuristicScore = *cause.Likelihood
+						cause.Likelihood = nil
+					}
 				}
 			}
 			s.SchemaVersion = 3

@@ -2,6 +2,7 @@ package installer
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -226,6 +227,31 @@ func canonicalPath(path string) (string, error) {
 }
 
 func pathDigest(path string) (string, error) {
+	return pathDigestWithFraming(path, true)
+}
+
+func legacyPathDigest(path string) (string, error) {
+	return pathDigestWithFraming(path, false)
+}
+
+func pathDigestMatches(path, expected string) (bool, error) {
+	actual, err := pathDigest(path)
+	if err != nil {
+		return false, err
+	}
+	if actual == expected {
+		return true, nil
+	}
+	// Accept metadata written by pre-framing releases. Any subsequent
+	// successful install/uninstall writes the new framed digest.
+	legacy, legacyErr := legacyPathDigest(path)
+	if legacyErr != nil {
+		return false, legacyErr
+	}
+	return legacy == expected, nil
+}
+
+func pathDigestWithFraming(path string, framed bool) (string, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return "", err
@@ -277,6 +303,14 @@ func pathDigest(path string) (string, error) {
 	}
 	sort.Strings(files)
 	for _, rel := range files {
+		// Frame both path and content lengths. Without framing, a crafted
+		// directory can make (path A, data B) hash identically to a different
+		// path/data concatenation.
+		var length [8]byte
+		if framed {
+			binary.BigEndian.PutUint64(length[:], uint64(len(rel)))
+			_, _ = h.Write(length[:])
+		}
 		_, _ = io.WriteString(h, rel)
 		data, err := os.ReadFile(filepath.Join(path, rel))
 		if err != nil {
@@ -288,6 +322,10 @@ func pathDigest(path string) (string, error) {
 		total += uint64(len(data))
 		if total > maxArchiveTotalBytes {
 			return "", fmt.Errorf("directory exceeds the fingerprint size limit")
+		}
+		if framed {
+			binary.BigEndian.PutUint64(length[:], uint64(len(data)))
+			_, _ = h.Write(length[:])
 		}
 		_, _ = h.Write(data)
 	}

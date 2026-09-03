@@ -316,7 +316,7 @@ func (a *ClaudeAdapter) HandleStatusLineUpdateWithTrace(input *schema.ClaudeStat
 					CacheReadInputTokens:     latest.CacheReadInputTokens,
 					CacheCreationInputTokens: latest.CacheCreationInputTokens,
 					OutputTokens:             latest.OutputTokens,
-					RequestReference:         input.PromptID,
+					RequestReference:         secure.Redact(secure.SanitizeField(input.PromptID)),
 					EpochID:                  snap.CacheEpochID,
 					EpochReason:              snap.CacheEpochReason,
 				}

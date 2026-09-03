@@ -296,6 +296,9 @@ func ConsumeLaunchReceipt(path, expectedClient, expectedOrigin string) (*LaunchR
 	if err := json.Unmarshal(body, &receipt); err != nil || validateReceipt(receipt) != nil {
 		return nil, errors.New("invalid trace receipt contents")
 	}
+	if receipt.TraceID != strings.TrimSuffix(filepath.Base(path), ".json") {
+		return nil, errors.New("trace receipt identity does not match its filename")
+	}
 	if expectedClient != "" && receipt.Client != expectedClient || expectedOrigin != "" && receipt.EndpointOrigin != expectedOrigin {
 		return nil, errors.New("trace receipt does not match active client")
 	}

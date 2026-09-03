@@ -21,15 +21,16 @@ const (
 )
 
 type codexTraceOwnership struct {
-	SchemaVersion      int       `json:"schema_version"`
-	ConfigPath         string    `json:"config_path"`
-	ProviderID         string    `json:"provider_id"`
-	AddedMappings      []string  `json:"added_mappings"`
-	CreatedNestedTable bool      `json:"created_nested_table"`
-	Inline             bool      `json:"inline"`
-	BeforeFingerprint  string    `json:"before_fingerprint"`
-	AfterFingerprint   string    `json:"after_fingerprint"`
-	InstalledAt        time.Time `json:"installed_at"`
+	SchemaVersion           int       `json:"schema_version"`
+	ConfigPath              string    `json:"config_path"`
+	ProviderID              string    `json:"provider_id"`
+	AddedMappings           []string  `json:"added_mappings"`
+	CreatedNestedTable      bool      `json:"created_nested_table"`
+	Inline                  bool      `json:"inline"`
+	OriginalTrailingNewline bool      `json:"original_trailing_newline"`
+	BeforeFingerprint       string    `json:"before_fingerprint"`
+	AfterFingerprint        string    `json:"after_fingerprint"`
+	InstalledAt             time.Time `json:"installed_at"`
 }
 
 func codexTraceOwnershipPath(configPath string) string {
@@ -87,9 +88,17 @@ func loadCodexTraceOwnership(path string) (*codexTraceOwnership, bool, error) {
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return nil, false, errors.New("codex trace ownership metadata is not a regular file")
 	}
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return nil, false, err
+	}
+	data, readErr := io.ReadAll(io.LimitReader(f, maxCodexTraceOwnership+1))
+	closeErr := f.Close()
+	if readErr != nil {
+		return nil, false, readErr
+	}
+	if closeErr != nil {
+		return nil, false, closeErr
 	}
 	if len(data) > maxCodexTraceOwnership {
 		return nil, false, errors.New("codex trace ownership metadata is too large")
@@ -153,15 +162,16 @@ func canonicalExistingPath(path string) (string, error) {
 
 func ownershipForTrace(path, providerID string, before, after string, mapping CodexTraceMapping) codexTraceOwnership {
 	return codexTraceOwnership{
-		SchemaVersion:      codexTraceOwnershipSchema,
-		ConfigPath:         path,
-		ProviderID:         providerID,
-		AddedMappings:      append([]string(nil), mapping.Added...),
-		CreatedNestedTable: mapping.CreatedTable,
-		Inline:             mapping.Inline,
-		BeforeFingerprint:  fingerprintCodexConfig(before),
-		AfterFingerprint:   fingerprintCodexConfig(after),
-		InstalledAt:        time.Now().UTC(),
+		SchemaVersion:           codexTraceOwnershipSchema,
+		ConfigPath:              path,
+		ProviderID:              providerID,
+		AddedMappings:           append([]string(nil), mapping.Added...),
+		CreatedNestedTable:      mapping.CreatedTable,
+		Inline:                  mapping.Inline,
+		OriginalTrailingNewline: strings.HasSuffix(before, "\n"),
+		BeforeFingerprint:       fingerprintCodexConfig(before),
+		AfterFingerprint:        fingerprintCodexConfig(after),
+		InstalledAt:             time.Now().UTC(),
 	}
 }
 

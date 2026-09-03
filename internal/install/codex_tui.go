@@ -31,12 +31,13 @@ type CodexTUIStatus struct {
 }
 
 type codexTUIMetadata struct {
-	InstalledAt   time.Time `json:"installed_at"`
-	ConfigPath    string    `json:"config_path"`
-	HadPrevious   bool      `json:"had_previous"`
-	PreviousItems []string  `json:"previous_items,omitempty"`
-	PreviousLine  string    `json:"previous_line,omitempty"`
-	OwnedItems    []string  `json:"owned_items"`
+	InstalledAt             time.Time `json:"installed_at"`
+	ConfigPath              string    `json:"config_path"`
+	HadPrevious             bool      `json:"had_previous"`
+	PreviousItems           []string  `json:"previous_items,omitempty"`
+	PreviousLine            string    `json:"previous_line,omitempty"`
+	OwnedItems              []string  `json:"owned_items"`
+	OriginalTrailingNewline bool      `json:"original_trailing_newline"`
 }
 
 func codexTUIMetadataPath(home string) string {
@@ -83,6 +84,7 @@ func installCodexTUILocked(home, configPath string, stdout io.Writer) error {
 		return err
 	}
 	previousLine, _ := codexTUIStatusLineLine(contents)
+	originalTrailingNewline := strings.HasSuffix(contents, "\n")
 
 	metaPath := codexTUIMetadataPath(home)
 	existing, haveExisting, err := loadCodexTUIMetadata(metaPath)
@@ -105,6 +107,7 @@ func installCodexTUILocked(home, configPath string, stdout io.Writer) error {
 		previous = append([]string(nil), existing.PreviousItems...)
 		hadPrevious = existing.HadPrevious
 		previousLine = existing.PreviousLine
+		originalTrailingNewline = existing.OriginalTrailingNewline
 	}
 	owned := appendUniqueCodexTUIItems(current, "model-with-reasoning", "context-remaining", "current-dir")
 	newContents, err := setCodexTUIStatusLine(contents, owned)
@@ -124,12 +127,13 @@ func installCodexTUILocked(home, configPath string, stdout io.Writer) error {
 	}
 
 	meta := &codexTUIMetadata{
-		InstalledAt:   time.Now().UTC(),
-		ConfigPath:    configPath,
-		HadPrevious:   hadPrevious,
-		PreviousItems: previous,
-		PreviousLine:  previousLine,
-		OwnedItems:    owned,
+		InstalledAt:             time.Now().UTC(),
+		ConfigPath:              configPath,
+		HadPrevious:             hadPrevious,
+		PreviousItems:           previous,
+		PreviousLine:            previousLine,
+		OwnedItems:              owned,
+		OriginalTrailingNewline: originalTrailingNewline,
 	}
 	metaBytes, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
@@ -202,6 +206,10 @@ func UninstallCodexTUI(home, configPath string, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
+		if !meta.OriginalTrailingNewline {
+			restored = strings.TrimSuffix(restored, "\n")
+			restored = strings.TrimSuffix(restored, "\r")
+		}
 		if err := writeFileAtomic(configPath, []byte(restored), mode); err != nil {
 			return fmt.Errorf("restore codex config: %w", err)
 		}
@@ -253,10 +261,16 @@ func InspectCodexTUI(home, configPath string) (CodexTUIStatus, error) {
 }
 
 func readCodexTUIConfig(path string) (string, os.FileMode, error) {
-	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		return "", 0, errors.New("refusing to follow symlink for codex config")
-	} else if err != nil && !os.IsNotExist(err) {
-		return "", 0, err
+	info, lstatErr := os.Lstat(path)
+	if lstatErr == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", 0, errors.New("refusing to follow symlink for codex config")
+		}
+		if !info.Mode().IsRegular() {
+			return "", 0, errors.New("codex config is not a regular file")
+		}
+	} else if !os.IsNotExist(lstatErr) {
+		return "", 0, lstatErr
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -269,7 +283,7 @@ func readCodexTUIConfig(path string) (string, os.FileMode, error) {
 		return "", 0, errors.New("codex config exceeds the supported size limit")
 	}
 	mode := os.FileMode(0600)
-	if info, statErr := os.Stat(path); statErr == nil && info.Mode().Perm() != 0 {
+	if lstatErr == nil && info.Mode().Perm() != 0 {
 		mode = info.Mode().Perm()
 	}
 	return string(data), mode, nil
@@ -437,6 +451,11 @@ func setCodexTUIStatusLine(contents string, items []string) (string, error) {
 	if tuiIndex >= 0 {
 		if insertAt < 0 {
 			insertAt = len(lines)
+		}
+		// An existing [tui] table may end in an unterminated assignment.
+		// Terminate it before inserting status_line.
+		if insertAt == len(lines) && insertAt > 0 && lines[insertAt-1] != "" && !strings.HasSuffix(lines[insertAt-1], "\n") {
+			lines[insertAt-1] += "\n"
 		}
 		lines = append(lines, "")
 		copy(lines[insertAt+1:], lines[insertAt:])

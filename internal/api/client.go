@@ -635,7 +635,7 @@ func ValidateHealthResponse(h *HealthResponse) error {
 	if h.Total < 0 || h.Healthy < 0 || h.Unhealthy < 0 || h.PendingControlPlaneTransitions < 0 {
 		return errors.New("health counts must be non-negative")
 	}
-	if h.Healthy+h.Unhealthy > h.Total {
+	if h.Healthy > h.Total || h.Unhealthy > h.Total-h.Healthy {
 		return errors.New("health counts exceed total")
 	}
 	if h.LastCycleAt != "" {

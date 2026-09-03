@@ -16,9 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
-	"time"
 )
 
 func main() {
@@ -30,12 +28,6 @@ func main() {
 	commit := os.Args[2]
 	releaseDir := os.Args[3]
 	outPath := os.Args[4]
-	created, err := creationTimestamp()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "build timestamp: %v\n", err)
-		os.Exit(1)
-	}
-
 	// Collect all release artifacts with their SHA-256 digests.
 	var subjects []map[string]any
 	entries, err := os.ReadDir(releaseDir)
@@ -105,7 +97,6 @@ func main() {
 			},
 			"metadata": map[string]any{
 				"buildInvocationId": "make-release-" + version,
-				"buildStartedOn":    created,
 				"completeness": map[string]any{
 					"parameters":  true,
 					"environment": false,
@@ -143,15 +134,4 @@ func main() {
 		fmt.Fprintf(os.Stderr, "encode: %v\n", err)
 		os.Exit(1)
 	}
-}
-
-func creationTimestamp() (string, error) {
-	if raw := os.Getenv("SOURCE_DATE_EPOCH"); raw != "" {
-		seconds, err := strconv.ParseInt(raw, 10, 64)
-		if err != nil {
-			return "", fmt.Errorf("SOURCE_DATE_EPOCH must be an integer: %w", err)
-		}
-		return time.Unix(seconds, 0).UTC().Format(time.RFC3339), nil
-	}
-	return time.Now().UTC().Format(time.RFC3339), nil
 }

@@ -33,6 +33,15 @@ func currentTraceInfo(snap *schema.Snapshot, client string, activation runtime.A
 	if !activation.Active {
 		return nil
 	}
+	if snap != nil && snap.Trace != nil {
+		if snap.ActivationID == "" {
+			return nil
+		}
+		identity, err := activation.Identity(runtime.DefaultSaltLoader())
+		if err != nil || identity.DirName() != snap.ActivationID {
+			return nil
+		}
+	}
 	if snap != nil && snap.Trace != nil && snap.Trace.Enabled && snap.Provider.Confirmed && snap.Provider.Name == schema.ProviderFreeInference &&
 		snap.Trace.Verified && snap.Trace.Provider == schema.ProviderFreeInference && (snap.Trace.Client == "" || snap.Trace.Client == client) &&
 		snap.Trace.Header == tracing.SessionHeader && snap.Trace.Source != schema.TraceSourceNone && tracing.ValidateTraceID(snap.Trace.SessionID) {

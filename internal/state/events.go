@@ -145,6 +145,18 @@ func AppendEvent(paths Paths, clientType, sessionID string, ev Event) error {
 	}
 	line = append(line, '\n')
 
+	// Hold the per-session lifecycle lock as well as the event lock. Stale
+	// cleanup removes the whole directory under the lifecycle lock; using the
+	// same lock here prevents cleanup from deleting an append in flight.
+	sessionLock := NewFileLock(paths.SessionLock(clientType, sessionID))
+	if err := sessionLock.Acquire(); err != nil {
+		if IsLockBusy(err) {
+			atomic.AddInt64(&droppedEvents, 1)
+		}
+		return err
+	}
+	defer sessionLock.Release()
+
 	// Hold the per-session event lock so concurrent appends don't lose data
 	// during rotation (which replaces the file). The lock is NONBLOCKING
 	// because AppendEvent runs on the hook path with a tight latency budget. If the
@@ -193,6 +205,14 @@ func RotateEvents(paths Paths, clientType, sessionID string) error {
 	path := paths.SessionEvents(clientType, sessionID)
 	dir := paths.SessionDir(clientType, sessionID)
 	lockPath := path + ".lock"
+	sessionLock := NewFileLock(paths.SessionLock(clientType, sessionID))
+	if err := sessionLock.Acquire(); err != nil {
+		if IsLockBusy(err) {
+			return nil
+		}
+		return err
+	}
+	defer sessionLock.Release()
 
 	// Nonblocking: rotation runs on the hook path. If the lock is held,
 	// skip rotation this time — it will be retried on the next event.

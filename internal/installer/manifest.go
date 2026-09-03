@@ -37,7 +37,7 @@ var updaterHTTPClient = &http.Client{
 		if len(via) >= maxRedirects {
 			return fmt.Errorf("too many redirects")
 		}
-		if err := validateRemoteURL(req.URL.String()); err != nil {
+		if err := validateRemoteURLForRequest(req.URL.String(), true); err != nil {
 			return fmt.Errorf("redirect rejected: %w", err)
 		}
 		return nil
@@ -277,8 +277,16 @@ func DownloadTo(downloadURL, destPath string) (int64, error) {
 // validateRemoteURL limits installer inputs to HTTPS. Local HTTP is allowed
 // only for explicitly opted-in development and test endpoints.
 func validateRemoteURL(raw string) error {
+	return validateRemoteURLForRequest(raw, false)
+}
+
+// validateRemoteURLForRequest validates a manifest/download URL or a URL
+// reached through an HTTP redirect. Signed release CDNs commonly put their
+// authorization in the redirect query string; that is safe to retain after
+// the redirect target has passed the same scheme/host checks.
+func validateRemoteURLForRequest(raw string, allowQuery bool) error {
 	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" || u.User != nil || u.Fragment != "" || u.RawQuery != "" {
+	if err != nil || !u.IsAbs() || u.Host == "" || u.User != nil || u.Fragment != "" || (!allowQuery && u.RawQuery != "") {
 		return fmt.Errorf("invalid URL")
 	}
 	if u.Scheme == "https" {

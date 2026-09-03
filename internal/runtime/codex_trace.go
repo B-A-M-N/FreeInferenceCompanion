@@ -272,6 +272,12 @@ func ensureCodexTraceHeaderLocked(path, providerID string) (CodexTraceMapping, e
 		for _, wanted := range missing {
 			insert += "\"" + wanted.Header + "\" = \"" + wanted.Env + "\"" + tomlLineEnding(contents)
 		}
+		// SplitAfter leaves an unterminated final line without a separator.
+		// Add that separator before inserting a child assignment so the new
+		// mapping cannot be glued to the existing TOML value.
+		if end == len(lines) && end > 0 && lines[end-1] != "" && !strings.HasSuffix(lines[end-1], "\n") {
+			lines[end-1] += tomlLineEnding(contents)
+		}
 		lines = append(lines[:end], append([]string{insert}, lines[end:]...)...)
 		if err := atomicRewriteCodex(path, strings.Join(lines, ""), info.Mode().Perm()); err != nil {
 			return CodexTraceMapping{}, err
@@ -422,7 +428,7 @@ func backupCodexTraceConfigLocked(path string) error {
 // by explicit setup. The full backup is never used as the restore source, so
 // unrelated edits made after setup remain intact.
 func RestoreCodexTraceConfig(path, providerID string) error {
-	if !validCodexName(providerID) {
+	if providerID != "" && !validCodexName(providerID) {
 		return errors.New("invalid codex provider name")
 	}
 	lock, err := acquireCodexTraceLock(path)
@@ -441,6 +447,9 @@ func RestoreCodexTraceConfig(path, providerID string) error {
 	}
 	if !found {
 		return errors.New("no FreeInference codex trace ownership metadata exists")
+	}
+	if providerID == "" {
+		providerID = ownership.ProviderID
 	}
 	if ownership.ConfigPath != canonical || ownership.ProviderID != providerID {
 		return errors.New("codex trace ownership belongs to a different configuration")
@@ -549,7 +558,12 @@ func removeOwnedCodexMappings(contents, providerID string, ownership codexTraceO
 	if ownership.CreatedNestedTable {
 		removeEmptyCodexNestedTable(lines, nestedTable, nestedTableQuoted)
 	}
-	return strings.Join(lines, ""), nil
+	updated := strings.Join(lines, "")
+	if !ownership.OriginalTrailingNewline {
+		updated = strings.TrimSuffix(updated, "\n")
+		updated = strings.TrimSuffix(updated, "\r")
+	}
+	return updated, nil
 }
 
 func removeInlineOwnedMappings(raw string, owned map[string]string, removed map[string]bool) (string, bool, error) {

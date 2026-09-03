@@ -332,6 +332,9 @@ type RankedCause struct {
 	Reason         CacheReasonCode `json:"reason"`
 	Label          string          `json:"label"`
 	HeuristicScore float64         `json:"heuristic_score"` // 0.0 to 1.0
+	// Likelihood was the v2 name. It is read only to migrate old snapshots
+	// and is cleared before the snapshot is used or written again.
+	Likelihood *float64 `json:"likelihood,omitempty"`
 }
 
 // CacheDiagnosis is the complete structured diagnosis for cache behavior.

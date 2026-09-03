@@ -175,7 +175,7 @@ package: build-all
 # compares every generated file. This keeps the reproducibility claim honest,
 # including generated SBOM and provenance metadata.
 package-repro-check: package
-	@tmp="$$(mktemp -d "$${TMPDIR:-/tmp}/freeinference-package-repro.XXXXXX")"; \
+	@set -e; tmp="$$(mktemp -d "$${TMPDIR:-/tmp}/freeinference-package-repro.XXXXXX")"; \
 	trap 'rm -rf "$$tmp"' EXIT; \
 	cp -a $(RELEASE_DIR) "$$tmp/first"; \
 	$(MAKE) package VERSION=$(VERSION) COMMIT=$(COMMIT); \

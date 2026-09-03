@@ -92,6 +92,14 @@ func NewRefresher(client *api.Client, paths state.Paths, healthURL string) *Refr
 // WorkerRefresh runs one refresh worker under a non-blocking process lock.
 // Concurrent workers coalesce: the second process to arrive skips immediately.
 func (r *Refresher) WorkerRefresh(worker string) *RefreshResult {
+	return r.workerRefresh(worker, true)
+}
+
+// workerRefresh performs a refresh with an explicit caller mode. Automatic
+// detached workers consume the shared provider request slot; a synchronous
+// command is already an explicit user action and must be allowed to refresh
+// each stale resource it reports.
+func (r *Refresher) workerRefresh(worker string, automatic bool) *RefreshResult {
 	result := &RefreshResult{Worker: worker}
 
 	if worker != WorkerModels && worker != WorkerHealth && worker != WorkerAccountUsage && worker != WorkerPublicStatus {
@@ -134,10 +142,17 @@ func (r *Refresher) WorkerRefresh(worker string) *RefreshResult {
 			result.SkipReason = "cache fresh"
 			return result
 		}
-		if !reserveAutomaticRefresh(r.Paths, now) {
-			result.Skipped = true
-			result.SkipReason = "automatic refresh cooldown"
-			return result
+		if automatic {
+			allowed, reserveErr := reserveAutomaticRefresh(r.Paths, now)
+			if reserveErr != nil {
+				result.Error = "refresh throttle unavailable"
+				return result
+			}
+			if !allowed {
+				result.Skipped = true
+				result.SkipReason = "automatic refresh cooldown"
+				return result
+			}
 		}
 		r.refreshModels(result, now)
 	case WorkerHealth:
@@ -151,10 +166,17 @@ func (r *Refresher) WorkerRefresh(worker string) *RefreshResult {
 			result.SkipReason = "cache fresh"
 			return result
 		}
-		if !reserveAutomaticRefresh(r.Paths, now) {
-			result.Skipped = true
-			result.SkipReason = "automatic refresh cooldown"
-			return result
+		if automatic {
+			allowed, reserveErr := reserveAutomaticRefresh(r.Paths, now)
+			if reserveErr != nil {
+				result.Error = "refresh throttle unavailable"
+				return result
+			}
+			if !allowed {
+				result.Skipped = true
+				result.SkipReason = "automatic refresh cooldown"
+				return result
+			}
 		}
 		r.refreshHealth(result, now)
 	case WorkerAccountUsage:
@@ -174,10 +196,17 @@ func (r *Refresher) WorkerRefresh(worker string) *RefreshResult {
 			result.SkipReason = "cache fresh"
 			return result
 		}
-		if !reserveAutomaticRefresh(r.Paths, now) {
-			result.Skipped = true
-			result.SkipReason = "automatic refresh cooldown"
-			return result
+		if automatic {
+			allowed, reserveErr := reserveAutomaticRefresh(r.Paths, now)
+			if reserveErr != nil {
+				result.Error = "refresh throttle unavailable"
+				return result
+			}
+			if !allowed {
+				result.Skipped = true
+				result.SkipReason = "automatic refresh cooldown"
+				return result
+			}
 		}
 		r.refreshAccountUsage(result, now)
 	case WorkerPublicStatus:
@@ -203,14 +232,14 @@ func (r *Refresher) RefreshIfStale() *RefreshResult {
 	gs, _ := state.LoadGlobal(r.Paths)
 
 	if modelsStale(gs, now) && !breakerOpen(gs, WorkerModels, now) {
-		res := r.WorkerRefresh(WorkerModels)
+		res := r.workerRefresh(WorkerModels, false)
 		result.ModelsRefreshed = res.ModelsRefreshed
 		if res.Error != "" {
 			result.Error = res.Error
 		}
 	}
 	if r.HealthURL != "" && healthStale(gs, now) && !breakerOpen(gs, WorkerHealth, now) {
-		res := r.WorkerRefresh(WorkerHealth)
+		res := r.workerRefresh(WorkerHealth, false)
 		result.HealthRefreshed = res.HealthRefreshed
 		if res.Error != "" && result.Error == "" {
 			result.Error = res.Error
@@ -219,7 +248,7 @@ func (r *Refresher) RefreshIfStale() *RefreshResult {
 	if r.Client != nil && r.Client.APIKey() != "" && accountUsageCapabilityRefreshable(gs) &&
 		!breakerOpen(gs, WorkerAccountUsage, now) {
 		if accountUsageStale(gs, now) {
-			res := r.WorkerRefresh(WorkerAccountUsage)
+			res := r.workerRefresh(WorkerAccountUsage, false)
 			result.AccountUsageRefreshed = res.AccountUsageRefreshed
 			result.AccountUsageCapability = res.AccountUsageCapability
 			if res.Error != "" && result.Error == "" {
@@ -228,7 +257,7 @@ func (r *Refresher) RefreshIfStale() *RefreshResult {
 		}
 	}
 	if publicStatusStale(gs, now) && !breakerOpen(gs, WorkerPublicStatus, now) {
-		res := r.WorkerRefresh(WorkerPublicStatus)
+		res := r.workerRefresh(WorkerPublicStatus, false)
 		result.PublicStatusRefreshed = res.PublicStatusRefreshed
 		if res.Error != "" && result.Error == "" {
 			result.Error = res.Error
@@ -371,9 +400,8 @@ func publicStatusStale(gs *schema.GlobalState, now time.Time) bool {
 	return false
 }
 
-func reserveAutomaticRefresh(paths state.Paths, now time.Time) bool {
-	allowed, err := state.ReserveRefreshSlot(paths, now, AutomaticRefreshMinInterval)
-	return err == nil && allowed
+func reserveAutomaticRefresh(paths state.Paths, now time.Time) (bool, error) {
+	return state.ReserveRefreshSlot(paths, now, AutomaticRefreshMinInterval)
 }
 
 func breakerOpen(gs *schema.GlobalState, endpoint string, now time.Time) bool {

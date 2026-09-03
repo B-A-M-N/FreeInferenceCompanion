@@ -246,20 +246,25 @@ func Load() (*Config, error) {
 	if err != nil {
 		return &cfg, err
 	}
-	info, err := os.Lstat(path)
+	f, err := openConfigNoFollow(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return &cfg, nil
 		}
+		return &cfg, fmt.Errorf("open config: %w", err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
 		return &cfg, fmt.Errorf("stat config: %w", err)
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+	if !info.Mode().IsRegular() {
 		return &cfg, fmt.Errorf("config is not a regular file")
 	}
 	if info.Size() > maxConfigBytes {
 		return &cfg, fmt.Errorf("config exceeds the supported size limit")
 	}
-	data, err := os.ReadFile(path)
+	data, err := io.ReadAll(io.LimitReader(f, maxConfigBytes+1))
 	if err != nil {
 		return &cfg, fmt.Errorf("read config: %w", err)
 	}

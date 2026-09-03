@@ -235,7 +235,6 @@ func (a *CodexAdapter) HandleStop(sessionID string, inputs ...*schema.CodexHookI
 		func(snap *schema.Snapshot) error {
 			input := firstCodexInput(inputs)
 			if input != nil {
-				modelChanged = observeCodexModel(snap, codexInputModel(input), "Stop", now)
 				turnID := sanitizeCodexTurnID(input.TurnID)
 				if turnID != "" && snap.Activity.TurnID != "" && turnID != snap.Activity.TurnID {
 					return nil
@@ -243,6 +242,9 @@ func (a *CodexAdapter) HandleStop(sessionID string, inputs ...*schema.CodexHookI
 				if turnID != "" && snap.Activity.TurnID == "" && snap.Activity.LastTurnID == turnID {
 					return nil
 				}
+				// Only an accepted Stop may update the model. Stale or duplicate
+				// lifecycle callbacks are deliberately side-effect free.
+				modelChanged = observeCodexModel(snap, codexInputModel(input), "Stop", now)
 			}
 			inactive := false
 			snap.Activity.TurnActive = &inactive

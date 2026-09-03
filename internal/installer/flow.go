@@ -52,10 +52,7 @@ func installOrUpdate(opts Options, stdout, stderr io.Writer, update bool) (*Resu
 			return nil, err
 		}
 	}
-	installedVersion := ""
-	if metadataFound && managedBinaryExists(metadata, paths) {
-		installedVersion = metadata.InstalledVersion
-	}
+	installedVersion := installedComponentsVersion(metadata, metadataFound, paths, opts)
 	manifest, err := FetchManifest(opts.ManifestURL)
 	if err != nil {
 		return nil, fmt.Errorf("fetch manifest: %w", err)
@@ -119,11 +116,11 @@ func installOrUpdate(opts Options, stdout, stderr io.Writer, update bool) (*Resu
 			if err := validateMetadataPaths(latest, paths); err != nil {
 				return err
 			}
-			if managedBinaryExists(latest, paths) {
-				cmp := compareVersions(manifest.Version, latest.InstalledVersion)
+			if latestVersion := installedComponentsVersion(latest, found, paths, opts); latestVersion != "" {
+				cmp := compareVersions(manifest.Version, latestVersion)
 				if cmp < 0 || (cmp == 0 && !opts.Force && requestedComponentsReady(latest, paths, manifest.Version, opts)) {
-					result.Version = latest.InstalledVersion
-					result.OldVersion = latest.InstalledVersion
+					result.Version = latestVersion
+					result.OldVersion = latestVersion
 					result.AlreadyLatest = true
 					return nil
 				}
@@ -192,6 +189,27 @@ func managedBinaryExists(metadata *InstallationMetadata, paths Paths) bool {
 	return componentPathReady(metadata, metadataVersion(metadata, "binary"), paths.BinaryPath, true)
 }
 
+// installedComponentsVersion returns the version that protects the component
+// set this operation may replace. In particular, a plugin-only install must
+// still honor the installed plugin version even when no managed binary exists.
+func installedComponentsVersion(metadata *InstallationMetadata, found bool, paths Paths, opts Options) string {
+	if !found || metadata == nil || metadata.InstalledVersion == "" {
+		return ""
+	}
+	if !opts.NoBin && managedBinaryExists(metadata, paths) && metadata.BinaryVersion == metadata.InstalledVersion {
+		return metadata.InstalledVersion
+	}
+	if !opts.NoPlugin && metadata.ClaudePluginVersion == metadata.InstalledVersion &&
+		metadata.CodexPluginVersion == metadata.InstalledVersion &&
+		metadata.CodexMarketplaceVersion == metadata.InstalledVersion &&
+		directoryComponentReady(metadata, "claude", paths.claudePluginPath()) &&
+		directoryComponentReady(metadata, "codex", paths.codexPluginPath()) &&
+		directoryComponentReady(metadata, "marketplace", paths.CodexMarketplaceDir) {
+		return metadata.InstalledVersion
+	}
+	return ""
+}
+
 func metadataVersion(metadata *InstallationMetadata, component string) string {
 	if metadata == nil {
 		return ""
@@ -229,8 +247,8 @@ func componentPathReady(metadata *InstallationMetadata, componentVersion, expect
 	if err != nil || (binary && !info.Mode().IsRegular()) {
 		return false
 	}
-	digest, err := pathDigest(expectedPath)
-	return err == nil && digest == recordedDigest
+	matched, err := pathDigestMatches(expectedPath, recordedDigest)
+	return err == nil && matched
 }
 
 func directoryComponentReady(metadata *InstallationMetadata, component, expectedPath string) bool {
@@ -256,8 +274,8 @@ func directoryComponentReady(metadata *InstallationMetadata, component, expected
 	if err != nil || !info.IsDir() {
 		return false
 	}
-	digest, err := pathDigest(expectedPath)
-	return err == nil && digest == recordedDigest
+	matched, err := pathDigestMatches(expectedPath, recordedDigest)
+	return err == nil && matched
 }
 
 func requestedComponentsReady(metadata *InstallationMetadata, paths Paths, version string, opts Options) bool {
@@ -466,8 +484,8 @@ func validateOwnedDirectory(path string, metadata *InstallationMetadata, found b
 		return fmt.Errorf("owned plugin path is not a directory: %s", path)
 	}
 	if expectedDigest != "" {
-		actual, err := pathDigest(path)
-		if err != nil || actual != expectedDigest {
+		matched, err := pathDigestMatches(path, expectedDigest)
+		if err != nil || !matched {
 			return fmt.Errorf("plugin path changed after installation: %s", path)
 		}
 	}
@@ -507,8 +525,8 @@ func validateBinaryOwnership(paths Paths, metadata *InstallationMetadata, found 
 	if metadata.ManagedBinarySHA256 == "" {
 		return fmt.Errorf("owned binary has no recorded checksum: %s", paths.BinaryPath)
 	}
-	digest, err := pathDigest(paths.BinaryPath)
-	if err != nil || digest != metadata.ManagedBinarySHA256 {
+	matched, err := pathDigestMatches(paths.BinaryPath, metadata.ManagedBinarySHA256)
+	if err != nil || !matched {
 		return fmt.Errorf("binary changed after installation: %s", paths.BinaryPath)
 	}
 	return nil
@@ -546,8 +564,8 @@ func validateShimOwnership(paths Paths, metadata *InstallationMetadata, found bo
 	if !info.Mode().IsRegular() || metadata.ManagedBinarySHA256 == "" {
 		return fmt.Errorf("refusing to replace a foreign shim %s", path)
 	}
-	digest, err := pathDigest(path)
-	if err != nil || digest != metadata.ManagedBinarySHA256 {
+	matched, err := pathDigestMatches(path, metadata.ManagedBinarySHA256)
+	if err != nil || !matched {
 		return fmt.Errorf("refusing to replace a foreign shim %s", path)
 	}
 	return nil
@@ -749,8 +767,8 @@ func validateOwnedFile(path, expectedDigest string, allowMissing bool) error {
 		return fmt.Errorf("owned file is not a regular file: %s", path)
 	}
 	if expectedDigest != "" {
-		actual, err := pathDigest(path)
-		if err != nil || actual != expectedDigest {
+		matched, err := pathDigestMatches(path, expectedDigest)
+		if err != nil || !matched {
 			return fmt.Errorf("owned file changed after installation: %s", path)
 		}
 	}
@@ -793,8 +811,8 @@ func validateOwnedDirectoryForRemoval(path, expectedDigest string) error {
 		return fmt.Errorf("owned directory is not a directory: %s", path)
 	}
 	if expectedDigest != "" {
-		actual, err := pathDigest(path)
-		if err != nil || actual != expectedDigest {
+		matched, err := pathDigestMatches(path, expectedDigest)
+		if err != nil || !matched {
 			return fmt.Errorf("owned directory changed after installation: %s", path)
 		}
 	}

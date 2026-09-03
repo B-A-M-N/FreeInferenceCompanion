@@ -131,7 +131,7 @@ func (s *PublicStatusResponse) Validate() error {
 	if s.Total < 0 || s.Healthy < 0 || s.Unhealthy < 0 {
 		return errors.New("public status response contains negative model counts")
 	}
-	if s.Total > 0 && (s.Healthy > s.Total || s.Unhealthy > s.Total || s.Healthy+s.Unhealthy > s.Total) {
+	if s.Healthy > s.Total || s.Unhealthy > s.Total-s.Healthy {
 		return errors.New("public status response contains inconsistent model counts")
 	}
 	if s.Total == 0 && len(s.Models) == 0 {
