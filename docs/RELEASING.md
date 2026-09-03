@@ -40,3 +40,37 @@ the explicitly unsigned `provenance.unsigned.intoto.jsonl` file (sign it with
 the release-attestation process before publication), and confirm that the compatibility
 and security documents match the release. Never package a dirty tree or put
 credentials in a config fixture.
+
+## v0.1.0 publication sequence
+
+The following is the exact operator sequence for a release from `master`.
+It is intentionally not run by repository automation or by this audit:
+
+```bash
+git fetch origin --tags
+git switch master
+git pull --ff-only origin master
+git status --short --branch
+
+# Run the complete gate and produce the exact release artifacts locally.
+VERSION=v0.1.0 make release
+git diff --check
+(cd release && sha256sum -c checksums.txt)  # use shasum -a 256 on macOS
+
+# Review release/, CHANGELOG.md, and the unsigned provenance file.
+git tag -a v0.1.0 -m "Release FreeInference Companion v0.1.0"
+git push origin v0.1.0
+
+# The tag workflow creates a draft release and uploads release/*.
+gh run list --workflow ci.yml --limit 5
+gh run watch <release-build-run-id>
+gh release view v0.1.0
+gh release edit v0.1.0 --title "FreeInference Companion v0.1.0" \
+  --notes-file CHANGELOG.md --draft=false
+```
+
+If the repository requires signed tags as a separate policy, replace `git tag
+-a` with `git tag -s` after confirming the release key. Do not publish the
+release until the tag workflow is green, the draft assets and checksums have
+been inspected, and the unsigned provenance file has been handled according
+to the project's attestation policy.

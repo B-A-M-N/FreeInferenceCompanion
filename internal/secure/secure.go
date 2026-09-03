@@ -203,3 +203,10 @@ func SanitizeField(s string) string {
 	}
 	return s
 }
+
+// SafeField applies both output-safe character filtering and secret-shape
+// redaction. Use it for untrusted client/provider strings that may be written
+// to persistent state as well as displayed later.
+func SafeField(s string) string {
+	return Redact(SanitizeField(s))
+}

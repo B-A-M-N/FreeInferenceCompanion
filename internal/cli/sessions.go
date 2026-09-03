@@ -58,7 +58,7 @@ func cmdSessions(paths state.Paths, args []string, stdout, stderr io.Writer) int
 			entries = append(entries, sessionEntry{
 				Client:      e.Client,
 				SessionID:   displaySessionID(e.SessionID, reveal),
-				ModelID:     secure.SanitizeField(e.ModelID),
+				ModelID:     secure.SafeField(e.ModelID),
 				Status:      e.Status,
 				LastEventAt: e.LastEventAt.Format(time.RFC3339),
 			})
@@ -75,7 +75,7 @@ func cmdSessions(paths state.Paths, args []string, stdout, stderr io.Writer) int
 		if len(sessionID) > 40 {
 			sessionID = sessionID[:37] + "..."
 		}
-		model := secure.SanitizeField(e.ModelID)
+		model := secure.SafeField(e.ModelID)
 		if len(model) > 20 {
 			model = model[:17] + "..."
 		}
@@ -214,7 +214,7 @@ func printSnapshot(stdout, stderr io.Writer, snap *schema.Snapshot, gs *schema.G
 }
 
 func writeHistoricalSnapshotJSON(stdout io.Writer, snap *schema.Snapshot, reveal, runtimeActive bool, reason string) {
-	provider := secure.SanitizeField(snap.Provider.Name)
+	provider := secure.SafeField(snap.Provider.Name)
 	if !snap.Provider.Confirmed {
 		provider = "unknown (unconfirmed)"
 	}
@@ -223,9 +223,9 @@ func writeHistoricalSnapshotJSON(stdout io.Writer, snap *schema.Snapshot, reveal
 		"runtime_active": runtimeActive,
 		"reason":         reason,
 		"session_id":     displaySessionID(snap.Session.ID, reveal),
-		"client":         secure.SanitizeField(snap.Client.Type),
-		"session_status": secure.SanitizeField(snap.Session.Status),
-		"model_id":       secure.SanitizeField(snap.Model.ID),
+		"client":         secure.SafeField(snap.Client.Type),
+		"session_status": secure.SafeField(snap.Session.Status),
+		"model_id":       secure.SafeField(snap.Model.ID),
 		"provider":       provider,
 	}
 	enc := json.NewEncoder(stdout)

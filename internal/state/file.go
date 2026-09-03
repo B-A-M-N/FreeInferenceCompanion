@@ -604,12 +604,12 @@ func sanitizeSnapshotFailure(s *schema.Snapshot) {
 		return
 	}
 	f := s.LastFailure
-	f.Category = secure.SanitizeField(f.Category)
-	f.Source = secure.SanitizeField(f.Source)
-	f.TransportClass = secure.Redact(secure.SanitizeField(f.TransportClass))
-	f.ProviderErrorType = secure.Redact(secure.SanitizeField(f.ProviderErrorType))
-	f.ErrorOrigin = secure.Redact(secure.SanitizeField(f.ErrorOrigin))
-	f.RequestReference = secure.Redact(secure.SanitizeField(f.RequestReference))
+	f.Category = secure.SafeField(f.Category)
+	f.Source = secure.SafeField(f.Source)
+	f.TransportClass = secure.SafeField(f.TransportClass)
+	f.ProviderErrorType = secure.SafeField(f.ProviderErrorType)
+	f.ErrorOrigin = secure.SafeField(f.ErrorOrigin)
+	f.RequestReference = secure.SafeField(f.RequestReference)
 	if f.HTTPStatus != nil && (*f.HTTPStatus < 400 || *f.HTTPStatus > 599) {
 		f.HTTPStatus = nil
 	}

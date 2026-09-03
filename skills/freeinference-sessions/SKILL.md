@@ -18,58 +18,36 @@ freeinference sessions --json
 
 ### Listing sessions
 
-The command returns an array of session objects with:
-
-- `id`: unique session identifier
-- `status`: active, completed, interrupted, errored
-- `model`: model name used for the session
-- `provider`: provider name and detection source
-- `started`: ISO 8601 start time
-- `tokens`: total tokens consumed in the session
-- `contextPeak`: peak context window usage (tokens)
-- `contextLimit`: context window limit for the model
-- `events`: list of notable events (model changes, errors, cache misses)
+The command returns an array of compact session entries with client, masked
+session ID, model, status, and last-event time. It is a session index, not a
+full transcript or per-turn history.
 
 ### Example output
 
 ```json
-{
-  "sessions": [
-    {
-      "id": "sess_abc123",
-      "status": "active",
-      "model": "minimax-m3",
-      "provider": "freeinference (FREEINFERENCE_API_KEY)",
-      "started": "2026-07-29T14:00:00Z",
-      "tokens": 1245000,
-      "contextPeak": 890000,
-      "contextLimit": 1000000,
-      "events": [
-        {"time": "2026-07-29T14:00:00Z", "type": "started", "detail": "session begins"},
-        {"time": "2026-07-29T14:15:00Z", "type": "model_change", "detail": "switched to minimax-m3"},
-        {"time": "2026-07-29T15:30:00Z", "type": "pressure_warn", "detail": "context 72% used"}
-      ]
-    }
-  ],
-  "total": 1,
-  "oldest": "2026-07-29T14:00:00Z",
-  "newest": "2026-07-29T15:45:00Z"
-}
+[
+  {
+    "client": "claude-code",
+    "session_id": "sess_…abc123",
+    "model_id": "minimax-m3",
+    "status": "active",
+    "last_event_at": "2026-07-29T15:45:00Z"
+  }
+]
 ```
 
 ### Inspecting a specific session
 
-Use `freeinference sessions --json --session <id>` to inspect a specific session:
+Use `freeinference status --session <id>` or
+`freeinference report --session <id>` for a selected session:
 
 ```bash
-freeinference sessions --json --session sess_abc123
+freeinference status --session sess_abc123 --level detailed
+freeinference report --session sess_abc123 --format markdown
 ```
 
-This returns the same structure but focused on one session with additional detail:
-- Token usage breakdown by turn
-- Context pressure timeline
-- Error details if any
-- Cache metrics per turn
+The session index itself remains compact; detailed context, cache, compaction,
+and failure data belongs to the snapshot/report surfaces.
 
 ### Showing token usage
 
@@ -105,4 +83,5 @@ Events capture notable state changes during a session:
 - Without `--session`, the command lists all sessions in reverse chronological order (newest first).
 - The active session (if any) is marked with `"status": "active"`.
 - Session data is stored locally and is not sent to FreeInference servers.
-- If `freeinference sessions --json` is not yet implemented, use `freeinference status --json` for the current session and suggest filing a feature request for session history.
+- The session index does not include prompts, responses, or full event history;
+  inspect a selected session with `freeinference report --session <id>`.
