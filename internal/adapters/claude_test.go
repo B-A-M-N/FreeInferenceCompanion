@@ -1,12 +1,14 @@
 package adapters
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/b-a-m-n/freeinference-companion/internal/runtime"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
@@ -16,16 +18,126 @@ func testPaths(t *testing.T) state.Paths {
 	return state.NewPathsWithDir(t.TempDir())
 }
 
+func TestCapturedClaudeStatusLineFixtures(t *testing.T) {
+	for _, env := range []string{"FREEINFERENCE_BASE_URL", "FREEINFERENCE_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_KEY"} {
+		t.Setenv(env, "")
+	}
+	t.Setenv("ANTHROPIC_BASE_URL", "https://freeinference.org/anthropic")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "fixture-key")
+	activation := runtime.EvaluateForClient(runtime.ClientClaudeCode)
+	if !activation.Active {
+		t.Fatalf("fixture activation inactive: %+v", activation)
+	}
+
+	paths := testPaths(t)
+	adapter := NewClaudeAdapter(paths)
+	fixtureNames := []string{
+		"first-launch.json", "cache-hit.json", "cache-hit.json",
+		"same-tuple-response.json", "cache-miss.json", "cache-creation.json",
+	}
+	for _, name := range fixtureNames {
+		body, err := os.ReadFile(filepath.Join("testdata", "claude-statusline", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		input, err := adapter.ParseStatusLineInput(strings.NewReader(string(body)))
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		if err := adapter.HandleStatusLineUpdateWith(input, input.SessionID, activation); err != nil {
+			t.Fatalf("handle %s: %v", name, err)
+		}
+	}
+	hookBody, err := os.ReadFile(filepath.Join("testdata", "claude-hooks", "post-compact.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hookInput schema.ClaudeHookInput
+	if err := json.Unmarshal(hookBody, &hookInput); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.HandlePostCompact(&hookInput, hookInput.SessionID); err != nil {
+		t.Fatalf("handle PostCompact: %v", err)
+	}
+	for _, name := range []string{"post-compact.json", "partial.json", "old-client.json"} {
+		body, err := os.ReadFile(filepath.Join("testdata", "claude-statusline", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		input, err := adapter.ParseStatusLineInput(strings.NewReader(string(body)))
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		if err := adapter.HandleStatusLineUpdateWith(input, input.SessionID, activation); err != nil {
+			t.Fatalf("handle %s: %v", name, err)
+		}
+	}
+
+	snap := loadClaude(t, paths, "fixture-session")
+	if snap.CacheAnalysis == nil {
+		t.Fatal("fixture pipeline did not produce cache analysis")
+	}
+	if got, want := snap.CacheAnalysis.ObservationCount, 7; got != want {
+		t.Errorf("observed samples = %d, want %d", got, want)
+	}
+	if got, want := snap.CacheAnalysis.AnalysisWindowCount, 3; got != want {
+		t.Errorf("analysis window samples = %d, want %d", got, want)
+	}
+	if got, want := snap.CacheAnalysis.UsableSampleCount, 2; got != want {
+		t.Errorf("usable samples = %d, want %d", got, want)
+	}
+	if snap.LiveContext == nil || snap.LiveContext.TotalTokenSemantics != schema.TokenSemanticsCumulativeSession {
+		t.Errorf("old client semantics not preserved: %+v", snap.LiveContext)
+	}
+}
+
+func TestCapturedPostModelSwitchStartsCacheEpoch(t *testing.T) {
+	confirmFreeInference(t)
+	paths := testPaths(t)
+	adapter := NewClaudeAdapter(paths)
+	activation := runtime.Activation{Active: true, Client: runtime.ClientClaudeCode, RuntimeKind: runtime.RuntimeAnthropic,
+		Origin: "https://freeinference.org", EndpointURL: "https://freeinference.org/anthropic", CredentialSource: runtime.CredAnthropicAuthToken}
+	if err := adapter.HandleSessionStartWith(&schema.ClaudeHookInput{SessionID: "fixture-session", Model: "glm-5.1"}, activation); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(filepath.Join("testdata", "claude-hooks", "post-model-switch.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var input schema.ClaudeHookInput
+	if err := json.Unmarshal(body, &input); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.HandlePostModelSwitch(&input, input.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	snap := loadClaude(t, paths, input.SessionID)
+	if snap.Model.ID != "minimax-m3" || snap.CacheEpochReason != "model_switch" {
+		t.Errorf("model switch not applied: model=%q epoch=%q", snap.Model.ID, snap.CacheEpochReason)
+	}
+}
+
 func confirmFreeInference(t *testing.T) {
 	t.Helper()
-	for _, env := range []string{"ANTHROPIC_BASE_URL", "OPENAI_BASE_URL"} {
+	for _, env := range []string{"OPENAI_BASE_URL", "OPENAI_API_KEY", "FREEINFERENCE_BASE_URL", "FREEINFERENCE_API_KEY"} {
 		t.Setenv(env, "")
 	}
 	t.Setenv("FI_PROVIDER", "")
-	// P0-1: activation requires BOTH an approved FreeInference endpoint AND
-	// a credential. Key-only activation is no longer permitted.
-	t.Setenv("FREEINFERENCE_BASE_URL", "https://freeinference.org/v1")
-	t.Setenv("FREEINFERENCE_API_KEY", "hyi-test-key-12345")
+	// Claude activation is client-specific: both the Anthropic-compatible
+	// route and its runtime credential must be present.
+	t.Setenv("ANTHROPIC_BASE_URL", "https://freeinference.org/anthropic")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "anthropic-test-key-12345")
+	// Codex activation likewise requires the selected provider's config and
+	// env_key. Keeping this fixture here lets the deprecated adapter entry
+	// points exercise their client-specific fallbacks without ambient config.
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Setenv("CODEX_PROFILE", "")
+	t.Setenv("CODEX_FI_KEY", "codex-test-key-12345")
+	config := []byte("model_provider = \"freeinference\"\n\n[model_providers.freeinference]\nbase_url = \"https://freeinference.org/v1\"\nenv_key = \"CODEX_FI_KEY\"\n")
+	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), config, 0600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func unconfirmProvider(t *testing.T) {
@@ -34,9 +146,13 @@ func unconfirmProvider(t *testing.T) {
 	t.Setenv("FREEINFERENCE_API_KEY", "")
 	t.Setenv("FREEINFERENCE_BASE_URL", "")
 	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
 	t.Setenv("OPENAI_API_KEY", "")
 	t.Setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
 	t.Setenv("OPENAI_BASE_URL", "")
+	t.Setenv("CODEX_HOME", "")
+	t.Setenv("CODEX_PROFILE", "")
+	t.Setenv("CODEX_FI_KEY", "")
 }
 
 func loadClaude(t *testing.T, paths state.Paths, sessionID string) *schema.Snapshot {
@@ -52,6 +168,7 @@ func statusInput(sessionID, modelID string, totalIn, totalOut, ctxSize int64, us
 	return &schema.ClaudeStatusLineInput{
 		Model:     schema.ModelStatus{ID: modelID, DisplayName: "Display " + modelID},
 		SessionID: sessionID,
+		Version:   "2.1.132",
 		ContextWindow: schema.ContextWindowStatus{
 			TotalInputTokens:  &totalIn,
 			TotalOutputTokens: &totalOut,
@@ -64,6 +181,39 @@ func statusInput(sessionID, modelID string, totalIn, totalOut, ctxSize int64, us
 			ContextWindowSize: ctxSize,
 			UsedPercentage:    &usedPct,
 		},
+	}
+}
+
+func TestClaudeTokenSemanticsBoundary(t *testing.T) {
+	tests := []struct {
+		version string
+		want    schema.TokenSemantics
+	}{
+		{"2.1.131", schema.TokenSemanticsCumulativeSession},
+		{"2.1.132", schema.TokenSemanticsCurrentContext},
+		{"2.2.0", schema.TokenSemanticsCurrentContext},
+		{"", schema.TokenSemanticsUnknown},
+		{"not-a-version", schema.TokenSemanticsUnknown},
+	}
+	for _, tt := range tests {
+		if got := ClaudeTokenSemantics(tt.version); got != tt.want {
+			t.Errorf("ClaudeTokenSemantics(%q) = %q, want %q", tt.version, got, tt.want)
+		}
+	}
+}
+
+func TestActiveContextTokensDoesNotUseCumulativeTotals(t *testing.T) {
+	cumulative := int64(180000)
+	window := int64(200000)
+	used := 25.0
+	snap := &schema.Snapshot{LiveContext: &schema.LiveContext{
+		TotalTokenSemantics: schema.TokenSemanticsCumulativeSession,
+		TotalInputTokens:    &cumulative,
+		ContextWindowSize:   &window,
+		UsedPercentage:      &used,
+	}}
+	if got, want := ActiveContextTokens(snap), int64(50000); got != want {
+		t.Fatalf("active context = %d, want %d from percentage rather than cumulative total", got, want)
 	}
 }
 

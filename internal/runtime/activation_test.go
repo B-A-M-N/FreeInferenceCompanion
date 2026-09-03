@@ -1,7 +1,9 @@
 package runtime
 
 import (
+	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -14,8 +16,160 @@ func clearActivationEnv(t *testing.T) {
 		"FREEINFERENCE_BASE_URL", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL",
 		"FREEINFERENCE_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
 		"FI_ALLOW_CUSTOM_API_ENDPOINT", "FI_ALLOW_INSECURE_LOCALHOST",
+		ProxyUpstreamEnv,
+		"CODEX_HOME", "CODEX_PROFILE",
 	} {
 		t.Setenv(env, "")
+	}
+}
+
+func writeCodexConfig(t *testing.T, contents string) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(contents), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestActivationForClient_ClaudeRequiresClaudeRouteAndCredential(t *testing.T) {
+	clearActivationEnv(t)
+	t.Setenv("ANTHROPIC_BASE_URL", "https://freeinference.org/anthropic")
+	t.Setenv("FREEINFERENCE_API_KEY", "generic-key-is-not-claude-evidence")
+	if a := EvaluateForClient(ClientClaudeCode); a.Active {
+		t.Fatalf("generic FI key must not activate Claude: %+v", a)
+	}
+
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "anthropic-runtime-key")
+	a := EvaluateForClient(ClientClaudeCode)
+	if !a.Active || a.CredentialSource != CredAnthropicAuthToken || a.Client != ClientClaudeCode {
+		t.Fatalf("Claude route + Claude credential should activate: %+v", a)
+	}
+}
+
+func TestActivationForClient_ClaudeRejectsOffHostAndConflictingRoutes(t *testing.T) {
+	clearActivationEnv(t)
+	t.Setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "anthropic-runtime-key")
+	if a := EvaluateForClient(ClientClaudeCode); a.Active || a.InactiveReason != ReasonEndpointNotApproved {
+		t.Fatalf("off-host Claude route must remain inactive: %+v", a)
+	}
+
+	t.Setenv("ANTHROPIC_BASE_URL", "https://freeinference.org/anthropic")
+	t.Setenv("FREEINFERENCE_BASE_URL", "https://freeinference.org/v1")
+	if a := EvaluateForClient(ClientClaudeCode); !a.Active {
+		t.Fatalf("unrelated runtime routes must not disable Claude: %+v", a)
+	}
+
+	t.Setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+	if a := EvaluateForClient(ClientClaudeCode); !a.Active {
+		t.Fatalf("unrelated OpenAI route must not disable Claude: %+v", a)
+	}
+}
+
+func TestActivationForClient_CodexUsesSelectedProviderAndEnvKey(t *testing.T) {
+	clearActivationEnv(t)
+	writeCodexConfig(t, `model_provider = "freeinference"
+
+[model_providers.freeinference]
+base_url = "https://freeinference.org/v1"
+env_key = "CODEX_FI_KEY"
+`)
+	t.Setenv("FREEINFERENCE_API_KEY", "coincidental-key")
+	t.Setenv("CODEX_FI_KEY", "selected-provider-key")
+	a := EvaluateForClient(ClientCodex)
+	if !a.Active || a.Evidence.ProviderID != "freeinference" || a.CredentialSource != CredentialSource("CODEX_FI_KEY") {
+		t.Fatalf("selected Codex provider should activate: %+v", a)
+	}
+
+	t.Setenv("CODEX_FI_KEY", "")
+	a = EvaluateForClient(ClientCodex)
+	if a.Active || a.InactiveReason != ReasonEndpointOnly {
+		t.Fatalf("missing selected provider key must remain inactive: %+v", a)
+	}
+}
+
+func TestActivationForClient_CodexRejectsUnapprovedProvider(t *testing.T) {
+	clearActivationEnv(t)
+	writeCodexConfig(t, `model_provider = "openai"
+
+[model_providers.openai]
+base_url = "https://api.openai.com/v1"
+env_key = "OPENAI_API_KEY"
+`)
+	t.Setenv("OPENAI_API_KEY", "openai-key")
+	a := EvaluateForClient(ClientCodex)
+	if a.Active || a.InactiveReason != ReasonEndpointNotApproved {
+		t.Fatalf("off-host Codex provider must remain inactive: %+v", a)
+	}
+}
+
+func TestResolveCodexProviderConfigurationHonorsSelectedProfile(t *testing.T) {
+	clearActivationEnv(t)
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(`model_provider = "openai"
+
+[model_providers.openai]
+base_url = "https://api.openai.com/v1"
+env_key = "OPENAI_API_KEY"
+
+[model_providers.freeinference]
+base_url = "https://freeinference.org/v1"
+env_key = "CODEX_FI_KEY"
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "fi.config.toml"), []byte(`model_provider = "freeinference"
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CODEX_PROFILE", "fi")
+	t.Setenv("FREEINFERENCE_API_KEY", "coincidental-key")
+	t.Setenv("CODEX_FI_KEY", "selected-provider-key")
+
+	evidence, err := ResolveCodexProviderConfiguration()
+	if err != nil {
+		t.Fatalf("resolve profile: %v", err)
+	}
+	if evidence.ProviderID != "freeinference" || evidence.ProviderEnvKey != "CODEX_FI_KEY" || !evidence.ProviderSelectionVerified {
+		t.Fatalf("profile selection evidence = %+v", evidence)
+	}
+	if got := evidence.CredentialValue; got != "selected-provider-key" {
+		t.Fatalf("credential = %q, want selected provider credential", got)
+	}
+	if config, err := CodexProviderConfiguration(); err != nil || !config.FreeInferenceConfigured || config.CredentialSource != "CODEX_FI_KEY" {
+		t.Fatalf("safe provider summary = %+v, err=%v", config, err)
+	}
+}
+
+func TestResolveCodexProviderRejectsNonCredentialEnvironmentName(t *testing.T) {
+	clearActivationEnv(t)
+	writeCodexConfig(t, `model_provider = "freeinference"
+
+[model_providers.freeinference]
+base_url = "https://freeinference.org/v1"
+env_key = "HOME"
+`)
+	if _, err := ResolveCodexProviderConfiguration(); err == nil {
+		t.Fatal("provider env_key HOME must not be accepted as a credential reference")
+	}
+}
+
+func TestResolveCodexProviderReadDirFailureIsUnknown(t *testing.T) {
+	clearActivationEnv(t)
+	writeCodexConfig(t, `model_provider = "freeinference"
+
+[model_providers.freeinference]
+base_url = "https://freeinference.org/v1"
+env_key = "CODEX_FI_KEY"
+`)
+	t.Setenv("CODEX_FI_KEY", "selected-provider-key")
+	evidence, err := resolveCodexProviderConfigurationWith("", func(string) ([]os.DirEntry, error) {
+		return nil, errors.New("permission denied")
+	})
+	if err == nil || evidence.ProviderSelectionVerified {
+		t.Fatalf("profile directory failure must remain unverified: evidence=%+v err=%v", evidence, err)
 	}
 }
 
@@ -256,6 +410,51 @@ func TestActivation_DocumentedClaudeCodeCredential_Active(t *testing.T) {
 	}
 }
 
+func TestActivation_ClaudeLocalProxyRequiresExplicitApprovedUpstream(t *testing.T) {
+	clearActivationEnv(t)
+	t.Setenv("FI_ALLOW_INSECURE_LOCALHOST", "1")
+	t.Setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:8765")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "free-inference-test")
+	if a := EvaluateForClient(ClientClaudeCode); a.Active {
+		t.Fatalf("loopback Claude route without upstream attestation must stay inactive: %+v", a)
+	}
+
+	t.Setenv(ProxyUpstreamEnv, "https://api.example.com/anthropic")
+	if a := EvaluateForClient(ClientClaudeCode); a.Active {
+		t.Fatalf("unapproved proxy upstream must stay inactive: %+v", a)
+	}
+
+	t.Setenv(ProxyUpstreamEnv, "https://freeinference.org/anthropic")
+	a := EvaluateForClient(ClientClaudeCode)
+	if !a.Active || !a.ProxyActive {
+		t.Fatalf("approved proxy route should activate: %+v", a)
+	}
+	if a.Origin != "https://freeinference.org" || a.ProxyUpstreamURL != "https://freeinference.org/anthropic" {
+		t.Fatalf("proxy identity = %+v", a)
+	}
+	if got := a.ManagementBaseURL(); got != "https://freeinference.org/v1" {
+		t.Fatalf("proxy management URL = %q", got)
+	}
+}
+
+func TestActivation_ClaudeProxyAttestationDoesNotActivateDirectOrUnrelatedRoutes(t *testing.T) {
+	clearActivationEnv(t)
+	t.Setenv(ProxyUpstreamEnv, "https://freeinference.org/anthropic")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "runtime-key")
+
+	t.Setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+	if a := EvaluateForClient(ClientClaudeCode); a.Active {
+		t.Fatalf("proxy attestation must not activate ordinary Claude: %+v", a)
+	}
+
+	t.Setenv("FI_ALLOW_INSECURE_LOCALHOST", "1")
+	t.Setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:8765")
+	t.Setenv(ProxyUpstreamEnv, "https://freeinference.org/v1")
+	if a := EvaluateForClient(ClientClaudeCode); a.Active {
+		t.Fatalf("non-Anthropic proxy route must stay inactive: %+v", a)
+	}
+}
+
 func TestActivation_OpenAIRuntimeMatchesCredential_Active(t *testing.T) {
 	clearActivationEnv(t)
 	t.Setenv("OPENAI_BASE_URL", "https://api.freeinference.org/v1")
@@ -300,7 +499,7 @@ func TestIsFreeInferenceHost(t *testing.T) {
 	}{
 		{"freeinference.org", true},
 		{"api.freeinference.org", true},
-		{"sub.api.freeinference.org", true},
+		{"sub.api.freeinference.org", false},
 		{"FREEINFERENCE.ORG", true}, // case-insensitive
 		{"evilfreeinference.org", false},
 		{"freeinference.org.evil.com", false},

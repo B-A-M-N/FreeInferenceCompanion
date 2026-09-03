@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"github.com/b-a-m-n/freeinference-companion/internal/runtime"
 	"github.com/b-a-m-n/freeinference-companion/internal/secure"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
+	"github.com/b-a-m-n/freeinference-companion/internal/tracing"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
 
@@ -81,11 +83,21 @@ func cmdStatus(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 		fmt.Fprintf(stderr, "usage error: %v\n", err)
 		return 2
 	}
+	historical := explicitSessionRequested(passthroughArgs)
 
 	// P0-2/P0-3: activation gate — must be evaluated before any IO work.
 	// For status-line mode (stdin has data), inactive means zero output.
-	// For interactive mode, we allow human-readable messages.
-	activation := runtime.Evaluate()
+	// For interactive mode, resolve the explicitly requested client so Codex
+	// provider configuration is not lost by a second generic evaluation.
+	activation := activationForCLICommand("status", passthroughArgs)
+	if stdinHasData(stdin) && clientType == schema.ClientCodex {
+		// stdin status payloads are Claude's status-line contract. Do not label
+		// that payload as Codex merely because the selector requested Codex.
+		return 0
+	}
+	if stdinHasData(stdin) {
+		activation = runtime.EvaluateForClient(runtime.ClientClaudeCode)
+	}
 
 	// Status-line mode: a Claude status payload arrives on stdin. We MUST use
 	// the session ID from that payload — never fall through to
@@ -95,6 +107,10 @@ func cmdStatus(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 	if stdinHasData(stdin) {
 		var statusInput schema.ClaudeStatusLineInput
 		if err := json.NewDecoder(io.LimitReader(stdin, 1<<20)).Decode(&statusInput); err == nil && statusInput.SessionID != "" {
+			// A status-line payload is Claude telemetry, so its gate must be
+			// Claude-specific even when a generic FreeInference environment is
+			// present for another client.
+			activation = runtime.EvaluateForClient(runtime.ClientClaudeCode)
 			// P0-3: inactive runtime → zero bytes in status-line mode
 			if !activation.Active {
 				return 0
@@ -108,7 +124,7 @@ func cmdStatus(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 			if clientType == "" {
 				clientType = schema.ClientClaudeCode
 			}
-			_ = adapters.NewClaudeAdapter(paths).HandleStatusLineUpdateWith(&statusInput, sessionID, activation)
+			_ = adapters.NewClaudeAdapter(paths).HandleStatusLineUpdateWithTrace(&statusInput, sessionID, activation, environmentTraceInfo(schema.ClientClaudeCode, activation))
 
 			snap, err := state.LoadSnapshot(paths, schema.ClientClaudeCode, sessionID)
 			if err != nil || snap == nil {
@@ -141,7 +157,7 @@ func cmdStatus(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 	// No usable stdin payload — in compact/status-line mode, output zero
 	// bytes. An empty status line is correct when there is nothing to say.
 	// In interactive mode (no --compact), fall through to resolveSession.
-	if compact {
+	if compact && !historical {
 		return 0
 	}
 
@@ -162,11 +178,33 @@ func cmdStatus(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 	gs := loadGlobal(paths)
 	aid, err := activationID(activation)
 	if err != nil {
+		if historical && !activation.Disabled {
+			if jsonOut {
+				statusJSON(stdout, resolved.Snap, gs, reveal, "", &activation.Active,
+					resolved.Client, resolved.Snap.Session.ID, resolved.Snap.Model.ID,
+					resolved.Snap.Provider.Name, true)
+				return 0
+			}
+			fmt.Fprintln(stdout, "Historical session — FreeInference is not currently active.")
+			printFullStatus(stdout, resolved.Snap, gs, reveal, false)
+			return 0
+		}
 		// Identity failure in interactive mode: report sanitized error
 		fmt.Fprintf(stderr, "error: %s\n", secure.SanitizeField(err.Error()))
 		return 1
 	}
 	vm := buildView(resolved.Snap, gs, aid, activation.Active, clientType, resolved.Snap.Session.ID)
+	if historical && !vm.Eligible {
+		if jsonOut {
+			statusJSON(stdout, resolved.Snap, gs, reveal, aid, &activation.Active,
+				resolved.Client, resolved.Snap.Session.ID, resolved.Snap.Model.ID,
+				resolved.Snap.Provider.Name, true)
+			return 0
+		}
+		fmt.Fprintln(stdout, "Historical session — not a current live surface.")
+		printFullStatus(stdout, resolved.Snap, gs, reveal, false)
+		return 0
+	}
 	rc := renderConfigWith(args)
 
 	if compact {
@@ -221,13 +259,19 @@ func renderStatusLevel(vm interface {
 
 // statusJSON emits a JSON representation of status to stdout.
 func statusJSON(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalState, reveal bool,
-	activationID string, active *bool, client, sessionID, model, providerName string) {
+	activationID string, active *bool, client, sessionID, model, providerName string, historical ...bool) {
 	var ctx map[string]any
-	if snap != nil && snap.LiveContext != nil {
+	if client == string(schema.ClientCodex) || (snap != nil && snap.Client.Type == schema.ClientCodex) {
+		ctx = map[string]any{
+			"availability": "unavailable",
+			"reason":       "client_telemetry_unavailable",
+		}
+	} else if snap != nil && snap.LiveContext != nil {
 		lc := snap.LiveContext
 		ctx = map[string]any{
-			"used_pct": lc.UsedPercentage,
-			"source":   lc.Source,
+			"used_pct":              lc.UsedPercentage,
+			"source":                lc.Source,
+			"total_token_semantics": lc.TotalTokenSemantics,
 		}
 		if lc.ContextWindowSize != nil {
 			ctx["window_size"] = *lc.ContextWindowSize
@@ -241,9 +285,18 @@ func statusJSON(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalState,
 	}
 
 	cacheObj := map[string]any{}
-	if snap != nil && snap.CacheAnalysis != nil {
+	if client == string(schema.ClientCodex) || (snap != nil && snap.Client.Type == schema.ClientCodex) {
+		cacheObj["availability"] = "unavailable"
+		cacheObj["reason"] = "client_telemetry_unavailable"
+	} else if snap != nil && snap.CacheAnalysis != nil {
 		ca := snap.CacheAnalysis
-		cacheObj["samples"] = ca.RequestSamples
+		cacheObj["observed_samples"] = ca.ObservationCount
+		cacheObj["analyzed_samples"] = ca.AnalysisWindowCount
+		cacheObj["usable_samples"] = ca.UsableSampleCount
+		cacheObj["availability"] = ca.Availability
+		if ca.ObservationCount == 0 {
+			cacheObj["observed_samples"] = ca.RequestSamples
+		}
 		cacheObj["trend"] = ca.Trend
 		if ca.CacheReadShare != nil {
 			cacheObj["read_share"] = *ca.CacheReadShare
@@ -293,13 +346,95 @@ func statusJSON(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalState,
 	if active != nil {
 		obj["active"] = *active
 	}
+	activationMatches := snap != nil && (activationID == "" || snap.ActivationID == activationID)
+	if active != nil && *active && activationMatches && snap.Provider.Confirmed && snap.Provider.Name == schema.ProviderFreeInference && gs != nil {
+		now := time.Now().UTC()
+		if gs.PublicStatus != nil {
+			for _, metric := range gs.PublicStatus.Models {
+				if metric.ModelID != snap.Model.ID {
+					continue
+				}
+				monitor := map[string]any{
+					"model":        secure.SanitizeField(metric.ModelID),
+					"uptime_ratio": metric.UptimeRatio,
+				}
+				if metric.Latest != nil {
+					age := now.Sub(metric.Latest.CheckedAt)
+					monitor["ok"] = metric.Latest.OK
+					monitor["checked_at"] = metric.Latest.CheckedAt.UTC().Format(time.RFC3339)
+					monitor["age_seconds"] = max(0, int64(age.Seconds()))
+					monitor["stale"] = age < 0 || age > 45*time.Minute
+					monitor["latency_ms"] = metric.Latest.LatencyMs
+					monitor["ttft_ms"] = metric.Latest.TTFTMs
+					monitor["throughput_tps"] = metric.Latest.ThroughputTps
+					if metric.Latest.Error != "" {
+						monitor["error"] = secure.SanitizeField(metric.Latest.Error)
+					}
+				}
+				obj["model_monitor"] = monitor
+				break
+			}
+		}
+		if gs.Health != nil {
+			age := now.Sub(gs.Health.FetchedAt)
+			obj["provider_health"] = map[string]any{
+				"status":      secure.SanitizeField(gs.Health.Status),
+				"checked_at":  gs.Health.FetchedAt.UTC().Format(time.RFC3339),
+				"age_seconds": max(0, int64(age.Seconds())),
+				"stale":       age < 0 || age > schema.DefaultHealthMaxAge,
+			}
+		}
+		if gs.AccountUsage != nil && gs.AccountUsageCapability != nil &&
+			gs.AccountUsageCapability.State == schema.CapabilitySupported && schema.ValidateAccountUsage(gs.AccountUsage) == nil {
+			age := now.Sub(gs.AccountUsage.FetchedAt)
+			usage := map[string]any{
+				"fetched_at":  gs.AccountUsage.FetchedAt.UTC().Format(time.RFC3339),
+				"age_seconds": max(0, int64(age.Seconds())),
+				"stale":       age < 0 || age > schema.DefaultAccountUsageMaxAge,
+			}
+			if !usage["stale"].(bool) {
+				usage["requests_used"] = gs.AccountUsage.RequestsUsed
+				usage["requests_limit"] = gs.AccountUsage.RequestsLimit
+				usage["tokens_used"] = gs.AccountUsage.TokensUsed
+				usage["tokens_limit"] = gs.AccountUsage.TokensLimit
+			}
+			obj["account_usage"] = usage
+		}
+	}
+	if len(historical) > 0 {
+		reason := "historical_snapshot"
+		if active != nil && !*active {
+			reason = "runtime_not_active"
+		}
+		obj["historical"] = true
+		obj["reason"] = reason
+	}
+	if active != nil && *active && snap != nil && snap.Trace != nil && snap.Trace.Enabled && snap.Trace.Verified && snap.Provider.Confirmed && snap.Provider.Name == schema.ProviderFreeInference &&
+		snap.Trace.Provider == schema.ProviderFreeInference && (snap.Trace.Client == "" || snap.Trace.Client == snap.Client.Type) &&
+		snap.Trace.Header == tracing.SessionHeader && snap.Trace.Source != schema.TraceSourceNone && tracing.ValidateTraceID(snap.Trace.SessionID) {
+		obj["trace"] = map[string]any{
+			"enabled":  true,
+			"active":   true,
+			"client":   snap.Trace.Client,
+			"trace_id": secure.MaskSessionID(snap.Trace.SessionID),
+			"header":   snap.Trace.Header,
+			"provider": snap.Trace.Provider,
+			"source":   snap.Trace.Source,
+			"started_at": func() string {
+				if snap.Trace.StartedAt.IsZero() {
+					return ""
+				}
+				return snap.Trace.StartedAt.UTC().Format(time.RFC3339)
+			}(),
+		}
+	}
 
 	enc := json.NewEncoder(stdout)
 	enc.SetIndent("", "  ")
 	enc.Encode(obj)
 }
 
-func printFullStatus(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalState, reveal bool) {
+func printFullStatus(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalState, reveal bool, showTrace ...bool) {
 	fmt.Fprintf(stdout, "FreeInference Companion %s\n", Version)
 	fmt.Fprintf(stdout, "Session:  %s (%s)\n", displaySessionID(snap.Session.ID, reveal), snap.Session.Status)
 	fmt.Fprintf(stdout, "Client:   %s\n", snap.Client.Type)
@@ -308,6 +443,12 @@ func printFullStatus(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalS
 		provider = "unknown (unconfirmed)"
 	}
 	fmt.Fprintf(stdout, "Provider: %s (source: %s)\n", provider, snap.Provider.Source)
+	traceVisible := len(showTrace) == 0 || showTrace[0]
+	if traceVisible && snap.Trace != nil && snap.Trace.Enabled && snap.Trace.Verified && snap.Provider.Confirmed && snap.Provider.Name == schema.ProviderFreeInference &&
+		snap.Trace.Provider == schema.ProviderFreeInference && (snap.Trace.Client == "" || snap.Trace.Client == snap.Client.Type) &&
+		snap.Trace.Header == tracing.SessionHeader && snap.Trace.Source != schema.TraceSourceNone && tracing.ValidateTraceID(snap.Trace.SessionID) {
+		fmt.Fprintln(stdout, "Tracing:  active (X-Session-ID)")
+	}
 	if snap.Model.ContextLength != nil {
 		fmt.Fprintf(stdout, "Model:    %s (%s context)\n", snap.Model.ID, formatTokenCount(*snap.Model.ContextLength))
 	} else {
@@ -315,9 +456,14 @@ func printFullStatus(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalS
 	}
 	fmt.Fprintln(stdout)
 
-	if snap.LiveContext != nil {
+	if snap.Client.Type == schema.ClientCodex {
+		fmt.Fprintln(stdout, "Live Context: unavailable (Codex does not expose live token telemetry)")
+	} else if snap.LiveContext != nil {
 		lc := snap.LiveContext
 		fmt.Fprintf(stdout, "Live Context (from %s at %s):\n", lc.Source, lc.ObservedAt.Format(time.RFC3339))
+		if lc.TotalTokenSemantics != "" {
+			fmt.Fprintf(stdout, "  Token semantics: %s\n", lc.TotalTokenSemantics)
+		}
 		if lc.TotalInputTokens != nil {
 			fmt.Fprintf(stdout, "  Total input:  %s", formatTokenPtr(lc.TotalInputTokens))
 			if lc.TotalOutputTokens != nil {
@@ -361,8 +507,12 @@ func printFullStatus(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalS
 	}
 	fmt.Fprintln(stdout)
 
-	if snap.CacheAnalysis != nil && snap.CacheAnalysis.RequestSamples > 0 {
-		fmt.Fprintf(stdout, "Cache Analysis (%d unique samples):\n", snap.CacheAnalysis.RequestSamples)
+	if snap.Client.Type == schema.ClientCodex {
+		fmt.Fprintln(stdout, "Cache Analysis: unavailable (Codex does not expose cache telemetry)")
+	} else if snap.CacheAnalysis != nil && (snap.CacheAnalysis.ObservationCount > 0 || snap.CacheAnalysis.RequestSamples > 0) {
+		fmt.Fprintf(stdout, "Cache Analysis (%d observed, %d analyzed, %d usable):\n",
+			snap.CacheAnalysis.ObservationCount, snap.CacheAnalysis.AnalysisWindowCount, snap.CacheAnalysis.UsableSampleCount)
+		fmt.Fprintf(stdout, "  Availability: %s\n", snap.CacheAnalysis.Availability)
 		fmt.Fprintf(stdout, "  Read share:  %s\n", formatPctPtr(snap.CacheAnalysis.CacheReadShare))
 		fmt.Fprintf(stdout, "  New share:   %s\n", formatPctPtr(snap.CacheAnalysis.CacheCreationShare))
 		fmt.Fprintf(stdout, "  Fresh share: %s\n", formatPctPtr(snap.CacheAnalysis.FreshInputShare))
@@ -388,8 +538,14 @@ func printFullStatus(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalS
 	}
 
 	if gs != nil && gs.Health != nil && adapters.IsConfirmedFreeInference(snap.Provider) {
+		healthAge := time.Since(gs.Health.FetchedAt)
+		healthStale := healthAge < 0 || healthAge > schema.DefaultHealthMaxAge
 		fmt.Fprintf(stdout, "Provider Health:\n")
-		fmt.Fprintf(stdout, "  Status:  %s\n", gs.Health.Status)
+		status := gs.Health.Status
+		if healthStale {
+			status += " (stale)"
+		}
+		fmt.Fprintf(stdout, "  Status:  %s\n", status)
 		if gs.Health.HealthyCount != nil && gs.Health.UnhealthyCount != nil {
 			fmt.Fprintf(stdout, "  Models:  %d healthy, %d unhealthy\n", *gs.Health.HealthyCount, *gs.Health.UnhealthyCount)
 		}
@@ -397,19 +553,29 @@ func printFullStatus(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalS
 		fmt.Fprintln(stdout)
 	}
 
-	if gs.HasAuthoritativeAccountUsage() && adapters.IsConfirmedFreeInference(snap.Provider) {
+	accountUsable := gs != nil && gs.AccountUsage != nil && gs.AccountUsageCapability != nil &&
+		gs.AccountUsageCapability.State == schema.CapabilitySupported && schema.ValidateAccountUsage(gs.AccountUsage) == nil
+	if accountUsable && adapters.IsConfirmedFreeInference(snap.Provider) {
 		au := gs.AccountUsage
+		age := time.Since(au.FetchedAt)
+		stale := age < 0 || age > schema.DefaultAccountUsageMaxAge
 		fmt.Fprintf(stdout, "Account Usage:\n")
+		if stale {
+			fmt.Fprintln(stdout, "  Status:  stale (not used for budget calculations)")
+		}
 		fmt.Fprintf(stdout, "  Updated: %s\n", au.FetchedAt.Format(time.RFC3339))
-		if au.RequestsUsed != nil || au.RequestsLimit != nil {
+		if !stale && (au.RequestsUsed != nil || au.RequestsLimit != nil) {
 			fmt.Fprintf(stdout, "  Requests: %s\n", formatQuotaPair(au.RequestsUsed, au.RequestsLimit))
 		}
-		if au.TokensUsed != nil || au.TokensLimit != nil {
+		if !stale && (au.TokensUsed != nil || au.TokensLimit != nil) {
 			fmt.Fprintf(stdout, "  Tokens:   %s\n", formatQuotaPair(au.TokensUsed, au.TokensLimit))
 		}
 
 		// Token budget projection — estimates quota exhaustion timeline.
-		proj := engine.ProjectBudget(au, snap, time.Now().UTC(), gs.CircuitBreakers)
+		proj := engine.BudgetProjection{Status: engine.BudgetUnknown}
+		if !stale {
+			proj = engine.ProjectBudget(au, snap, time.Now().UTC(), gs.CircuitBreakers)
+		}
 		if proj.Status != engine.BudgetUnknown {
 			fmt.Fprintf(stdout, "  Budget:   %s %s\n",
 				budgetIcon(proj.Status), strings.ToLower(string(proj.Status)))
@@ -428,13 +594,16 @@ func printFullStatus(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalS
 	}
 }
 
-// cmdContext implements `freeinference context`. Missing metrics render as "unknown",
-// never as zero.
+// cmdContext implements `freeinference context`. Missing Claude metrics render
+// as "unknown"; unsupported Codex metrics render as "unavailable".
 func cmdContext(paths state.Paths, args []string, _ io.Reader, stdout, stderr io.Writer) int {
 	clientType, sessionID, _, _, _, err := parseClientSessionFlags(args)
 	if err != nil {
 		fmt.Fprintf(stderr, "usage error: %v\n", err)
 		return 2
+	}
+	if clientType == schema.ClientCodex {
+		return printCodexContextUnavailable(stdout)
 	}
 
 	resolved, err := resolveSession(paths, clientType, sessionID, stdout)
@@ -447,6 +616,9 @@ func cmdContext(paths state.Paths, args []string, _ io.Reader, stdout, stderr io
 		return 0
 	}
 	snap := resolved.Snap
+	if resolved.Client == schema.ClientCodex {
+		return printCodexContextUnavailable(stdout)
+	}
 
 	var usedPct *float64
 	if snap.LiveContext != nil {
@@ -482,8 +654,31 @@ func cmdContext(paths state.Paths, args []string, _ io.Reader, stdout, stderr io
 	return 0
 }
 
+func printCodexContextUnavailable(stdout io.Writer) int {
+	fmt.Fprintln(stdout, "Context:    unavailable")
+	fmt.Fprintln(stdout, "Limit:      unavailable")
+	fmt.Fprintln(stdout, "State:      unavailable")
+	fmt.Fprintln(stdout, "Suggestion: Codex does not expose live token or context telemetry.")
+	return 0
+}
+
 // stdinHasData reports whether stdin looks like a pipe with data.
 func stdinHasData(stdin io.Reader) bool {
+	if stdin == nil {
+		return false
+	}
+	// A bufio.Reader's Len reports only bytes already buffered, not whether its
+	// underlying reader has data. Peek without consuming so a freshly wrapped
+	// pipe is still recognized as status-line input.
+	if buffered, ok := stdin.(*bufio.Reader); ok {
+		_, err := buffered.Peek(1)
+		return err == nil
+	}
+	// In-memory readers such as bytes.Buffer expose their complete remaining
+	// length, so Len is safe for those non-buffering reader types.
+	if sized, ok := stdin.(interface{ Len() int }); ok {
+		return sized.Len() > 0
+	}
 	f, ok := stdin.(*os.File)
 	if !ok {
 		return true // non-file reader (tests): assume data

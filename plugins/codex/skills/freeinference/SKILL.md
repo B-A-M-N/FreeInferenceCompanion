@@ -1,11 +1,46 @@
 ---
 name: freeinference
-description: FreeInference Companion — manual provider diagnostics, model discovery, and configuration guidance for Codex. This skill package does not install automatic lifecycle telemetry; Codex-unavailable context and cache metrics are reported as unknown.
+description: FreeInference Companion — local Codex lifecycle recording, provider diagnostics, model discovery, and configuration guidance. Codex context and cache metrics are reported as unavailable.
 ---
 
 # FreeInference Companion (Codex)
 
-Community-built and unofficial skill package for FreeInference-powered Codex sessions. It runs user-requested provider diagnostics and model discovery; it does **not** install automatic lifecycle telemetry. **Codex has no status-line system** — the `status-line` subcommand is not applicable. Not affiliated with or endorsed by FreeInference.
+Community-built and unofficial plugin for FreeInference-powered Codex sessions. Its bundled lifecycle hooks record bounded session state locally, while its skills provide user-requested provider diagnostics and model discovery. It does not proxy prompts or add inference calls. Codex owns its native footer; the separate `codex-footer` command configures that footer and is not a FreeInference telemetry status line. Not affiliated with or endorsed by FreeInference.
+
+After installing or updating the plugin, open `/hooks` in Codex and review /
+trust the current plugin hook definition. Codex skips changed non-managed
+plugin hooks until they are trusted. Session start/end hooks perform no
+upstream work by default. Set `FI_AUTO_REFRESH=1` only when stale metadata
+refreshes are desired; automatic authenticated refreshes then share one-minute
+spacing and a provider-wide cooldown after a rate limit.
+
+Lifecycle mapping: `SessionStart` is source-aware (`startup`, `resume`,
+`compact`, `clear`); `UserPromptSubmit` and `Stop` use bounded `turn_id` values
+to suppress duplicate/stale transitions; compaction is recorded without token
+math; and `SessionEnd` completes the existing logical session. Codex model
+observations are recorded from every lifecycle event that supplies a model.
+Codex `PostModelSwitch` and `StopFailure` are not dispatched.
+
+The normal Companion installer places this plugin at
+`~/.codex/plugins/freeinference-companion` and includes the hook runner plus
+the platform-matched CLI binary:
+
+```bash
+freeinference install
+# For an existing installation:
+freeinference update
+```
+
+The installer registers the plugin through a local Codex marketplace when the
+Codex CLI is available. If it was not available, run:
+
+```bash
+codex plugin marketplace add ~/.codex/plugins/freeinference-companion-marketplace
+codex plugin add freeinference-companion@freeinference-companion-local
+```
+
+After a source checkout, use `/path/to/FreeInferenceCompanion/codex-marketplace`
+as the marketplace path instead.
 
 ## Overview
 
@@ -13,9 +48,39 @@ The `freeinference` CLI provides the following commands. Run any command with `-
 
 ## Commands
 
+### `freeinference run` and `freeinference trace`
+
+Use `freeinference run codex` for explicit per-process support correlation.
+The launcher uses the selected verified provider's `env_http_headers` mapping
+for the opaque `X-Session-ID`; it does not proxy traffic or replace an
+existing mapping.
+
+```bash
+freeinference run codex
+freeinference trace --client codex --json
+freeinference config set tracing.enabled false
+```
+
+Unverified/off-host providers receive no trace injection.
+
+### `freeinference fi-status`
+
+Fetch public FreeInference service status. This is stateless and
+unauthenticated; it does not require the Codex provider to be active.
+
+```bash
+freeinference fi-status --json
+freeinference fi-status --problems
+freeinference fi-status --details
+```
+
+All models are shown by default. Use `--problems`/`--down` for only down or
+unknown models. `--refresh` and `--all` remain deprecated compatibility
+no-ops.
+
 ### `freeinference status`
 
-Show current session status with context usage, pressure, and cache analysis.
+Show current session status with pressure and the telemetry availability state.
 
 ```bash
 freeinference status --json
@@ -23,7 +88,8 @@ freeinference status --client codex
 freeinference status --level standard --client codex
 ```
 
-Note: this skill does not receive lifecycle events, and Codex does not expose live context metrics; values may report as `unknown`.
+Note: the plugin records lifecycle events locally, but Codex does not expose
+live context metrics; those values report as `unavailable`.
 
 Flags: `--client <type>`, `--compact`, `--level summary|standard|detailed`, `--session <id>`, `--json`
 
@@ -95,7 +161,8 @@ freeinference dashboard --print-url
 
 ### `freeinference context`
 
-Show current context usage. Note: Codex may report unknown values.
+Codex live context telemetry is unsupported by this integration. The command
+reports `unavailable` rather than treating missing values as zero.
 
 ```bash
 freeinference context --json
@@ -103,7 +170,8 @@ freeinference context --json
 
 ### `freeinference cache`
 
-Analyze cache efficiency. Note: Cache metrics are not available from Codex.
+Codex cache telemetry is unsupported by this integration. The command reports
+`unavailable` rather than presenting a pseudo-analysis.
 
 ```bash
 freeinference cache --json
@@ -118,14 +186,18 @@ freeinference refresh --force --json
 freeinference refresh --if-stale
 ```
 
-### `freeinference status-line`
+### `freeinference codex-footer`
 
-Install or uninstall the status-line wrapper. **Not applicable for Codex** — Codex has no status-line system.
+Configure Codex's native footer without scraping its screen or claiming live
+context telemetry from hooks.
 
 ```bash
-# This subcommand is for Claude Code only
-freeinference status-line status --json
+freeinference codex-footer install
+freeinference codex-footer status --json
+freeinference codex-footer uninstall
 ```
+
+The Claude-only `freeinference status-line` wrapper remains separate.
 
 ### `freeinference config`
 
@@ -188,14 +260,16 @@ Many commands accept `--json` for machine-readable JSON output and `--help` for 
 ## Environment Variables
 
 - `FREEINFERENCE_API_KEY` — API credential for the OpenAI-compatible API
-- `FREEINFERENCE_BASE_URL` — API base URL (default: `https://freeinference.org/v1`)
+- `FREEINFERENCE_BASE_URL` — generic provider API URL; Codex activation comes from `config.toml`
 - `FI_HEALTH_URL` — Health monitoring URL (optional)
 - `FI_CACHE_DIR` — Cache directory (default: `~/.cache/freeinference-companion`)
 - `FI_SESSION_ID` — Explicit session override
 - `FI_PROVIDER` — Attribution metadata only; it does not activate the companion
-- `FI_NO_BACKGROUND` — Disable background refresh
+- `FI_NO_BACKGROUND` — Disable detached background refresh after opting in
+- `FI_AUTO_REFRESH` — Set to `1` to opt in to stale metadata refreshes from lifecycle hooks
 - `FI_DISABLED` — Set to `1` to disable all companion features
 - `FI_ALLOW_INSECURE_LOCALHOST` — Allow `http://` loopback (development only)
+- `FI_TRACING` — Enable/disable launch-time `X-Session-ID` correlation (`1` by default for `freeinference run`)
 
 ## Codex Runtime Setup and Model Switching
 
@@ -219,6 +293,14 @@ env_key = "FREEINFERENCE_API_KEY"
 wire_api = "responses"
 ```
 
+The explicit launcher can add the documented mapping below while preserving
+unrelated Codex configuration:
+
+```toml
+[model_providers.freeinference.env_http_headers]
+"X-Session-ID" = "FI_TRACE_SESSION_ID"
+```
+
 Create a profile per model, for example `~/.codex/glm.config.toml` with
 `model = "glm-5.1"` and `~/.codex/coding.config.toml` with
 `model = "kimi-k2.7-code"`. Switch with `codex --profile glm` or
@@ -228,16 +310,25 @@ models are endpoint-exclusive and belong in Claude Code's Anthropic setup.
 
 ## Known Differences from Claude Code
 
-1. **No status-line system** — Codex does not support status-line wrappers. `freeinference status-line` is not applicable.
-2. **Context metrics** — Codex does not expose live context window usage to plugins. Context values may report as `unknown`.
-3. **Cache metrics** — Codex does not expose cache metrics. Cache analysis may show limited or no data.
-4. **Automatic telemetry** — this package intentionally installs no Codex lifecycle hooks. Session metrics are available only when another supported integration records them.
+1. **Native footer ownership** — Codex renders its own `tui.status_line`; use `freeinference codex-footer` to configure native model/context items. This is separate from Claude's script-backed `status-line` wrapper and is not scraped plugin telemetry.
+2. **Context metrics** — Codex does not expose live context window usage to plugins. Context values report as `unavailable`.
+3. **Cache metrics** — Codex does not expose cache metrics. Cache analysis reports `unavailable`.
+4. **Lifecycle telemetry** — the plugin records session, prompt, compaction,
+   stop, and session-end events locally. Codex does not expose live context or
+   cache counters to this integration, so those values remain `unavailable`.
 
 ## Example Workflows
 
 **Quick status check:**
 ```bash
 freeinference status --client codex --json
+```
+
+**Launch and inspect trace correlation:**
+```bash
+freeinference run codex
+freeinference trace --client codex --json
+freeinference config set tracing.enabled false
 ```
 
 **Full diagnostic:**

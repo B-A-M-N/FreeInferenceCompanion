@@ -77,6 +77,131 @@ func TestCodexSessionLifecycle(t *testing.T) {
 	}
 }
 
+func TestCodexLifecycleSourcePreservesLogicalSession(t *testing.T) {
+	confirmFreeInference(t)
+	paths := testPaths(t)
+	a := NewCodexAdapter(paths)
+
+	if err := a.HandleSessionStart(&schema.CodexHookInput{SessionID: "c-source", Model: "glm-5.1", Source: "startup"}); err != nil {
+		t.Fatalf("startup: %v", err)
+	}
+	first := loadCodex(t, paths, "c-source")
+	startedAt := first.Session.StartedAt
+	if first.Session.StartSource != "startup" || first.Session.ConversationEpoch != 1 {
+		t.Fatalf("startup metadata = %+v", first.Session)
+	}
+
+	for _, source := range []string{"resume", "compact"} {
+		if err := a.HandleSessionStart(&schema.CodexHookInput{SessionID: "c-source", Model: "glm-5.1", Source: source}); err != nil {
+			t.Fatalf("%s: %v", source, err)
+		}
+		snap := loadCodex(t, paths, "c-source")
+		if !snap.Session.StartedAt.Equal(startedAt) {
+			t.Fatalf("%s created a new logical session", source)
+		}
+		if snap.Session.ConversationEpoch != 1 {
+			t.Fatalf("%s changed conversational epoch: %d", source, snap.Session.ConversationEpoch)
+		}
+	}
+
+	if err := a.HandleSessionStart(&schema.CodexHookInput{SessionID: "c-source", Model: "glm-5.1", Source: "clear"}); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	snap := loadCodex(t, paths, "c-source")
+	if !snap.Session.StartedAt.Equal(startedAt) || snap.Session.ConversationEpoch != 2 || snap.Session.StartSource != "clear" {
+		t.Fatalf("clear metadata = %+v", snap.Session)
+	}
+
+	events, err := state.ReadEvents(paths, schema.ClientCodex, "c-source", 0)
+	if err != nil {
+		t.Fatalf("read events: %v", err)
+	}
+	starts := 0
+	for _, event := range events {
+		if event.Type == state.EventSessionStarted {
+			starts++
+		}
+	}
+	if starts != 2 {
+		t.Fatalf("session-start events = %d, want startup + clear only", starts)
+	}
+}
+
+func TestCodexTurnIDSuppressesDuplicateAndStaleStops(t *testing.T) {
+	confirmFreeInference(t)
+	paths := testPaths(t)
+	a := NewCodexAdapter(paths)
+	_ = a.HandleSessionStart(&schema.CodexHookInput{SessionID: "c-turn", Model: "glm-5.1", Source: "startup"})
+
+	first := &schema.CodexHookInput{SessionID: "c-turn", TurnID: "turn-1", Model: "glm-5.1", Prompt: "private"}
+	if _, err := a.HandleUserPromptSubmit(first, "c-turn"); err != nil {
+		t.Fatalf("first prompt: %v", err)
+	}
+	if _, err := a.HandleUserPromptSubmit(first, "c-turn"); err != nil {
+		t.Fatalf("duplicate prompt: %v", err)
+	}
+	if err := a.HandleStop("c-turn", &schema.CodexHookInput{SessionID: "c-turn", TurnID: "stale-turn"}); err != nil {
+		t.Fatalf("stale stop: %v", err)
+	}
+	if err := a.HandleStop("c-turn", &schema.CodexHookInput{SessionID: "c-turn", TurnID: "turn-1"}); err != nil {
+		t.Fatalf("first stop: %v", err)
+	}
+	if err := a.HandleStop("c-turn", &schema.CodexHookInput{SessionID: "c-turn", TurnID: "turn-1"}); err != nil {
+		t.Fatalf("duplicate stop: %v", err)
+	}
+
+	snap := loadCodex(t, paths, "c-turn")
+	if snap.Activity.TurnID != "" || snap.Activity.LastTurnID != "turn-1" || snap.Activity.TurnActive == nil || *snap.Activity.TurnActive {
+		t.Fatalf("turn correlation = %+v", snap.Activity)
+	}
+	events, err := state.ReadEvents(paths, schema.ClientCodex, "c-turn", 0)
+	if err != nil {
+		t.Fatalf("read events: %v", err)
+	}
+	prompts, stops := 0, 0
+	for _, event := range events {
+		switch event.Type {
+		case state.EventPromptSubmitted:
+			prompts++
+			if strings.Contains(event.Detail, "private") {
+				t.Error("prompt text persisted in event detail")
+			}
+		case state.EventTurnStopped:
+			stops++
+		}
+	}
+	if prompts != 1 || stops != 1 {
+		t.Fatalf("prompt/stop events = %d/%d, want 1/1", prompts, stops)
+	}
+}
+
+func TestCodexModelObservedOnLifecycleEvents(t *testing.T) {
+	confirmFreeInference(t)
+	paths := testPaths(t)
+	a := NewCodexAdapter(paths)
+	_ = a.HandleSessionStart(&schema.CodexHookInput{SessionID: "c-model", Model: "glm-5.1", Source: "startup"})
+	_, _ = a.HandleUserPromptSubmit(&schema.CodexHookInput{SessionID: "c-model", Model: "glm-5.1", TurnID: "turn-1"}, "c-model")
+	_ = a.HandlePreCompact(&schema.CodexHookInput{SessionID: "c-model", Model: "glm-5.2", Trigger: "automatic"}, "c-model")
+
+	snap := loadCodex(t, paths, "c-model")
+	if snap.Model.ID != "glm-5.2" || snap.Model.MetadataSource != "client_hook" {
+		t.Fatalf("model observation = %+v", snap.Model)
+	}
+	events, err := state.ReadEvents(paths, schema.ClientCodex, "c-model", 0)
+	if err != nil {
+		t.Fatalf("read events: %v", err)
+	}
+	found := false
+	for _, event := range events {
+		if event.Type == state.EventModelSwitch && strings.Contains(event.Detail, "PreCompact") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("model discontinuity was not recorded with lifecycle provenance")
+	}
+}
+
 func TestCodexCompactionNeverFabricatesPercentage(t *testing.T) {
 	confirmFreeInference(t)
 	paths := testPaths(t)

@@ -41,6 +41,20 @@ func TestAddObservationDeduplicates(t *testing.T) {
 	}
 }
 
+func TestAddObservationFallbackIdentityExpires(t *testing.T) {
+	snap := &schema.Snapshot{}
+	first := obs("m", 100000, 1000, 5000, 90000, 5000, 1000)
+	first.ObservedAt = time.Unix(100, 0)
+	second := first
+	second.ObservedAt = first.ObservedAt.Add(FallbackDedupWindow + time.Millisecond)
+	if !AddObservation(snap, first) || !AddObservation(snap, second) {
+		t.Fatalf("same token tuple after the fallback window must represent two observations: %+v", snap.UsageObservations)
+	}
+	if len(snap.UsageObservations) != 2 {
+		t.Fatalf("observations = %d, want 2", len(snap.UsageObservations))
+	}
+}
+
 func TestAddObservationBounded(t *testing.T) {
 	snap := &schema.Snapshot{}
 	for i := 0; i < MaxUsageObservations+10; i++ {
@@ -66,6 +80,33 @@ func TestAnalyzeCacheShares(t *testing.T) {
 	}
 	if a.RequestSamples != 1 {
 		t.Errorf("samples = %d", a.RequestSamples)
+	}
+}
+
+func TestAnalyzeCacheScopesCurrentEpochAndSeparatesCounts(t *testing.T) {
+	snap := &schema.Snapshot{CacheEpochID: "epoch-new"}
+	old := obs("old", 100000, 1000, 90000, 5000, 5000, 1000)
+	old.EpochID = "epoch-old"
+	current := obs("new", 100000, 1000, 5000, 90000, 5000, 1000)
+	current.EpochID = "epoch-new"
+	AddObservation(snap, old)
+	AddObservation(snap, current)
+	AnalyzeCache(snap, 100000, time.Now())
+
+	if got := snap.CacheAnalysis.ObservationCount; got != 2 {
+		t.Errorf("observed count = %d, want 2", got)
+	}
+	if got := snap.CacheAnalysis.AnalysisWindowCount; got != 1 {
+		t.Errorf("analysis window count = %d, want 1", got)
+	}
+	if got := snap.CacheAnalysis.UsableSampleCount; got != 1 {
+		t.Errorf("usable count = %d, want 1", got)
+	}
+	if snap.CacheAnalysis.Availability != schema.CacheTelemetryAvailable {
+		t.Errorf("availability = %q, want available", snap.CacheAnalysis.Availability)
+	}
+	if snap.CacheAnalysis.CacheReadShare == nil || *snap.CacheAnalysis.CacheReadShare < 0.89 {
+		t.Errorf("current epoch share = %v, want high read share", snap.CacheAnalysis.CacheReadShare)
 	}
 }
 
@@ -153,6 +194,22 @@ func TestQualifyCacheWarningActivatesAfterThree(t *testing.T) {
 	d := QualifyCacheWarning(snap, 100000, true, now)
 	if !d.Warn {
 		t.Error("three low observations should warn")
+	}
+}
+
+func TestQualifyCacheWarningUsesLegacyRequestSamples(t *testing.T) {
+	now := time.Now()
+	readShare := 0.01
+	snap := &schema.Snapshot{
+		CacheAnalysis: &schema.CacheAnalysis{
+			RequestSamples: 3,
+			CacheReadShare: &readShare,
+			ConsecutiveLow: 3,
+		},
+	}
+	decision := QualifyCacheWarning(snap, MinContextTokensForWarning, true, now)
+	if !decision.Warn {
+		t.Fatal("legacy analysis with qualifying RequestSamples should warn")
 	}
 }
 

@@ -1,0 +1,8 @@
+{
+  "session_id": "codex-fixture-session",
+  "hook_event_name": "PostCompact",
+  "model": "glm-5.1",
+  "trigger": "automatic",
+  "permission_mode": "default",
+  "compaction_metadata": "ignored"
+}

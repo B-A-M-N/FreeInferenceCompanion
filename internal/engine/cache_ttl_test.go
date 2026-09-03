@@ -7,8 +7,6 @@ import (
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
 
-func ptrTime(t time.Time) *time.Time { return &t }
-
 func ptrInt(v int) *int { return &v }
 
 // ---------------------------------------------------------------------------
@@ -106,7 +104,6 @@ func TestModelChangeInvalidatesCacheInterpretation(t *testing.T) {
 		Provider: schema.ProviderInfo{Confirmed: true, Name: schema.ProviderFreeInference},
 		CacheTiming: &schema.CacheTiming{
 			LastInferenceObservedAt: time.Now().Add(-10 * time.Minute),
-			CachePolicyVersion:      "v1",
 		},
 		UsageObservations: []schema.UsageObservation{
 			{Fingerprint: "obs1", ModelID: "model-a", ObservedAt: time.Now().Add(-6 * time.Minute),
@@ -273,16 +270,17 @@ func TestV2UsesCacheTimingNotLastEventAt(t *testing.T) {
 		Provider: schema.ProviderInfo{Confirmed: true, Name: schema.ProviderFreeInference},
 		CacheTiming: &schema.CacheTiming{
 			LastInferenceObservedAt: cacheTime,
-			// No provider TTL — falls back to 5min PromptCacheTTL
+			// No provider TTL — expiry remains unknown.
 		},
 	}
 
 	now := time.Now()
 	// Pass the stale eventTime (10min) as the fallback parameter, but
-	// EvaluateCacheTTLExpiryV2 should use CacheTiming (3min) instead.
+	// EvaluateCacheTTLExpiryV2 should use CacheTiming (3min) instead, but
+	// without provider TTL it must not infer expiry.
 	decision := EvaluateCacheTTLExpiryV2(snap, 50000, eventTime, now)
 	if decision.Warn {
-		t.Error("should not warn: CacheTiming is 3min, below PromptCacheTTL")
+		t.Error("should not warn without provider-confirmed TTL")
 	}
 }
 
@@ -316,6 +314,12 @@ func TestCacheTTLWarningMessageV2Messages(t *testing.T) {
 	if !containsString(msg2, "idle 8m") {
 		t.Errorf("expected 'idle 8m', got: %s", msg2)
 	}
+	if !containsString(msg2, "may need to rebuild the cached prefix") {
+		t.Errorf("known TTL should explain the possible rebuild, got: %s", msg2)
+	}
+	if containsString(msg2, "full price") || containsString(msg2, "will re-read") {
+		t.Errorf("known TTL should not overclaim billing or cache behavior, got: %s", msg2)
+	}
 	// Should NOT contain uncertainty language when TTL is known.
 	if containsString(msg2, "may have") {
 		t.Errorf("known TTL should not use uncertain language, got: %s", msg2)
@@ -337,8 +341,7 @@ func TestZeroProviderTTLFallback(t *testing.T) {
 
 	now := time.Now()
 	decision := EvaluateCacheTTLExpiryV2(snap, 50000, time.Now().Add(-10*time.Minute), now)
-	// 0 should not be treated as a valid TTL, so falls back to PromptCacheTTL (5min).
-	// 10min idle > 5min → should warn.
+	// 0 should not be treated as a valid provider TTL.
 	if decision.Warn {
 		t.Error("zero TTL should not warn without provider-confirmed TTL")
 	}

@@ -58,13 +58,20 @@ func LoadSessionIndex(paths Paths) (*SessionIndex, error) {
 // non-blocking lock. Lock contention is not an error — the index is
 // best-effort and will be updated by a later mutation.
 //
-// The SessionID stored in the index is MASKED (secure.MaskSessionID): it is
-// sufficient for a human to recognize a session but does not expose the raw
-// handle. Resolution from the index back to the real session directory is by
-// SessionKey (the hash), never by matching the masked form.
+// The SessionID stored in the index is raw because it is load-bearing for
+// lookup and is protected by the private 0600 index file. Human-facing
+// renderers must mask it with secure.MaskSessionID. Resolution from the index
+// back to the real session directory is by SessionKey (the hash), never by
+// matching a masked form.
 func UpdateSessionIndex(paths Paths, snap *schema.Snapshot) error {
 	if snap == nil || snap.Session.ID == "" {
 		return nil
+	}
+	if err := validateClientType(snap.Client.Type); err != nil {
+		return err
+	}
+	if err := validateSessionID(snap.Session.ID); err != nil {
+		return err
 	}
 	// Ensure the sessions-index directory exists before acquiring the lock.
 	// This is an unnamespaced directory shared across all activations.

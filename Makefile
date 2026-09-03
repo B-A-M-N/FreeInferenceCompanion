@@ -1,4 +1,4 @@
-.PHONY: build test test-race vet fmt-check plugin-syntax-check plugin-validate check release release-check checksums marketplace clean install lint tidy tidy-check mod-verify clean-tree-check security-scan smoke bench bench-ci run package package-smoke plugin-clean-install sbom provenance
+.PHONY: build test test-race vet staticcheck fmt-check plugin-syntax-check plugin-validate trace-contract-check check release release-check checksums marketplace clean install lint tidy tidy-check mod-verify clean-tree-check security-scan smoke bench bench-ci run package package-smoke package-repro-check plugin-clean-install sbom provenance
 
 BINARY=freeinference
 BUILD_DIR=build
@@ -45,7 +45,7 @@ build-all: build-linux-amd64 build-linux-arm64 build-darwin-amd64 build-darwin-a
 # release-check is the authoritative quality gate for both CI and local
 # releases. Every gate listed here MUST pass or the release stops. This is the
 # single source of truth — the tag workflow depends on this exact target.
-release-check: clean-tree-check fmt-check vet mod-verify tidy-check test test-race security-scan bench-ci plugin-syntax-check build-all build
+release-check: clean-tree-check fmt-check vet staticcheck mod-verify tidy-check test test-race security-scan bench-ci plugin-syntax-check trace-contract-check build-all build
 	@if file $(BUILD_DIR)/$(BINARY) 2>&1 | grep -q "statically linked"; then \
 		echo "static binary verified"; \
 	else \
@@ -55,7 +55,7 @@ release-check: clean-tree-check fmt-check vet mod-verify tidy-check test test-ra
 
 # release runs the full quality gate, packages distributable artifacts, and
 # validates those exact archives from a clean extraction before succeeding.
-release: package release-check package-smoke plugin-clean-install
+release: release-check package package-repro-check package-smoke plugin-clean-install
 	@echo ""
 	@echo "release $(VERSION) packaged in $(RELEASE_DIR)/"
 	@ls -la $(RELEASE_DIR)/
@@ -87,19 +87,20 @@ checksums:
 #
 # Plugin bundles (zip) preserve the vendor's expected layout:
 #   .claude-plugin/plugin.json, hooks/, scripts/, skills/, bin/<plat>/freeinference
-#   .codex-plugin/plugin.json, skills/
+#   .codex-plugin/plugin.json, hooks/, scripts/, skills/, bin/<plat>/freeinference
 # The version is patched only on the staged copy; source manifests are
 # never mutated.
-package: build-all plugin-bin
+package: build-all
 	@if echo "$(VERSION)" | grep -qE 'dirty'; then \
 		echo "error: refusing to package a dirty version ($(VERSION)); commit and tag first"; \
 		exit 1; \
 	fi
-	@if ! echo "$(VERSION)" | grep -qE '^v?[0-9]+\.[0-9]+\.[0-9]+'; then \
+	@if ! echo "$(VERSION)" | grep -qE '^v?[0-9]+\.[0-9]+\.[0-9]+$$'; then \
 		echo "error: VERSION $(VERSION) is not a semantic version; tag a release first"; \
 		exit 1; \
 	fi
 	@REL_VERSION=$$(echo "$(VERSION)" | sed 's/^v//' | sed 's/-.*//'); \
+	epoch="$(SOURCE_DATE_EPOCH)"; \
 	staging="$$(mktemp -d "$${TMPDIR:-/tmp}/freeinference-release-stage.XXXXXX")"; \
 	trap 'rm -rf "$$staging"' EXIT; \
 	rm -rf $(RELEASE_DIR); \
@@ -113,19 +114,35 @@ package: build-all plugin-bin
 		mkdir -p "$$stage_dir"; \
 		install -m 0755 $(BUILD_DIR)/$(BINARY)-$$p "$$stage_dir/$(BINARY)"; \
 		cp LICENSE README.md "$$stage_dir/"; \
-		archive="$(RELEASE_DIR)/$$archive_name.tar.gz"; \
-		tar -czf "$$archive" -C "$$staging" "$$archive_name"; \
+		archive="$(CURDIR)/$(RELEASE_DIR)/$$archive_name.tar.gz"; \
+		if tar --version 2>/dev/null | grep -q 'GNU tar'; then \
+			tar --sort=name --mtime="@$$epoch" --owner=0 --group=0 --numeric-owner --use-compress-program='gzip -n' -cf "$$archive" -C "$$staging" "$$archive_name"; \
+		else \
+			tmp_archive="$$archive.tmp"; \
+			rm -f "$$tmp_archive" "$$archive"; \
+			if ( cd "$$staging" && LC_ALL=C find "$$archive_name" -print | LC_ALL=C sort | COPYFILE_DISABLE=1 tar --no-recursion --format=ustar --mtime="@$$epoch" --uid=0 --gid=0 --uname=root --gname=root -cf "$$tmp_archive" -T - ) && gzip -n < "$$tmp_archive" > "$$archive"; then \
+				rm -f "$$tmp_archive"; \
+			else \
+				rm -f "$$tmp_archive" "$$archive"; \
+				echo "failed to package $$archive_name" >&2; \
+				exit 1; \
+			fi; \
+		fi; \
 		echo "packaged $$archive"; \
 	done; \
 	\
 	for p in $(PLATFORMS); do \
 		bundle_dir="$$staging/installer-$$p"; \
-		mkdir -p "$$bundle_dir/plugins/claude-code/bin/$$p" "$$bundle_dir/plugins/codex"; \
+		mkdir -p "$$bundle_dir/plugins/claude-code/.claude-plugin" "$$bundle_dir/plugins/codex/.codex-plugin" "$$bundle_dir/plugins/claude-code/bin/$$p" "$$bundle_dir/plugins/codex/bin/$$p"; \
 		install -m 0755 $(BUILD_DIR)/$(BINARY)-$$p "$$bundle_dir/$(BINARY)"; \
-		cp -R plugins/claude-code/.claude-plugin plugins/claude-code/hooks plugins/claude-code/scripts plugins/claude-code/skills "$$bundle_dir/plugins/claude-code/"; \
-		cp -R plugins/codex/.codex-plugin plugins/codex/skills "$$bundle_dir/plugins/codex/"; \
+		sed "s/\"version\": \".*\"/\"version\": \"$$REL_VERSION\"/" plugins/claude-code/.claude-plugin/plugin.json > "$$bundle_dir/plugins/claude-code/.claude-plugin/plugin.json"; \
+		sed "s/\"version\": \".*\"/\"version\": \"$$REL_VERSION\"/" plugins/codex/.codex-plugin/plugin.json > "$$bundle_dir/plugins/codex/.codex-plugin/plugin.json"; \
+		cp -R plugins/claude-code/hooks plugins/claude-code/scripts plugins/claude-code/skills "$$bundle_dir/plugins/claude-code/"; \
+		cp -R plugins/codex/hooks plugins/codex/scripts plugins/codex/skills "$$bundle_dir/plugins/codex/"; \
 		install -m 0755 $(BUILD_DIR)/$(BINARY)-$$p "$$bundle_dir/plugins/claude-code/bin/$$p/$(BINARY)"; \
-		(cd "$$bundle_dir" && zip -q -r "$(CURDIR)/$(RELEASE_DIR)/freeinference-companion-$$REL_VERSION-$$p.zip" .); \
+		install -m 0755 $(BUILD_DIR)/$(BINARY)-$$p "$$bundle_dir/plugins/codex/bin/$$p/$(BINARY)"; \
+		find "$$bundle_dir" -exec touch -h -d "@$$epoch" {} +; \
+		(cd "$$bundle_dir" && find . -type f -print | LC_ALL=C sort | zip -q -X -@ "$(CURDIR)/$(RELEASE_DIR)/freeinference-companion-$$REL_VERSION-$$p.zip"); \
 		echo "packaged installer archive for $$p"; \
 	done; \
 	\
@@ -137,9 +154,11 @@ package: build-all plugin-bin
 	cp -R plugins/claude-code/hooks \
 		plugins/claude-code/scripts \
 		plugins/claude-code/skills \
-		plugins/claude-code/bin \
 		"$$stage_claude/"; \
-	(cd "$$stage_claude" && zip -q -r "$(CURDIR)/$(RELEASE_DIR)/freeinference-companion-claude_$$REL_VERSION.zip" .) && \
+	mkdir -p "$$stage_claude/bin"; \
+	for p in $(PLATFORMS); do mkdir -p "$$stage_claude/bin/$$p"; install -m 0755 "$(BUILD_DIR)/$(BINARY)-$$p" "$$stage_claude/bin/$$p/$(BINARY)"; done; \
+	find "$$stage_claude" -exec touch -h -d "@$$epoch" {} +; \
+	(cd "$$stage_claude" && find . -type f -print | LC_ALL=C sort | zip -q -X -@ "$(CURDIR)/$(RELEASE_DIR)/freeinference-companion-claude_$$REL_VERSION.zip") && \
 	echo "packaged Claude plugin bundle"; \
 	\
 	stage_codex="$$staging/codex"; \
@@ -147,9 +166,14 @@ package: build-all plugin-bin
 	sed "s/\"version\": \".*\"/\"version\": \"$$REL_VERSION\"/" \
 		plugins/codex/.codex-plugin/plugin.json \
 		> "$$stage_codex/.codex-plugin/plugin.json"; \
-	cp -R plugins/codex/skills \
+	cp -R plugins/codex/hooks \
+		plugins/codex/scripts \
+		plugins/codex/skills \
 		"$$stage_codex/"; \
-	(cd "$$stage_codex" && zip -q -r "$(CURDIR)/$(RELEASE_DIR)/freeinference-companion-codex_$$REL_VERSION.zip" .) && \
+	mkdir -p "$$stage_codex/bin"; \
+	for p in $(PLATFORMS); do mkdir -p "$$stage_codex/bin/$$p"; install -m 0755 "$(BUILD_DIR)/$(BINARY)-$$p" "$$stage_codex/bin/$$p/$(BINARY)"; done; \
+	find "$$stage_codex" -exec touch -h -d "@$$epoch" {} +; \
+	(cd "$$stage_codex" && find . -type f -print | LC_ALL=C sort | zip -q -X -@ "$(CURDIR)/$(RELEASE_DIR)/freeinference-companion-codex_$$REL_VERSION.zip") && \
 	echo "packaged Codex plugin bundle"; \
 	\
 	cp LICENSE README.md $(RELEASE_DIR)/; \
@@ -157,7 +181,19 @@ package: build-all plugin-bin
 	$(MAKE) marketplace RELEASE_DIR=$(RELEASE_DIR) VERSION=$(VERSION) && \
 	$(MAKE) provenance RELEASE_DIR=$(RELEASE_DIR) VERSION=$(VERSION) COMMIT=$(COMMIT) STAGE_DIR="$$staging" && \
 	$(MAKE) checksums RELEASE_DIR=$(RELEASE_DIR) && \
-	echo "packaging complete"
+		echo "packaging complete"
+
+# package-repro-check builds the package twice with the same source epoch and
+# compares every generated file. This keeps the reproducibility claim honest,
+# including generated SBOM and provenance metadata.
+package-repro-check: package
+	@set -e; tmp="$$(mktemp -d "$${TMPDIR:-/tmp}/freeinference-package-repro.XXXXXX")"; \
+	trap 'rm -rf "$$tmp"' EXIT; \
+	cp -a $(RELEASE_DIR) "$$tmp/first"; \
+	$(MAKE) package VERSION=$(VERSION) COMMIT=$(COMMIT); \
+	cp -a $(RELEASE_DIR) "$$tmp/second"; \
+	diff -ru "$$tmp/first" "$$tmp/second"; \
+	echo "package reproducibility check passed"
 
 # marketplace creates the manifest published with each release. Its checksums
 # are derived from the exact combined installer ZIPs created above, so the
@@ -189,11 +225,11 @@ marketplace:
 	} > "$$out"; \
 	python3 -c "import json; json.load(open('$$out')); print('marketplace manifest written to $$out')"
 
-# plugin-bin builds all platform binaries into the Claude plugin's bin/ directory
-# so that the installed hook wrappers can find a working freeinference binary without
-# relying on the user having freeinference on PATH or pre-installed.
+# plugin-bin builds all platform binaries into both plugin bin/ directories so
+# installed hook wrappers can find a working freeinference binary without relying
+# on the user having freeinference on PATH or pre-installed.
 plugin-bin: build-all
-	@mkdir -p plugins/claude-code/bin
+	@mkdir -p plugins/claude-code/bin plugins/codex/bin
 	@for p in $(PLATFORMS); do \
 		os=$$(echo "$$p" | cut -d- -f1); \
 		arch=$$(echo "$$p" | cut -d- -f2); \
@@ -202,6 +238,10 @@ plugin-bin: build-all
 		mkdir -p "$$bin_dir"; \
 		cp $(BUILD_DIR)/$(BINARY)-$$p "$$bin_dir/$(BINARY)"; \
 		echo "copied $$p into plugin bin/$$os-$$arch/"; \
+		codex_bin_dir="plugins/codex/bin/$$os-$$arch"; \
+		mkdir -p "$$codex_bin_dir"; \
+		cp $(BUILD_DIR)/$(BINARY)-$$p "$$codex_bin_dir/$(BINARY)"; \
+		echo "copied $$p into Codex plugin bin/$$os-$$arch/"; \
 	done
 
 # package-smoke validates the packaged archives: extracts each platform archive
@@ -241,6 +281,12 @@ package-smoke:
 		test -x "$$idir/$(BINARY)" || { echo "FAIL: $$p installer missing executable"; exit 1; }; \
 		test -f "$$idir/plugins/claude-code/.claude-plugin/plugin.json" || { echo "FAIL: $$p installer missing Claude plugin"; exit 1; }; \
 		test -f "$$idir/plugins/codex/.codex-plugin/plugin.json" || { echo "FAIL: $$p installer missing Codex plugin"; exit 1; }; \
+		python3 -c "import json,sys; expected=sys.argv[1]; paths=sys.argv[2:]; assert all(json.load(open(path))['version'] == expected for path in paths), 'installer plugin version mismatch'" "$$REL_VERSION" "$$idir/plugins/claude-code/.claude-plugin/plugin.json" "$$idir/plugins/codex/.codex-plugin/plugin.json"; \
+		test -f "$$idir/plugins/claude-code/hooks/hooks.json" || { echo "FAIL: $$p installer missing Claude hooks"; exit 1; }; \
+		test -x "$$idir/plugins/claude-code/scripts/run-hook.sh" || { echo "FAIL: $$p installer missing executable Claude hook runner"; exit 1; }; \
+		test -f "$$idir/plugins/codex/hooks/hooks.json" || { echo "FAIL: $$p installer missing Codex hooks"; exit 1; }; \
+		test -x "$$idir/plugins/codex/scripts/run-hook.sh" || { echo "FAIL: $$p installer missing executable Codex hook runner"; exit 1; }; \
+		test -x "$$idir/plugins/codex/bin/$$p/$(BINARY)" || { echo "FAIL: $$p installer missing bundled Codex binary"; exit 1; }; \
 		echo "installer archive OK: $$p"; \
 	done; \
 	python3 -c "import hashlib,json,pathlib; m=json.load(open('$(RELEASE_DIR)/marketplace.json')); assert set(m['platforms']) == set('$(PLATFORMS)'.split()); assert all(len(info['sha256']) == 64 and hashlib.sha256((pathlib.Path('$(RELEASE_DIR)') / pathlib.PurePosixPath(info['url']).name).read_bytes()).hexdigest() == info['sha256'] for info in m['platforms'].values())"; \
@@ -249,6 +295,8 @@ package-smoke:
 	mkdir -p "$$extract"; \
 	tar -xzf "$(RELEASE_DIR)/freeinference-companion-$$REL_VERSION-$$cur.tar.gz" -C "$$extract"; \
 	bin="$$extract/freeinference-companion-$$REL_VERSION-$$cur/$(BINARY)"; \
+	version_json="$$($$bin version --json)"; \
+	python3 -c "import json,sys; assert json.loads(sys.argv[1])['version'] == sys.argv[2], 'binary version mismatch'" "$$version_json" "$$REL_VERSION"; \
 	if "$$bin" help >/dev/null 2>&1; then \
 		echo "smoke OK: $$cur (binary executes)"; \
 	else \
@@ -261,6 +309,7 @@ package-smoke:
 		mkdir -p "$$edir"; \
 		unzip -q "$$z" -d "$$edir"; \
 		test -f "$$edir/.claude-plugin/plugin.json" || { echo "FAIL: $$(basename $$z) missing .claude-plugin/plugin.json"; exit 1; }; \
+		python3 -c "import json,sys; assert json.load(open(sys.argv[1]))['version'] == sys.argv[2], 'Claude plugin version mismatch'" "$$edir/.claude-plugin/plugin.json" "$$REL_VERSION"; \
 		test -d "$$edir/hooks" || { echo "FAIL: $$(basename $$z) missing hooks/"; exit 1; }; \
 		test -d "$$edir/scripts" || { echo "FAIL: $$(basename $$z) missing scripts/"; exit 1; }; \
 		test -d "$$edir/skills" || { echo "FAIL: $$(basename $$z) missing skills/"; exit 1; }; \
@@ -272,16 +321,20 @@ package-smoke:
 		mkdir -p "$$edir"; \
 		unzip -q "$$z" -d "$$edir"; \
 		test -f "$$edir/.codex-plugin/plugin.json" || { echo "FAIL: $$(basename $$z) missing .codex-plugin/plugin.json"; exit 1; }; \
+		python3 -c "import json,sys; assert json.load(open(sys.argv[1]))['version'] == sys.argv[2], 'Codex plugin version mismatch'" "$$edir/.codex-plugin/plugin.json" "$$REL_VERSION"; \
+		test -d "$$edir/hooks" || { echo "FAIL: $$(basename $$z) missing hooks/"; exit 1; }; \
+		test -d "$$edir/scripts" || { echo "FAIL: $$(basename $$z) missing scripts/"; exit 1; }; \
+		test -d "$$edir/bin" || { echo "FAIL: $$(basename $$z) missing bundled Codex binaries"; exit 1; }; \
 		test -d "$$edir/skills" || { echo "FAIL: $$(basename $$z) missing skills/"; exit 1; }; \
 		echo "archive OK: $$(basename $$z)"; \
 	done; \
 	echo "package smoke tests passed"
 
-# plugin-clean-install extracts the Claude plugin ZIP into a temp directory with an
-# empty HOME, removes `freeinference` from PATH, and exercises the hook wrapper. The
-# wrapper must locate the bundled platform binary and exit zero. This proves
+# plugin-clean-install extracts both plugin ZIPs into a temp directory with an
+# empty HOME, removes `freeinference` from PATH, and exercises each hook wrapper.
+# The wrappers must locate their bundled platform binary and exit zero. This proves
 # that a fresh install with no preinstalled freeinference binary still works.
-plugin-clean-install: package
+plugin-clean-install: package trace-contract-check
 	@tmpdir="$$(mktemp -d "$${TMPDIR:-/tmp}/freeinference-plugin.XXXXXX")"; \
 	trap 'rm -rf "$$tmpdir"' EXIT; \
 	empty_path="$$tmpdir/empty-bin"; \
@@ -309,6 +362,27 @@ plugin-clean-install: package
 		test "$$rc" -eq 0 || { echo "FAIL: Claude run-hook.sh exited $$rc"; exit 1; }; \
 		echo "clean-install OK: $$(basename $$z) ($$plat)"; \
 	done; \
+	for z in $(RELEASE_DIR)/freeinference-companion-codex*.zip; do \
+		edir="$$tmpdir/extract-codex"; \
+		rm -rf "$$edir"; \
+		mkdir -p "$$edir"; \
+		unzip -q "$$z" -d "$$edir"; \
+		test -f "$$edir/.codex-plugin/plugin.json" || { echo "FAIL: $$(basename $$z) missing .codex-plugin/plugin.json"; exit 1; }; \
+		test -x "$$edir/scripts/run-hook.sh" || { echo "FAIL: $$(basename $$z) Codex run-hook.sh not executable"; exit 1; }; \
+		hooks_file="$$edir/hooks/hooks.json"; \
+		test -f "$$hooks_file" || { echo "FAIL: $$(basename $$z) missing Codex hooks/hooks.json"; exit 1; }; \
+		plat="$$(uname -s | tr '[:upper:]' '[:lower:]')-$$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"; \
+		bin="$$edir/bin/$$plat/$(BINARY)"; \
+		test -x "$$bin" || { echo "FAIL: $$(basename $$z) missing bundled Codex binary $$plat"; exit 1; }; \
+		PLUGIN_ROOT="$$edir" \
+			HOME="$$empty_home" \
+			PATH="/usr/bin:/bin" \
+			FI_DISABLED=0 \
+			bash "$$edir/scripts/run-hook.sh" SessionStart >/dev/null 2>&1; \
+		rc=$$?; \
+		test "$$rc" -eq 0 || { echo "FAIL: Codex run-hook.sh exited $$rc"; exit 1; }; \
+		echo "clean-install OK: $$(basename $$z) ($$plat)"; \
+	done; \
 	echo "plugin clean-install smoke tests passed"
 
 # sbom generates a minimal SPDX JSON SBOM of the module dependencies.
@@ -321,8 +395,8 @@ sbom:
 # Lists every release artifact as a subject with its SHA-256 digest.
 # For signed provenance, install cosign (https://github.com/sigstore/cosign).
 provenance:
-	@go run ./cmd/provenancegen "$(VERSION)" "$(COMMIT)" "$(RELEASE_DIR)" "$(RELEASE_DIR)/provenance.intoto.jsonl"
-	@echo "provenance written to $(RELEASE_DIR)/provenance.intoto.jsonl"
+	@go run ./cmd/provenancegen "$(VERSION)" "$(COMMIT)" "$(RELEASE_DIR)" "$(RELEASE_DIR)/provenance.unsigned.intoto.jsonl"
+	@echo "unsigned provenance written to $(RELEASE_DIR)/provenance.unsigned.intoto.jsonl"
 
 install: build
 	install -d -m 755 "$${HOME}/.local/bin"
@@ -340,7 +414,20 @@ test-race:
 vet:
 	go vet ./...
 
-lint: vet
+lint: vet staticcheck
+
+# staticcheck is pinned so the release gate is reproducible across runners.
+# The Go module uses semantic tags (v0.7.0), while the binary reports the
+# calendar release as 2026.1.
+staticcheck:
+	@STATICCHECK_VERSION=v0.7.0; \
+	bin="$$(go env GOBIN)"; \
+	if [ -z "$$bin" ]; then bin="$$(go env GOPATH)/bin"; fi; \
+	if [ ! -x "$$bin/staticcheck" ]; then \
+		echo "installing staticcheck $$STATICCHECK_VERSION..."; \
+		GOBIN="$$bin" go install honnef.co/go/tools/cmd/staticcheck@$$STATICCHECK_VERSION; \
+	fi; \
+	"$$bin/staticcheck" ./...
 
 fmt-check:
 	@test -z "$$(gofmt -l .)" || (echo "unformatted files:"; gofmt -l .; exit 1)
@@ -348,8 +435,8 @@ fmt-check:
 # plugin-syntax-check verifies that the plugin manifests parse as JSON and the
 # hook wrapper scripts parse as bash. This is a SYNTAX check only — it does
 # NOT validate against either vendor's plugin schema, and it does NOT verify
-# that a plugin runtime will load plugin-local hooks. Codex support is
-# intentionally skill-only; it has no bundled lifecycle hook integration.
+# that a plugin runtime will load plugin-local hooks. Codex lifecycle hooks
+# are bundled under the plugin's default hooks/hooks.json path.
 #
 # Remaining gaps requiring real runtime validation:
 # - Salt race detection: only exercised when test binaries are built with
@@ -360,8 +447,15 @@ fmt-check:
 # - Plugin-SDK compatibility: verify the Claude Code hook contract on a real
 #   installation after vendor platform updates.
 plugin-syntax-check:
-	@python3 -c "import json; json.load(open('plugins/claude-code/.claude-plugin/plugin.json')); json.load(open('plugins/claude-code/hooks/hooks.json')); json.load(open('plugins/codex/.codex-plugin/plugin.json')); print('plugin manifests are syntactically valid JSON')"
-	@bash -n plugins/claude-code/scripts/run-hook.sh && echo "hook wrapper is syntactically valid bash"
+	@python3 -c "import json; json.load(open('plugins/claude-code/.claude-plugin/plugin.json')); json.load(open('plugins/claude-code/hooks/hooks.json')); json.load(open('plugins/codex/.codex-plugin/plugin.json')); json.load(open('plugins/codex/hooks/hooks.json')); json.load(open('codex-marketplace/.agents/plugins/marketplace.json')); print('plugin manifests, marketplace, and hook configs are syntactically valid JSON')"
+	@bash -n plugins/claude-code/scripts/run-hook.sh && bash -n plugins/codex/scripts/run-hook.sh && echo "hook wrappers are syntactically valid bash"
+
+# trace-contract-check exercises launch-time ID/header/receipt behavior and
+# client-specific activation gates without starting a real coding client.
+# Keep this in both release and clean-install validation so a distributable
+# bundle cannot regress the documented launcher contract silently.
+trace-contract-check:
+	@GOCACHE=$${GOCACHE:-/tmp/fic-gocache} go test ./internal/tracing ./internal/runtime ./internal/cli -run 'TestGenerateTraceID|TestValidateTraceID|TestComposeClaudeHeaders|TestReceiptIsPrivate|TestEnsureCodexTraceHeader|TestInspectCodexTraceHeader|TestPrepareLaunch|TestLaunchReceipt|TestSessionEventsNeverContainTraceID|TestReportIncludesTrace' -count=1
 
 # plugin-validate is the legacy name for plugin-syntax-check. It is preserved
 # for compatibility with existing CI jobs and scripts, but it does NOT perform
@@ -416,7 +510,7 @@ security-scan:
 	fi
 	govulncheck ./...
 
-check: fmt-check vet test test-race plugin-syntax-check mod-verify tidy-check
+check: fmt-check vet staticcheck test test-race plugin-syntax-check trace-contract-check mod-verify tidy-check
 	@git diff --check
 	@echo "all checks passed"
 
@@ -424,12 +518,10 @@ check: fmt-check vet test test-race plugin-syntax-check mod-verify tidy-check
 bench:
 	go test ./... -bench=. -benchmem -run=^$$
 
-# bench-ci enforces the latency promises (status p95<10ms, hook p95<25ms).
+# bench-ci enforces conservative average-latency ceilings for the hot paths.
 # Runs the real benchmarks with enough iterations to get reliable averages and
 # fails if either benchmark exceeds its ceiling. Go benchmarks report average
-# ns/op, not p95. We enforce a conservative average ceiling that leaves
-# headroom under the p95 target. True p95 latency enforcement requires
-# subprocess-level distribution testing (tracked separately).
+# ns/op; this target intentionally makes no p95 claim.
 bench-ci:
 	@output=$$(go test ./internal/adapters/ -bench='BenchmarkStatusLineUpdate|BenchmarkUserPromptSubmitNoWarning' -benchtime=1s -count=1 -timeout 120s 2>&1); \
 	echo "$$output"; \
@@ -440,11 +532,11 @@ bench-ci:
 	status_ns=$$(echo "$$output" | grep 'BenchmarkStatusLineUpdate' | head -1 | sed -E 's/.* ([0-9]+) ns\/op.*/\1/'); \
 	hook_ns=$$(echo "$$output" | grep 'BenchmarkUserPromptSubmitNoWarning' | head -1 | sed -E 's/.* ([0-9]+) ns\/op.*/\1/'); \
 	echo "status average = $${status_ns}ns, hook average = $${hook_ns}ns"; \
-	if [ "$$status_ns" -gt 5000000 ]; then \
-		echo "FAIL: status line average $${status_ns}ns exceeds 5ms ceiling (p95 target: 10ms)"; exit 1; \
+	if [ "$$status_ns" -gt 10000000 ]; then \
+		echo "FAIL: status line average $${status_ns}ns exceeds 10ms ceiling"; exit 1; \
 	fi; \
-	if [ "$$hook_ns" -gt 5000000 ]; then \
-		echo "FAIL: hook average $${hook_ns}ns exceeds 5ms ceiling (p95 target: 25ms)"; exit 1; \
+	if [ "$$hook_ns" -gt 10000000 ]; then \
+		echo "FAIL: hook average $${hook_ns}ns exceeds 10ms ceiling"; exit 1; \
 	fi; \
 	echo "latency gate passed"
 

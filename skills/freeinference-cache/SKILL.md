@@ -36,8 +36,9 @@ The output includes:
 
 The skill distinguishes between:
 
-- **Provider-confirmed**: FreeInference API returned cache metrics directly (authoritative)
-- **Locally inferred**: Metrics derived from local state only (lower confidence)
+- **Client-observed**: Claude Code status-line fields supplied the cache breakdown
+- **Provider-confirmed**: a future provider response explicitly confirms cache metrics
+- **Unavailable/partial**: fields were absent or the client does not expose them
 
 ### Evidence and missing evidence
 
@@ -57,7 +58,7 @@ Present causes in ranked order (highest probability first) using honest language
 ### Example output format
 
 ```
-Cache Analysis (8 unique samples, provider-confirmed)
+Cache Analysis (8 observed, 5 analyzed, 5 usable; client-observed)
 
 Latest request breakdown:
   Fresh:        12K  (2.3%)
@@ -74,7 +75,7 @@ Diagnosis: provider-confirmed
 
 Evidence:
   [OK] KV cache read metrics from provider
-  [OK] 8 unique samples (threshold: 5)
+  [OK] 5 usable samples in the analysis window
   [OK] Stable pattern over 20 requests
 
 Possible causes (cached is working well):
@@ -83,7 +84,7 @@ Possible causes (cached is working well):
   2. Possible cause: Some prompt variation in system instructions
      Evidence: 2.3% fresh share not zero — minor prompt drift detected
 
-Cache TTL: 300s (writes become readable after 5 minutes)
+Cache TTL: provider-confirmed only (local idle time does not prove expiry)
 ```
 
 ### Linking to freeinference-support
@@ -97,6 +98,7 @@ freeinference report --json       # exportable support bundle
 
 ### Notes
 
-- Cache TTL determines how long written tokens remain usable. A short TTL causes the cache to go cold more frequently.
+- A cache percentage is shown only for usable observations; missing cache fields are not treated as 0%.
+- Cache TTL is shown as authoritative only when the provider supplies a TTL. Local idle time alone does not prove expiry.
 - A fresh share above 20% may indicate prompt drift, new session, or insufficient context reuse.
-- Cache metrics are only available when the FreeInference API returns them. Without provider metrics, diagnosis is locally inferred and less reliable.
+- Codex currently has no per-request cache telemetry in this package, so `freeinference cache --client codex` reports unavailable.

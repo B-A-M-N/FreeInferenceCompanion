@@ -1,0 +1,20 @@
+{
+  "name": "freeinference-companion-local",
+  "interface": {
+    "displayName": "FreeInference Companion"
+  },
+  "plugins": [
+    {
+      "name": "freeinference-companion",
+      "source": {
+        "source": "local",
+        "path": "./plugins/freeinference-companion"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

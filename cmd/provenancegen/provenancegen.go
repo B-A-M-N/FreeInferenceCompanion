@@ -1,5 +1,5 @@
-// Command provenancegen generates an in-toto attestation-style provenance
-// file describing the FreeInference Companion release build. It scans the
+// Command provenancegen generates an unsigned in-toto provenance statement
+// envelope describing the FreeInference Companion release build. It scans the
 // release directory for all artifacts and lists each as a subject with its
 // SHA-256 digest.
 //
@@ -17,7 +17,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 )
 
 func main() {
@@ -29,7 +28,6 @@ func main() {
 	commit := os.Args[2]
 	releaseDir := os.Args[3]
 	outPath := os.Args[4]
-
 	// Collect all release artifacts with their SHA-256 digests.
 	var subjects []map[string]any
 	entries, err := os.ReadDir(releaseDir)
@@ -99,7 +97,6 @@ func main() {
 			},
 			"metadata": map[string]any{
 				"buildInvocationId": "make-release-" + version,
-				"buildStartedOn":    time.Now().UTC().Format(time.RFC3339),
 				"completeness": map[string]any{
 					"parameters":  true,
 					"environment": false,

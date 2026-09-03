@@ -97,9 +97,6 @@ func claudeDir(home string) string { return filepath.Join(home, ".claude") }
 func settingsPath(home string) string {
 	return filepath.Join(claudeDir(home), "settings.json")
 }
-func settingsLocalPath(home string) string {
-	return filepath.Join(claudeDir(home), "settings.local.json")
-}
 func wrapperPath(home string) string { return filepath.Join(claudeDir(home), wrapperName) }
 
 // metadataPath returns the path to the installation metadata file for a given
@@ -582,6 +579,8 @@ func buildWrapper(binaryPath string, previous json.RawMessage) string {
 		fmt.Fprintf(&b, "  fi_out=\"$(printf '%%s' \"$input\" | %s status --compact --color=always --client claude-code 2>/dev/null || true)\"\n", shellQuote(binaryPath))
 		b.WriteString("elif command -v freeinference >/dev/null 2>&1; then\n")
 		b.WriteString("  fi_out=\"$(printf '%s' \"$input\" | freeinference status --compact --color=always --client claude-code 2>/dev/null || true)\"\n")
+		b.WriteString("elif [[ -x \"$HOME/.local/bin/freeinference\" ]]; then\n")
+		b.WriteString("  fi_out=\"$(printf '%s' \"$input\" | \"$HOME/.local/bin/freeinference\" status --compact --color=always --client claude-code 2>/dev/null || true)\"\n")
 		b.WriteString("fi\n")
 	} else {
 		b.WriteString("if command -v freeinference >/dev/null 2>&1; then\n")

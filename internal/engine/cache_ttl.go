@@ -7,13 +7,11 @@ import (
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
 
-// Anthropic's prompt cache expires after this idle duration. Requests
-// sharing a cached prefix within this window get ~90% off; after it,
-// the full context is re-billed at normal price.
 const (
-	// PromptCacheTTL is the server-side prompt cache lifetime. We use 5min
-	// to match Anthropic's documented TTL. The companion never makes the
-	// API call, so this is an estimate — but it's the right estimate.
+	// PromptCacheTTL is retained only for the deprecated estimator API and
+	// compatibility with older callers. New warning paths require a
+	// provider-confirmed CacheTTLSeconds value and never use this default to
+	// claim that a cache expired.
 	PromptCacheTTL = 5 * time.Minute
 
 	// CacheTTLWarningCooldown suppresses repeat TTL warnings within one
@@ -34,14 +32,13 @@ type CacheTTLDecision struct {
 	IdleMinutes int
 }
 
-// EvaluateCacheTTLExpiry checks whether the prompt cache has likely expired
-// due to session idle time. Returns a decision describing whether a warning
-// should fire and the idle duration in minutes.
+// EvaluateCacheTTLExpiry is the legacy estimator. It is retained for source
+// compatibility, but new code should use EvaluateCacheTTLExpiryV2, which
+// refuses to infer expiry without provider-confirmed TTL data.
 //
-// The companion cannot observe the actual cache state — it infers eviction
-// from idle duration. The idle clock starts at the last activity (status
-// observation, prompt, or turn event) and stops at the current prompt submit.
-// If the gap exceeds PromptCacheTTL, the cache prefix is almost certainly gone.
+// The companion cannot observe the actual cache state. This compatibility
+// wrapper delegates to the provider-confirmed implementation below and will
+// not infer eviction from a local idle timer.
 //
 // The caller MUST pass the previous LastEventAt (before overwriting it with
 // now), not the current snapshot's value — the hook handler updates
@@ -54,25 +51,7 @@ type CacheTTLDecision struct {
 //   - lastEventAt must be non-zero.
 //   - Cooldown is checked by the caller (this function is pure evaluation).
 func EvaluateCacheTTLExpiry(snap *schema.Snapshot, activeTokens int64, lastEventAt time.Time, now time.Time) CacheTTLDecision {
-	if snap == nil || lastEventAt.IsZero() {
-		return CacheTTLDecision{}
-	}
-	if !isConfirmedFI(snap.Provider) {
-		return CacheTTLDecision{}
-	}
-	if activeTokens < MinActiveTokensForTTLWarning {
-		return CacheTTLDecision{}
-	}
-
-	idle := now.Sub(lastEventAt)
-	if idle < PromptCacheTTL {
-		return CacheTTLDecision{}
-	}
-
-	return CacheTTLDecision{
-		Warn:        true,
-		IdleMinutes: int(idle.Minutes()),
-	}
+	return EvaluateCacheTTLExpiryV2(snap, activeTokens, lastEventAt, now)
 }
 
 // ShouldShowCacheTTLWarning applies the cooldown gate. A TTL warning shows
@@ -99,10 +78,8 @@ func ShouldShowCacheTTLWarning(snap *schema.Snapshot, now time.Time) bool {
 func CacheTTLWarningMessage(idleMinutes int, activeTokens int64) string {
 	tokens := formatTokenCountBrief(activeTokens)
 	return fmt.Sprintf(
-		"FreeInference: prompt cache likely expired (idle %dm). "+
-			"Your next request will re-read ~%s of context at full price. "+
-			"The next request may rebuild the cached prefix. "+
-			"Consider whether preserving the current context is worth that one-time processing cost.",
+		"FreeInference: prompt cache may have expired (idle %dm without confirmed TTL data). "+
+			"Your next request may need to rebuild the cached prefix (~%s of context).",
 		idleMinutes, tokens)
 }
 
@@ -160,23 +137,23 @@ func EvaluateCacheTTLExpiryV2(snap *schema.Snapshot, activeTokens int64, lastEve
 // distinguishes known vs. unknown TTL data.
 //
 // If CacheTTLSeconds is nil: "FreeInference: prompt cache may have expired
-// (idle Xm without confirmed TTL data). Your next request might re-read
-// context at full price."
+// (idle Xm without confirmed TTL data). Your next request may need to rebuild
+// the cached prefix."
 //
 // If CacheTTLSeconds is set: "FreeInference: prompt cache expired (provider
-// TTL: Xs, idle Xm). Your next request will re-read context at full price."
+// TTL: Xs, idle Xm). Your next request may need to rebuild the cached prefix."
 func CacheTTLWarningMessageV2(snap *schema.Snapshot, idleMinutes int, activeTokens int64) string {
 	if snap == nil || snap.CacheTiming == nil || snap.CacheTiming.CacheTTLSeconds == nil {
 		return fmt.Sprintf(
 			"FreeInference: prompt cache may have expired (idle %dm without confirmed TTL data). "+
-				"Your next request might re-read context at full price.",
+				"Your next request may need to rebuild the cached prefix.",
 			idleMinutes)
 	}
 
 	providerTTL := *snap.CacheTiming.CacheTTLSeconds
 	return fmt.Sprintf(
 		"FreeInference: prompt cache expired (provider TTL: %ds, idle %dm). "+
-			"Your next request will re-read context at full price.",
+			"Your next request may need to rebuild the cached prefix.",
 		providerTTL, idleMinutes)
 }
 

@@ -1,14 +1,18 @@
 package background
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"syscall"
 	"time"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/api"
+	"github.com/b-a-m-n/freeinference-companion/internal/failures"
+	"github.com/b-a-m-n/freeinference-companion/internal/secure"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
@@ -18,13 +22,26 @@ const (
 	WorkerModels       = "models"
 	WorkerHealth       = "health"
 	WorkerAccountUsage = "account-usage"
+	WorkerPublicStatus = "public-status"
 )
 
 // Cache TTLs.
 const (
 	ModelsTTL       = 6 * time.Hour
-	HealthTTL       = 120 * time.Second
-	AccountUSageTTL = 60 * time.Minute
+	HealthTTL       = schema.DefaultHealthMaxAge
+	AccountUsageTTL = schema.DefaultAccountUsageMaxAge
+	// AccountUSageTTL is kept as a source-compatibility alias for older
+	// embedders; new code should use AccountUsageTTL.
+	AccountUSageTTL = AccountUsageTTL
+	PublicStatusTTL = 20 * time.Minute
+
+	// AutomaticRefreshMinInterval is shared by all authenticated metadata
+	// workers. It prevents several stale workers spawned by one session from
+	// creating a burst against the provider API.
+	AutomaticRefreshMinInterval = time.Minute
+	// AutomaticRateLimitCooldown is the conservative fallback when a provider
+	// returns 429 without a usable Retry-After value.
+	AutomaticRateLimitCooldown = 15 * time.Minute
 )
 
 // Backoff intervals for consecutive failures: 2 → 5 → 15 → 30 minutes.
@@ -41,6 +58,7 @@ type RefreshResult struct {
 	ModelsRefreshed        bool   `json:"models_refreshed"`
 	HealthRefreshed        bool   `json:"health_refreshed"`
 	AccountUsageRefreshed  bool   `json:"account_usage_refreshed"`
+	PublicStatusRefreshed  bool   `json:"public_status_refreshed"`
 	AccountUsageCapability string `json:"account_usage_capability,omitempty"`
 	Skipped                bool   `json:"skipped"`
 	SkipReason             string `json:"skip_reason,omitempty"`
@@ -53,6 +71,9 @@ type Refresher struct {
 	Client    *api.Client
 	Paths     state.Paths
 	HealthURL string
+	// PublicStatusFetch is injectable for tests. Production callers leave it
+	// nil, which uses the unauthenticated public monitor endpoint.
+	PublicStatusFetch func(context.Context) (*api.PublicStatusResponse, error)
 }
 
 // NewRefresher creates a new Refresher.
@@ -71,9 +92,17 @@ func NewRefresher(client *api.Client, paths state.Paths, healthURL string) *Refr
 // WorkerRefresh runs one refresh worker under a non-blocking process lock.
 // Concurrent workers coalesce: the second process to arrive skips immediately.
 func (r *Refresher) WorkerRefresh(worker string) *RefreshResult {
+	return r.workerRefresh(worker, true)
+}
+
+// workerRefresh performs a refresh with an explicit caller mode. Automatic
+// detached workers consume the shared provider request slot; a synchronous
+// command is already an explicit user action and must be allowed to refresh
+// each stale resource it reports.
+func (r *Refresher) workerRefresh(worker string, automatic bool) *RefreshResult {
 	result := &RefreshResult{Worker: worker}
 
-	if worker != WorkerModels && worker != WorkerHealth && worker != WorkerAccountUsage {
+	if worker != WorkerModels && worker != WorkerHealth && worker != WorkerAccountUsage && worker != WorkerPublicStatus {
 		result.Skipped = true
 		result.SkipReason = "unknown worker"
 		return result
@@ -113,6 +142,18 @@ func (r *Refresher) WorkerRefresh(worker string) *RefreshResult {
 			result.SkipReason = "cache fresh"
 			return result
 		}
+		if automatic {
+			allowed, reserveErr := reserveAutomaticRefresh(r.Paths, now)
+			if reserveErr != nil {
+				result.Error = "refresh throttle unavailable"
+				return result
+			}
+			if !allowed {
+				result.Skipped = true
+				result.SkipReason = "automatic refresh cooldown"
+				return result
+			}
+		}
 		r.refreshModels(result, now)
 	case WorkerHealth:
 		if r.HealthURL == "" {
@@ -124,6 +165,18 @@ func (r *Refresher) WorkerRefresh(worker string) *RefreshResult {
 			result.Skipped = true
 			result.SkipReason = "cache fresh"
 			return result
+		}
+		if automatic {
+			allowed, reserveErr := reserveAutomaticRefresh(r.Paths, now)
+			if reserveErr != nil {
+				result.Error = "refresh throttle unavailable"
+				return result
+			}
+			if !allowed {
+				result.Skipped = true
+				result.SkipReason = "automatic refresh cooldown"
+				return result
+			}
 		}
 		r.refreshHealth(result, now)
 	case WorkerAccountUsage:
@@ -143,7 +196,26 @@ func (r *Refresher) WorkerRefresh(worker string) *RefreshResult {
 			result.SkipReason = "cache fresh"
 			return result
 		}
+		if automatic {
+			allowed, reserveErr := reserveAutomaticRefresh(r.Paths, now)
+			if reserveErr != nil {
+				result.Error = "refresh throttle unavailable"
+				return result
+			}
+			if !allowed {
+				result.Skipped = true
+				result.SkipReason = "automatic refresh cooldown"
+				return result
+			}
+		}
 		r.refreshAccountUsage(result, now)
+	case WorkerPublicStatus:
+		if !publicStatusStale(gs, now) {
+			result.Skipped = true
+			result.SkipReason = "cache fresh"
+			return result
+		}
+		r.refreshPublicStatus(result, now)
 	}
 	return result
 }
@@ -160,14 +232,14 @@ func (r *Refresher) RefreshIfStale() *RefreshResult {
 	gs, _ := state.LoadGlobal(r.Paths)
 
 	if modelsStale(gs, now) && !breakerOpen(gs, WorkerModels, now) {
-		res := r.WorkerRefresh(WorkerModels)
+		res := r.workerRefresh(WorkerModels, false)
 		result.ModelsRefreshed = res.ModelsRefreshed
 		if res.Error != "" {
 			result.Error = res.Error
 		}
 	}
 	if r.HealthURL != "" && healthStale(gs, now) && !breakerOpen(gs, WorkerHealth, now) {
-		res := r.WorkerRefresh(WorkerHealth)
+		res := r.workerRefresh(WorkerHealth, false)
 		result.HealthRefreshed = res.HealthRefreshed
 		if res.Error != "" && result.Error == "" {
 			result.Error = res.Error
@@ -176,12 +248,19 @@ func (r *Refresher) RefreshIfStale() *RefreshResult {
 	if r.Client != nil && r.Client.APIKey() != "" && accountUsageCapabilityRefreshable(gs) &&
 		!breakerOpen(gs, WorkerAccountUsage, now) {
 		if accountUsageStale(gs, now) {
-			res := r.WorkerRefresh(WorkerAccountUsage)
+			res := r.workerRefresh(WorkerAccountUsage, false)
 			result.AccountUsageRefreshed = res.AccountUsageRefreshed
 			result.AccountUsageCapability = res.AccountUsageCapability
 			if res.Error != "" && result.Error == "" {
 				result.Error = res.Error
 			}
+		}
+	}
+	if publicStatusStale(gs, now) && !breakerOpen(gs, WorkerPublicStatus, now) {
+		res := r.workerRefresh(WorkerPublicStatus, false)
+		result.PublicStatusRefreshed = res.PublicStatusRefreshed
+		if res.Error != "" && result.Error == "" {
+			result.Error = res.Error
 		}
 	}
 	return result
@@ -201,6 +280,7 @@ func (r *Refresher) ForceRefresh() *RefreshResult {
 	if r.Client != nil && r.Client.APIKey() != "" && accountUsageCapabilityRefreshable(gs) {
 		r.forceRefreshAccountUsage(result, now)
 	}
+	r.forceRefreshPublicStatus(result, now)
 	return result
 }
 
@@ -224,14 +304,30 @@ func StaleWorkersWithClient(paths state.Paths, healthURL string, apiKey string) 
 		stale = append(stale, WorkerModels)
 	}
 	if healthURL != "" && healthStale(gs, now) && !breakerOpen(gs, WorkerHealth, now) {
-		stale = append(stale, WorkerHealth)
-	}
-	if apiKey != "" && accountUsageCapabilityRefreshable(gs) && !breakerOpen(gs, WorkerAccountUsage, now) {
-		if accountUsageStale(gs, now) {
-			stale = append(stale, WorkerAccountUsage)
+		// Automatic authenticated metadata refreshes share one provider slot.
+		// Pick a deterministic priority so several stale resources cannot race
+		// and cause a burst or starve the model catalog unpredictably.
+		if !containsWorker(stale, WorkerModels) {
+			stale = append(stale, WorkerHealth)
 		}
 	}
+	if apiKey != "" && accountUsageCapabilityRefreshable(gs) && !breakerOpen(gs, WorkerAccountUsage, now) &&
+		accountUsageStale(gs, now) && !containsWorker(stale, WorkerModels) && !containsWorker(stale, WorkerHealth) {
+		stale = append(stale, WorkerAccountUsage)
+	}
+	if publicStatusStale(gs, now) && !breakerOpen(gs, WorkerPublicStatus, now) {
+		stale = append(stale, WorkerPublicStatus)
+	}
 	return stale
+}
+
+func containsWorker(workers []string, wanted string) bool {
+	for _, worker := range workers {
+		if worker == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 // SpawnDetachedWorkers launches one detached `freeinference refresh --worker <name>`
@@ -290,6 +386,24 @@ func healthStale(gs *schema.GlobalState, now time.Time) bool {
 	return now.Sub(fetched) > HealthTTL
 }
 
+func publicStatusStale(gs *schema.GlobalState, now time.Time) bool {
+	if gs == nil || gs.PublicStatus == nil || gs.PublicStatus.FetchedAt.IsZero() {
+		return true
+	}
+	fetched := schema.SanitizeTimestamp(gs.PublicStatus.FetchedAt, now)
+	if now.Sub(fetched) > PublicStatusTTL {
+		return true
+	}
+	if gs.PublicStatus.CheckedAt.IsZero() || now.Before(schema.SanitizeTimestamp(gs.PublicStatus.CheckedAt, now)) || now.Sub(schema.SanitizeTimestamp(gs.PublicStatus.CheckedAt, now)) > api.PublicStatusStaleAfter {
+		return true
+	}
+	return false
+}
+
+func reserveAutomaticRefresh(paths state.Paths, now time.Time) (bool, error) {
+	return state.ReserveRefreshSlot(paths, now, AutomaticRefreshMinInterval)
+}
+
 func breakerOpen(gs *schema.GlobalState, endpoint string, now time.Time) bool {
 	if gs == nil {
 		return false
@@ -318,13 +432,13 @@ func (r *Refresher) refreshModels(result *RefreshResult, now time.Time) {
 	catalog := make([]schema.CatalogModel, 0, len(models))
 	for _, m := range models {
 		catalog = append(catalog, schema.CatalogModel{
-			ID:              m.ID,
-			Name:            m.Name,
+			ID:              secure.SanitizeField(m.ID),
+			Name:            secure.SanitizeField(m.Name),
 			ContextLength:   m.ContextLength,
 			MaxOutputLength: m.MaxOutputLength,
 			AccessState:     schema.AccessUnknown,
-			Pricing:         m.Pricing,
-			Features:        m.SupportedFeatures,
+			Pricing:         sanitizeCatalogPricing(m.Pricing),
+			Features:        sanitizeCatalogStrings(m.SupportedFeatures, schema.MaxCatalogFeatures),
 		})
 	}
 
@@ -381,6 +495,227 @@ func (r *Refresher) refreshHealth(result *RefreshResult, now time.Time) {
 	r.resetCircuitBreaker(WorkerHealth)
 }
 
+func (r *Refresher) refreshPublicStatus(result *RefreshResult, now time.Time) {
+	fetch := r.PublicStatusFetch
+	if fetch == nil {
+		fetch = api.FetchPublicStatus
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	status, err := fetch(ctx)
+	if err != nil {
+		r.recordFailure(WorkerPublicStatus, err, now)
+		r.recordPublicStatusFailure(now, failures.Normalize(err.Error()).Category)
+		result.Error = "public status fetch failed"
+		return
+	}
+	cache, err := publicStatusCache(status, now)
+	if err != nil {
+		r.recordFailure(WorkerPublicStatus, err, now)
+		r.recordPublicStatusFailure(now, failures.Normalize(err.Error()).Category)
+		result.Error = "public status validation failed"
+		return
+	}
+	if err := state.SavePublicStatus(r.Paths, cache); err != nil {
+		result.Error = "save public status"
+		return
+	}
+	result.PublicStatusRefreshed = true
+	r.resetCircuitBreaker(WorkerPublicStatus)
+}
+
+func publicStatusCache(status *api.PublicStatusResponse, now time.Time) (*schema.PublicStatusCache, error) {
+	if status == nil {
+		return nil, errors.New("public status response is nil")
+	}
+	if err := status.Validate(); err != nil {
+		return nil, err
+	}
+	if status.Cycle.ValidationError != "" {
+		return nil, errors.New("public status cycle is invalid")
+	}
+	checkedAt, err := time.Parse(time.RFC3339Nano, status.Cycle.CheckedAt)
+	if err != nil {
+		return nil, errors.New("public status cycle timestamp is invalid")
+	}
+	if checkedAt.After(now.UTC().Add(api.PublicStatusClockSkewTolerance)) {
+		return nil, errors.New("public status cycle timestamp is in the future")
+	}
+	if checkedAt.After(now.UTC()) {
+		checkedAt = now.UTC()
+	}
+	if now.Sub(checkedAt) > api.PublicStatusStaleAfter {
+		return nil, errors.New("public status cycle is stale")
+	}
+	cache := &schema.PublicStatusCache{
+		FetchedAt:  now.UTC(),
+		CheckedAt:  checkedAt.UTC(),
+		Source:     api.PublicStatusSource,
+		Total:      status.Total,
+		Healthy:    status.Healthy,
+		Unhealthy:  status.Unhealthy,
+		CycleOK:    status.Cycle.OK,
+		CycleError: publicStatusText(status.Cycle.Error),
+	}
+	for i, model := range status.Models {
+		if i >= schema.MaxPublicStatusModels {
+			break
+		}
+		if model.ValidationError != "" {
+			continue
+		}
+		entry := schema.PublicStatusModelCache{
+			ModelID:     secure.SanitizeField(model.ModelID),
+			UptimeRatio: model.UptimeRatio,
+		}
+		if model.Latest != nil {
+			latest, ok := cachedPublicStatusSample(*model.Latest)
+			if !ok {
+				continue
+			}
+			entry.Latest = &latest
+		}
+		entry.History = cachedPublicStatusHistory(model, entry.Latest)
+		if entry.Latest == nil && len(entry.History) == 0 {
+			continue
+		}
+		cache.Models = append(cache.Models, entry)
+	}
+	if len(cache.Models) == 0 {
+		return nil, errors.New("public status contains no valid model metrics")
+	}
+	return cache, nil
+}
+
+// cachedPublicStatusSample copies one already-validated public sample into
+// the durable schema and normalizes its timestamp. Pointers are copied so a
+// caller cannot mutate the cache through the response object after refresh.
+func cachedPublicStatusSample(sample api.PublicStatusSample) (schema.PublicStatusSampleCache, bool) {
+	checkedAt, err := time.Parse(time.RFC3339Nano, sample.CheckedAt)
+	if err != nil {
+		return schema.PublicStatusSampleCache{}, false
+	}
+	return schema.PublicStatusSampleCache{
+		OK:               copyBool(sample.OK),
+		CheckedAt:        checkedAt.UTC(),
+		LatencyMs:        copyInt64(sample.LatencyMs),
+		TTFTMs:           copyInt64(sample.TTFTMs),
+		CompletionTokens: copyInt64(sample.CompletionTokens),
+		ThroughputTps:    copyFloat64(sample.ThroughputTps),
+		Error:            publicStatusText(sample.Error),
+	}, true
+}
+
+// cachedPublicStatusHistory retains the newest distinct synthetic samples
+// from both history and spark. The endpoint may expose either collection, and
+// deduplication prevents the same check from consuming the whole bound twice.
+func cachedPublicStatusHistory(model api.PublicStatusModel, latest *schema.PublicStatusSampleCache) []schema.PublicStatusSampleCache {
+	type candidate struct {
+		sample api.PublicStatusSample
+		at     time.Time
+	}
+	candidates := make([]candidate, 0, len(model.History)+len(model.Spark))
+	for _, sample := range append(append([]api.PublicStatusSample{}, model.History...), model.Spark...) {
+		cached, ok := cachedPublicStatusSample(sample)
+		if !ok {
+			continue
+		}
+		if latest != nil && cached.CheckedAt.Equal(latest.CheckedAt) {
+			continue
+		}
+		candidates = append(candidates, candidate{sample: sample, at: cached.CheckedAt})
+	}
+	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].at.After(candidates[j].at) })
+	result := make([]schema.PublicStatusSampleCache, 0, minInt(len(candidates), schema.MaxPublicStatusSamplesPerModel))
+	seen := make(map[int64]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		key := candidate.at.UnixNano()
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		cached, ok := cachedPublicStatusSample(candidate.sample)
+		if !ok {
+			continue
+		}
+		result = append(result, cached)
+		if len(result) == schema.MaxPublicStatusSamplesPerModel {
+			break
+		}
+	}
+	return result
+}
+
+func copyBool(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func copyInt64(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func copyFloat64(value *float64) *float64 {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func minInt(left, right int) int {
+	if left < right {
+		return left
+	}
+	return right
+}
+
+func publicStatusText(value string) string {
+	value = secure.Redact(secure.SanitizeField(value))
+	if len(value) > 200 {
+		return value[:200] + "..."
+	}
+	return value
+}
+
+func (r *Refresher) recordPublicStatusFailure(now time.Time, category string) {
+	gs, _ := state.LoadGlobal(r.Paths)
+	if gs == nil {
+		gs = &schema.GlobalState{}
+	}
+	cache := gs.PublicStatus
+	if cache == nil {
+		cache = &schema.PublicStatusCache{Source: api.PublicStatusSource}
+	}
+	cache.ConsecutiveFailure++
+	cache.LastError = publicStatusText(category)
+	for _, cb := range gs.CircuitBreakers {
+		if cb.Endpoint == WorkerPublicStatus {
+			cache.NextRetryAt = cb.NextRetryAt
+			break
+		}
+	}
+	if cache.NextRetryAt == nil {
+		index := cache.ConsecutiveFailure - 1
+		if index < 0 {
+			index = 0
+		}
+		if index >= len(backoffIntervals) {
+			index = len(backoffIntervals) - 1
+		}
+		next := now.Add(backoffIntervals[index])
+		cache.NextRetryAt = &next
+	}
+	_ = state.SavePublicStatus(r.Paths, cache)
+}
+
 // recordFailure opens the circuit breaker with escalating backoff.
 // A server-supplied Retry-After overrides the computed backoff.
 //
@@ -419,6 +754,24 @@ func (r *Refresher) recordFailure(endpoint string, cause error, now time.Time) {
 		// (In production this would use structured logging.)
 		_ = err
 	}
+	if isRateLimitFailure(cause) {
+		cooldown := AutomaticRateLimitCooldown
+		if errors.As(cause, &he) && he.RetryAfter > cooldown {
+			cooldown = he.RetryAfter
+		}
+		_ = state.ExtendRefreshCooldown(r.Paths, now.Add(cooldown))
+	}
+}
+
+func isRateLimitFailure(cause error) bool {
+	if cause == nil {
+		return false
+	}
+	var he *api.HTTPError
+	if errors.As(cause, &he) {
+		return he.StatusCode == 429
+	}
+	return failures.Normalize(cause.Error()).Category == failures.RateLimit
 }
 
 func (r *Refresher) resetCircuitBreaker(endpoint string) {
@@ -468,6 +821,43 @@ func (r *Refresher) forceRefreshModels(result *RefreshResult, now time.Time) {
 	r.refreshModels(result, now)
 }
 
+// ForceWorkerRefresh explicitly refreshes exactly one requested resource.
+// This is used by resource-specific commands such as `models --refresh`; it
+// must never fan out into health, account, or public-status requests.
+func (r *Refresher) ForceWorkerRefresh(worker string) *RefreshResult {
+	result := &RefreshResult{Worker: worker}
+	switch worker {
+	case WorkerModels, WorkerHealth, WorkerAccountUsage, WorkerPublicStatus:
+	default:
+		result.Error = "unknown worker"
+		return result
+	}
+	if err := r.Paths.EnsureDirs(); err != nil {
+		result.Error = "ensure dirs"
+		return result
+	}
+	now := time.Now()
+	switch worker {
+	case WorkerModels:
+		r.forceRefreshModels(result, now)
+	case WorkerHealth:
+		if r.HealthURL == "" {
+			result.Error = "no health source configured"
+			return result
+		}
+		r.forceRefreshHealth(result, now)
+	case WorkerAccountUsage:
+		if r.Client == nil || r.Client.APIKey() == "" {
+			result.Error = "no API key configured"
+			return result
+		}
+		r.forceRefreshAccountUsage(result, now)
+	case WorkerPublicStatus:
+		r.forceRefreshPublicStatus(result, now)
+	}
+	return result
+}
+
 // forceRefreshHealth refreshes health under the worker lock but without the
 // staleness / circuit-breaker gates. Used by ForceRefresh.
 func (r *Refresher) forceRefreshHealth(result *RefreshResult, now time.Time) {
@@ -485,6 +875,41 @@ func (r *Refresher) forceRefreshHealth(result *RefreshResult, now time.Time) {
 	r.refreshHealth(result, now)
 }
 
+func sanitizeCatalogStrings(values []string, max int) []string {
+	if len(values) > max {
+		values = values[:max]
+	}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		clean := secure.SanitizeField(value)
+		if clean != "" {
+			result = append(result, clean)
+		}
+	}
+	return result
+}
+
+func sanitizeCatalogPricing(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make(map[string]string, minInt(len(values), schema.MaxCatalogPricing))
+	count := 0
+	for key, value := range values {
+		if count == schema.MaxCatalogPricing {
+			break
+		}
+		key = secure.SanitizeField(key)
+		value = secure.Redact(secure.SanitizeField(value))
+		if key == "" {
+			continue
+		}
+		result[key] = value
+		count++
+	}
+	return result
+}
+
 // ============================================================
 // Account usage
 // ============================================================
@@ -494,7 +919,7 @@ func accountUsageStale(gs *schema.GlobalState, now time.Time) bool {
 		return true
 	}
 	fetched := schema.SanitizeTimestamp(gs.AccountUsage.FetchedAt, now)
-	return now.Sub(fetched) > AccountUSageTTL
+	return now.Sub(fetched) > AccountUsageTTL
 }
 
 func accountUsageCapabilityRefreshable(gs *schema.GlobalState) bool {
@@ -545,4 +970,19 @@ func (r *Refresher) forceRefreshAccountUsage(result *RefreshResult, now time.Tim
 	}
 	defer fl.Release()
 	r.refreshAccountUsage(result, now)
+}
+
+func (r *Refresher) forceRefreshPublicStatus(result *RefreshResult, now time.Time) {
+	fl := state.NewFileLock(r.Paths.RefreshLock(WorkerPublicStatus))
+	if err := fl.Acquire(); err != nil {
+		if state.IsLockBusy(err) {
+			result.Skipped = true
+			result.SkipReason = "another worker running"
+		} else {
+			result.Error = "acquire lock"
+		}
+		return
+	}
+	defer fl.Release()
+	r.refreshPublicStatus(result, now)
 }

@@ -6,12 +6,22 @@ package installer
 
 import (
 	"archive/zip"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"unicode/utf8"
+)
+
+const (
+	maxArchiveEntries    = 4096
+	maxArchiveTotalBytes = 128 << 20
+	maxArchiveFileBytes  = 32 << 20
+	maxArchiveNameBytes  = 4096
 )
 
 // Options configures an install or update operation.
@@ -20,12 +30,11 @@ type Options struct {
 	ManifestURL string
 	// Platform is the platform key to download (e.g. "linux-amd64").
 	Platform PlatformKey
-	// ExistingVersion is the version currently installed (empty for fresh install).
+	// ExistingVersion is deprecated. Install/update determine the installed
+	// version from persistent metadata, never from the invoking executable.
 	ExistingVersion string
 	// DryRun reports what would happen without making changes.
 	DryRun bool
-	// NoBrowser skips opening a browser after installation.
-	NoBrowser bool
 	// NoPlugin skips plugin extraction.
 	NoPlugin bool
 	// NoBin skips binary installation.
@@ -36,310 +45,300 @@ type Options struct {
 
 // Result reports what was installed or updated.
 type Result struct {
-	Version       string
-	OldVersion    string
-	BinaryPath    string
-	Plugins       []string // paths to extracted plugin directories
-	PathMsg       string   // note about PATH if binary not yet on it
-	Updated       bool
-	AlreadyLatest bool
+	Version            string
+	OldVersion         string
+	BinaryPath         string
+	Plugins            []string // paths to extracted plugin directories
+	PathMsg            string   // note about PATH if binary not yet on it
+	Updated            bool
+	AlreadyLatest      bool
+	Installed          bool
+	PartiallyInstalled bool
+	Warnings           []string
+	ClaudePluginReady  bool
+	CodexFilesReady    bool
+	CodexRegistered    bool
+	CodexTrusted       bool
 }
 
 // Install performs a full installation. It downloads the release ZIP, verifies
 // the checksum, extracts the binary and plugins, and places the binary in
 // the appropriate location.
-func Install(opts Options, stdout, stderr io.Writer) (*Result, error) {
-	paths, err := DefaultPaths()
-	if err != nil {
-		return nil, fmt.Errorf("resolve paths: %w", err)
-	}
+//
+//lint:ignore U1000 retained as a source-compatibility marker for older callers
+func legacyInstall(opts Options, stdout, stderr io.Writer) (*Result, error) {
+	return Install(opts, stdout, stderr)
+	/*
+		paths, err := DefaultPaths()
+		if err != nil {
+			return nil, fmt.Errorf("resolve paths: %w", err)
+		}
 
-	manifest, err := FetchManifest(opts.ManifestURL)
-	if err != nil {
-		return nil, fmt.Errorf("fetch manifest: %w", err)
-	}
+		manifest, err := FetchManifest(opts.ManifestURL)
+		if err != nil {
+			return nil, fmt.Errorf("fetch manifest: %w", err)
+		}
 
-	if manifest.IsNewer(opts.ExistingVersion) == false && !opts.Force {
-		if opts.ExistingVersion != "" {
+		if manifest.IsNewer(opts.ExistingVersion) == false && !opts.Force {
+			if opts.ExistingVersion != "" {
+				fmt.Fprintf(stdout, "Already at latest version: %s\n", opts.ExistingVersion)
+				return &Result{
+					Version:       opts.ExistingVersion,
+					AlreadyLatest: true,
+				}, nil
+			}
+			// Fresh install: always proceed.
+		}
+
+		version := manifest.Version
+		fmt.Fprintf(stdout, "Installing FreeInference Companion %s\n", version)
+		fmt.Fprintf(stdout, "  Manifest: %s\n", opts.ManifestURL)
+
+		result := &Result{Version: version}
+
+		// Download the release ZIP.
+		pi, err := manifest.Platform(opts.Platform)
+		if err != nil {
+			return nil, err
+		}
+		fmt.Fprintf(stdout, "  Platform: %s\n  URL: %s\n", opts.Platform, pi.URL)
+		if opts.DryRun {
+			fmt.Fprintln(stdout, "  Dry run: no files will be downloaded or changed.")
+			return result, nil
+		}
+
+		tmpZip := filepath.Join(os.TempDir(), "freeinference-install-"+version+".zip")
+		if _, err := DownloadTo(pi.URL, tmpZip); err != nil {
+			return nil, fmt.Errorf("download: %w", err)
+		}
+
+		// Verify checksum.
+		data, err := os.ReadFile(tmpZip)
+		if err != nil {
+			return nil, fmt.Errorf("read zip for checksum: %w", err)
+		}
+		if err := VerifyChecksum(data, pi.Hash); err != nil {
+			os.Remove(tmpZip)
+			return nil, fmt.Errorf("checksum: %w", err)
+		}
+
+		// Extract the ZIP.
+		extractDir, err := os.MkdirTemp("", "freeinference-extract-*")
+		if err != nil {
+			os.Remove(tmpZip)
+			return nil, fmt.Errorf("temp dir: %w", err)
+		}
+		defer os.RemoveAll(extractDir)
+
+		if err := extractZIP(tmpZip, extractDir); err != nil {
+			os.Remove(tmpZip)
+			return nil, fmt.Errorf("extract: %w", err)
+		}
+		os.Remove(tmpZip)
+
+		// Install the binary.
+		if !opts.NoBin {
+			fmt.Fprintf(stdout, "  Installing binary to %s\n", paths.BinaryPath)
+			if err := installBinary(extractDir, paths); err != nil {
+				return nil, fmt.Errorf("install binary: %w", err)
+			}
+			result.BinaryPath = paths.BinaryPath
+
+			inPath, pathMsg := paths.EnsureInPath()
+			if !inPath {
+				result.PathMsg = pathMsg
+			}
+		}
+
+		// Extract plugins.
+		if !opts.NoPlugin {
+			fmt.Fprintf(stdout, "  Extracting plugins...\n")
+			if err := extractPlugins(extractDir, paths, stdout); err != nil {
+				return nil, fmt.Errorf("install plugins: %w", err)
+			}
+			result.Plugins = extractPluginPaths(paths)
+		}
+
+		// Open browser to the release page.
+		if !opts.NoBrowser {
+			releaseURL := strings.TrimSuffix(opts.ManifestURL, "/marketplace.json")
+			if releaseURL == "" {
+				releaseURL = "https://github.com/b-a-m-n/freeinference-companion/releases"
+			}
+			_ = releaseURL
+			// Intentionally not opening a browser in non-interactive installs.
+		}
+
+		fmt.Fprintf(stdout, "\nInstallation complete.\n")
+		if result.PathMsg != "" {
+			fmt.Fprintf(stdout, "  %s\n", result.PathMsg)
+		}
+
+		return result, nil
+	*/
+}
+
+// Update checks the manifest for a newer version, backs up the current binary,
+// and replaces it. Returns a Result describing what changed.
+//
+//lint:ignore U1000 retained as a source-compatibility marker for older callers
+func legacyUpdate(opts Options, stdout, stderr io.Writer) (*Result, error) {
+	return Update(opts, stdout, stderr)
+	/*
+		paths, err := DefaultPaths()
+		if err != nil {
+			return nil, fmt.Errorf("resolve paths: %w", err)
+		}
+
+		manifest, err := FetchManifest(opts.ManifestURL)
+		if err != nil {
+			return nil, fmt.Errorf("fetch manifest: %w", err)
+		}
+
+		if !manifest.IsNewer(opts.ExistingVersion) {
 			fmt.Fprintf(stdout, "Already at latest version: %s\n", opts.ExistingVersion)
 			return &Result{
 				Version:       opts.ExistingVersion,
 				AlreadyLatest: true,
 			}, nil
 		}
-		// Fresh install: always proceed.
-	}
 
-	version := manifest.Version
-	fmt.Fprintf(stdout, "Installing FreeInference Companion %s\n", version)
-	fmt.Fprintf(stdout, "  Manifest: %s\n", opts.ManifestURL)
+		fmt.Fprintf(stdout, "Updating FreeInference Companion %s -> %s\n", opts.ExistingVersion, manifest.Version)
 
-	result := &Result{Version: version}
-
-	// Download the release ZIP.
-	pi, err := manifest.Platform(opts.Platform)
-	if err != nil {
-		return nil, err
-	}
-	fmt.Fprintf(stdout, "  Platform: %s\n  URL: %s\n", opts.Platform, pi.URL)
-	if opts.DryRun {
-		fmt.Fprintln(stdout, "  Dry run: no files will be downloaded or changed.")
-		return result, nil
-	}
-
-	tmpZip := filepath.Join(os.TempDir(), "freeinference-install-"+version+".zip")
-	if _, err := DownloadTo(pi.URL, tmpZip); err != nil {
-		return nil, fmt.Errorf("download: %w", err)
-	}
-
-	// Verify checksum.
-	data, err := os.ReadFile(tmpZip)
-	if err != nil {
-		return nil, fmt.Errorf("read zip for checksum: %w", err)
-	}
-	if err := VerifyChecksum(data, pi.Hash); err != nil {
-		os.Remove(tmpZip)
-		return nil, fmt.Errorf("checksum: %w", err)
-	}
-
-	// Extract the ZIP.
-	extractDir, err := os.MkdirTemp("", "freeinference-extract-*")
-	if err != nil {
-		os.Remove(tmpZip)
-		return nil, fmt.Errorf("temp dir: %w", err)
-	}
-	defer os.RemoveAll(extractDir)
-
-	if err := extractZIP(tmpZip, extractDir); err != nil {
-		os.Remove(tmpZip)
-		return nil, fmt.Errorf("extract: %w", err)
-	}
-	os.Remove(tmpZip)
-
-	// Install the binary.
-	if !opts.NoBin {
-		fmt.Fprintf(stdout, "  Installing binary to %s\n", paths.BinaryPath)
-		if err := installBinary(extractDir, paths); err != nil {
-			return nil, fmt.Errorf("install binary: %w", err)
+		result := &Result{
+			Version:    manifest.Version,
+			OldVersion: opts.ExistingVersion,
 		}
-		result.BinaryPath = paths.BinaryPath
-
-		inPath, pathMsg := paths.EnsureInPath()
-		if !inPath {
-			result.PathMsg = pathMsg
+		pi, err := manifest.Platform(opts.Platform)
+		if err != nil {
+			return nil, err
 		}
-	}
-
-	// Extract plugins.
-	if !opts.NoPlugin {
-		fmt.Fprintf(stdout, "  Extracting plugins...\n")
-		if err := extractPlugins(extractDir, paths); err != nil {
-			return nil, fmt.Errorf("install plugins: %w", err)
+		fmt.Fprintf(stdout, "  Platform: %s\n  URL: %s\n", opts.Platform, pi.URL)
+		if opts.DryRun {
+			fmt.Fprintln(stdout, "  Dry run: no files will be downloaded or changed.")
+			return result, nil
 		}
-		result.Plugins = extractPluginPaths(paths)
-	}
 
-	// Open browser to the release page.
-	if !opts.NoBrowser {
-		releaseURL := strings.TrimSuffix(opts.ManifestURL, "/marketplace.json")
-		if releaseURL == "" {
-			releaseURL = "https://github.com/b-a-m-n/freeinference-companion/releases"
-		}
-		_ = releaseURL
-		// Intentionally not opening a browser in non-interactive installs.
-	}
-
-	fmt.Fprintf(stdout, "\nInstallation complete.\n")
-	if result.PathMsg != "" {
-		fmt.Fprintf(stdout, "  %s\n", result.PathMsg)
-	}
-
-	return result, nil
-}
-
-// Update checks the manifest for a newer version, backs up the current binary,
-// and replaces it. Returns a Result describing what changed.
-func Update(opts Options, stdout, stderr io.Writer) (*Result, error) {
-	paths, err := DefaultPaths()
-	if err != nil {
-		return nil, fmt.Errorf("resolve paths: %w", err)
-	}
-
-	manifest, err := FetchManifest(opts.ManifestURL)
-	if err != nil {
-		return nil, fmt.Errorf("fetch manifest: %w", err)
-	}
-
-	if !manifest.IsNewer(opts.ExistingVersion) {
-		fmt.Fprintf(stdout, "Already at latest version: %s\n", opts.ExistingVersion)
-		return &Result{
-			Version:       opts.ExistingVersion,
-			AlreadyLatest: true,
-		}, nil
-	}
-
-	fmt.Fprintf(stdout, "Updating FreeInference Companion %s -> %s\n", opts.ExistingVersion, manifest.Version)
-
-	result := &Result{
-		Version:    manifest.Version,
-		OldVersion: opts.ExistingVersion,
-	}
-	pi, err := manifest.Platform(opts.Platform)
-	if err != nil {
-		return nil, err
-	}
-	fmt.Fprintf(stdout, "  Platform: %s\n  URL: %s\n", opts.Platform, pi.URL)
-	if opts.DryRun {
-		fmt.Fprintln(stdout, "  Dry run: no files will be downloaded or changed.")
-		return result, nil
-	}
-
-	// Backup current binary.
-	if opts.ExistingVersion != "" {
-		backupPath := paths.BinaryPath + ".backup-" + opts.ExistingVersion
-		if _, err := os.Stat(paths.BinaryPath); err == nil {
-			if err := copyFile(paths.BinaryPath, backupPath); err != nil {
-				return nil, fmt.Errorf("backup binary: %w", err)
+		// Backup current binary.
+		if opts.ExistingVersion != "" {
+			backupPath := paths.BinaryPath + ".backup-" + opts.ExistingVersion
+			if _, err := os.Stat(paths.BinaryPath); err == nil {
+				if err := copyFile(paths.BinaryPath, backupPath); err != nil {
+					return nil, fmt.Errorf("backup binary: %w", err)
+				}
+				fmt.Fprintf(stdout, "  Backed up %s -> %s\n", paths.BinaryPath, backupPath)
 			}
-			fmt.Fprintf(stdout, "  Backed up %s -> %s\n", paths.BinaryPath, backupPath)
+			result.Updated = true
 		}
-		result.Updated = true
-	}
 
-	// Download and install the new version.
-	tmpZip := filepath.Join(os.TempDir(), "freeinference-update-"+manifest.Version+".zip")
-	if _, err := DownloadTo(pi.URL, tmpZip); err != nil {
-		return nil, fmt.Errorf("download: %w", err)
-	}
-
-	data, err := os.ReadFile(tmpZip)
-	if err != nil {
-		return nil, fmt.Errorf("read zip for checksum: %w", err)
-	}
-	if err := VerifyChecksum(data, pi.Hash); err != nil {
-		os.Remove(tmpZip)
-		return nil, fmt.Errorf("checksum: %w", err)
-	}
-
-	extractDir, err := os.MkdirTemp("", "freeinference-extract-*")
-	if err != nil {
-		os.Remove(tmpZip)
-		return nil, fmt.Errorf("temp dir: %w", err)
-	}
-	defer os.RemoveAll(extractDir)
-
-	if err := extractZIP(tmpZip, extractDir); err != nil {
-		os.Remove(tmpZip)
-		return nil, fmt.Errorf("extract: %w", err)
-	}
-	os.Remove(tmpZip)
-
-	if !opts.NoBin {
-		if err := installBinary(extractDir, paths); err != nil {
-			return nil, fmt.Errorf("install binary: %w", err)
+		// Download and install the new version.
+		tmpZip := filepath.Join(os.TempDir(), "freeinference-update-"+manifest.Version+".zip")
+		if _, err := DownloadTo(pi.URL, tmpZip); err != nil {
+			return nil, fmt.Errorf("download: %w", err)
 		}
-		result.BinaryPath = paths.BinaryPath
-	}
 
-	// Also update plugins.
-	if !opts.NoPlugin {
-		if err := extractPlugins(extractDir, paths); err != nil {
-			return nil, fmt.Errorf("update plugins: %w", err)
+		data, err := os.ReadFile(tmpZip)
+		if err != nil {
+			return nil, fmt.Errorf("read zip for checksum: %w", err)
 		}
-		result.Plugins = extractPluginPaths(paths)
-	}
+		if err := VerifyChecksum(data, pi.Hash); err != nil {
+			os.Remove(tmpZip)
+			return nil, fmt.Errorf("checksum: %w", err)
+		}
 
-	fmt.Fprintf(stdout, "Update complete: %s -> %s\n", opts.ExistingVersion, manifest.Version)
-	return result, nil
+		extractDir, err := os.MkdirTemp("", "freeinference-extract-*")
+		if err != nil {
+			os.Remove(tmpZip)
+			return nil, fmt.Errorf("temp dir: %w", err)
+		}
+		defer os.RemoveAll(extractDir)
+
+		if err := extractZIP(tmpZip, extractDir); err != nil {
+			os.Remove(tmpZip)
+			return nil, fmt.Errorf("extract: %w", err)
+		}
+		os.Remove(tmpZip)
+
+		if !opts.NoBin {
+			if err := installBinary(extractDir, paths); err != nil {
+				return nil, fmt.Errorf("install binary: %w", err)
+			}
+			result.BinaryPath = paths.BinaryPath
+		}
+
+		// Also update plugins.
+		if !opts.NoPlugin {
+			if err := extractPlugins(extractDir, paths, stdout); err != nil {
+				return nil, fmt.Errorf("update plugins: %w", err)
+			}
+			result.Plugins = extractPluginPaths(paths)
+		}
+
+		fmt.Fprintf(stdout, "Update complete: %s -> %s\n", opts.ExistingVersion, manifest.Version)
+		return result, nil
+	*/
 }
 
 // Uninstall removes the installed binary and plugins.
-func Uninstall(paths Paths, stdout, stderr io.Writer) error {
-	fmt.Fprintf(stdout, "Uninstalling FreeInference Companion...\n")
+//
+//lint:ignore U1000 retained as a source-compatibility marker for older callers
+func legacyUninstall(paths Paths, stdout, stderr io.Writer) error {
+	return Uninstall(paths, stdout, stderr)
+	/*
+		fmt.Fprintf(stdout, "Uninstalling FreeInference Companion...\n")
 
-	// Remove binary.
-	if paths.BinaryPath != "" {
-		if _, err := os.Stat(paths.BinaryPath); err == nil {
-			if err := os.Remove(paths.BinaryPath); err != nil {
-				return fmt.Errorf("remove binary: %w", err)
+		// Remove binary.
+		if paths.BinaryPath != "" {
+			if _, err := os.Stat(paths.BinaryPath); err == nil {
+				if err := os.Remove(paths.BinaryPath); err != nil {
+					return fmt.Errorf("remove binary: %w", err)
+				}
+				fmt.Fprintf(stdout, "  Removed %s\n", paths.BinaryPath)
 			}
-			fmt.Fprintf(stdout, "  Removed %s\n", paths.BinaryPath)
 		}
-	}
 
-	// Remove plugin directories.
-	if paths.ClaudePluginDir != "" {
-		pluginPath := filepath.Join(paths.ClaudePluginDir, "freeinference-companion")
-		if _, err := os.Stat(pluginPath); err == nil {
-			if err := os.RemoveAll(pluginPath); err != nil {
-				return fmt.Errorf("remove claude plugin: %w", err)
+		// Remove plugin directories.
+		if paths.ClaudePluginDir != "" {
+			pluginPath := filepath.Join(paths.ClaudePluginDir, "freeinference-companion")
+			if _, err := os.Stat(pluginPath); err == nil {
+				if err := os.RemoveAll(pluginPath); err != nil {
+					return fmt.Errorf("remove claude plugin: %w", err)
+				}
+				fmt.Fprintf(stdout, "  Removed Claude Code plugin: %s\n", pluginPath)
 			}
-			fmt.Fprintf(stdout, "  Removed Claude Code plugin: %s\n", pluginPath)
 		}
-	}
-	if paths.CodexPluginDir != "" {
-		pluginPath := filepath.Join(paths.CodexPluginDir, "freeinference-companion")
-		if _, err := os.Stat(pluginPath); err == nil {
-			if err := os.RemoveAll(pluginPath); err != nil {
-				return fmt.Errorf("remove codex plugin: %w", err)
+		if paths.CodexPluginDir != "" {
+			pluginPath := filepath.Join(paths.CodexPluginDir, "freeinference-companion")
+			if _, err := os.Stat(pluginPath); err == nil {
+				if err := os.RemoveAll(pluginPath); err != nil {
+					return fmt.Errorf("remove codex plugin: %w", err)
+				}
+				fmt.Fprintf(stdout, "  Removed Codex plugin: %s\n", pluginPath)
 			}
-			fmt.Fprintf(stdout, "  Removed Codex plugin: %s\n", pluginPath)
 		}
-	}
-
-	// Remove install dir.
-	if paths.InstallDir != "" {
-		if _, err := os.Stat(paths.InstallDir); err == nil {
-			if err := os.RemoveAll(paths.InstallDir); err != nil {
-				return fmt.Errorf("remove install dir: %w", err)
+		if paths.CodexMarketplaceDir != "" {
+			if _, err := os.Stat(paths.CodexMarketplaceDir); err == nil {
+				unregisterCodexMarketplace()
+				if err := os.RemoveAll(paths.CodexMarketplaceDir); err != nil {
+					return fmt.Errorf("remove Codex marketplace: %w", err)
+				}
+				fmt.Fprintf(stdout, "  Removed Codex marketplace: %s\n", paths.CodexMarketplaceDir)
 			}
-			fmt.Fprintf(stdout, "  Removed %s\n", paths.InstallDir)
 		}
-	}
 
-	fmt.Fprintf(stdout, "Uninstall complete.\n")
-	return nil
-}
-
-// installBinary copies the freeinference binary from the extracted ZIP into
-// the install directory, then symlinks it into LocalBin.
-func installBinary(extractDir string, paths Paths) error {
-	// Find the binary in the extracted ZIP. It should be at bin/freeinference
-	// or freeinference at the root.
-	binarySrc := findBinary(extractDir)
-	if binarySrc == "" {
-		return fmt.Errorf("binary not found in extracted archive")
-	}
-
-	// Create install dir.
-	if err := os.MkdirAll(filepath.Dir(paths.BinaryPath), 0755); err != nil {
-		return fmt.Errorf("mkdir install dir: %w", err)
-	}
-
-	// Copy binary to install dir.
-	if err := copyFile(binarySrc, paths.BinaryPath); err != nil {
-		return fmt.Errorf("copy binary to install dir: %w", err)
-	}
-	if err := os.Chmod(paths.BinaryPath, 0755); err != nil {
-		return fmt.Errorf("chmod binary: %w", err)
-	}
-
-	// Symlink into LocalBin (or copy if symlink fails).
-	if err := os.MkdirAll(paths.LocalBin, 0755); err != nil {
-		return fmt.Errorf("mkdir local bin: %w", err)
-	}
-	linkPath := filepath.Join(paths.LocalBin, "freeinference")
-	// Remove old symlink/file.
-	os.Remove(linkPath)
-	// Try symlink first.
-	if err := os.Symlink(paths.BinaryPath, linkPath); err != nil {
-		// Fall back to copy.
-		if err := copyFile(paths.BinaryPath, linkPath); err != nil {
-			return fmt.Errorf("create link in %s: %w", paths.LocalBin, err)
+		// Remove install dir.
+		if paths.InstallDir != "" {
+			if _, err := os.Stat(paths.InstallDir); err == nil {
+				if err := os.RemoveAll(paths.InstallDir); err != nil {
+					return fmt.Errorf("remove install dir: %w", err)
+				}
+				fmt.Fprintf(stdout, "  Removed %s\n", paths.InstallDir)
+			}
 		}
-	}
 
-	return nil
+		fmt.Fprintf(stdout, "Uninstall complete.\n")
+		return nil
+	*/
 }
 
 // findBinary looks for the freeinference binary in the extracted directory.
@@ -357,41 +356,79 @@ func findBinary(root string) string {
 	)
 	for _, c := range candidates {
 		p := filepath.Join(root, c)
-		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+		if info, err := os.Lstat(p); err == nil && info.Mode().IsRegular() {
 			return p
 		}
 	}
 	return ""
 }
 
-// extractPlugins extracts plugin ZIPs from the release archive into the
-// appropriate plugin directories for each coding agent.
-func extractPlugins(extractDir string, paths Paths) error {
-	// Extract Claude Code plugin.
-	pluginSrc := filepath.Join(extractDir, "plugins", "claude-code")
-	if _, err := os.Stat(pluginSrc); err == nil {
-		pluginDest := filepath.Join(paths.ClaudePluginDir, "freeinference-companion")
-		if err := os.MkdirAll(filepath.Dir(pluginDest), 0755); err != nil {
-			return fmt.Errorf("mkdir claude plugin dir: %w", err)
-		}
-		if err := removeAllThenCopy(pluginDest, pluginSrc); err != nil {
-			return fmt.Errorf("copy claude plugin: %w", err)
+func validateReleaseLayout(root string, needBinary, needPlugins bool) error {
+	if needBinary && findBinary(root) == "" {
+		return errors.New("release archive does not contain a regular freeinference binary")
+	}
+	if !needPlugins {
+		return nil
+	}
+	for _, plugin := range []struct {
+		name     string
+		rel      string
+		manifest string
+	}{
+		{name: "Claude", rel: "plugins/claude-code", manifest: ".claude-plugin/plugin.json"},
+		{name: "Codex", rel: "plugins/codex", manifest: ".codex-plugin/plugin.json"},
+	} {
+		base := filepath.Join(root, plugin.rel)
+		for _, required := range []string{plugin.manifest, "hooks/hooks.json", "scripts/run-hook.sh"} {
+			path := filepath.Join(base, required)
+			info, err := os.Lstat(path)
+			if err != nil || !info.Mode().IsRegular() {
+				return fmt.Errorf("release archive is missing %s plugin file %s", plugin.name, required)
+			}
+			if required == "scripts/run-hook.sh" && info.Mode()&0111 == 0 {
+				return fmt.Errorf("release archive %s plugin runner is not executable", plugin.name)
+			}
 		}
 	}
-
-	// Extract Codex plugin.
-	codexSrc := filepath.Join(extractDir, "plugins", "codex")
-	if _, err := os.Stat(codexSrc); err == nil {
-		pluginDest := filepath.Join(paths.CodexPluginDir, "freeinference-companion")
-		if err := os.MkdirAll(filepath.Dir(pluginDest), 0755); err != nil {
-			return fmt.Errorf("mkdir codex plugin dir: %w", err)
-		}
-		if err := removeAllThenCopy(pluginDest, codexSrc); err != nil {
-			return fmt.Errorf("copy codex plugin: %w", err)
-		}
-	}
-
 	return nil
+}
+
+// registerCodexMarketplace is retained for package-local compatibility tests.
+// Production installation uses commitRelease, which stages all owned paths in
+// one transaction before calling the native Codex plugin manager.
+func registerCodexMarketplace(paths Paths, pluginSrc string, stdout io.Writer) error {
+	if paths.CodexMarketplaceDir == "" {
+		return nil
+	}
+	if err := validateOwnedDirectory(paths.CodexMarketplaceDir, nil, false, ""); err != nil {
+		return err
+	}
+	stage, err := stageCodexMarketplace(paths, pluginSrc)
+	if err != nil {
+		return err
+	}
+	tx := &installTransaction{}
+	if err := tx.replace(paths.CodexMarketplaceDir, stage); err != nil {
+		_ = os.RemoveAll(stage)
+		return err
+	}
+	if err := tx.finalize(); err != nil {
+		return err
+	}
+	_, warnings := registerCodexMarketplaceStatus(paths, stdout)
+	for _, warning := range warnings {
+		if stdout != nil {
+			fmt.Fprintf(stdout, "  Warning: %s\n", warning)
+		}
+	}
+	return nil
+}
+
+func runCodexPluginCommand(codex string, args ...string) error {
+	cmd := exec.Command(codex, args...)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	return cmd.Run()
 }
 
 // extractPluginPaths returns the paths of extracted plugin directories.
@@ -416,12 +453,40 @@ func extractZIP(archive, destDir string) error {
 	}
 	defer r.Close()
 
+	if len(r.File) > maxArchiveEntries {
+		return fmt.Errorf("archive contains too many entries")
+	}
+	seen := make(map[string]struct{}, len(r.File))
+	var total uint64
 	for _, f := range r.File {
-		target := filepath.Join(destDir, f.Name)
-		// Prevent path traversal.
-		if !strings.HasPrefix(target, filepath.Clean(destDir)+string(filepath.Separator)) &&
-			target != filepath.Clean(destDir) {
-			continue
+		target, err := safeArchiveTarget(destDir, f.Name)
+		if err != nil {
+			return err
+		}
+		key := strings.ToLower(filepath.Clean(target))
+		if _, exists := seen[key]; exists {
+			return fmt.Errorf("archive contains duplicate output path")
+		}
+		seen[key] = struct{}{}
+		if f.Flags&1 != 0 {
+			return fmt.Errorf("archive contains an encrypted entry")
+		}
+		if len(f.Name) > maxArchiveNameBytes || !utf8.ValidString(f.Name) {
+			return fmt.Errorf("archive entry name is invalid")
+		}
+		mode := f.Mode()
+		if mode&os.ModeSymlink != 0 || mode&os.ModeNamedPipe != 0 || mode&os.ModeSocket != 0 || mode&os.ModeDevice != 0 || mode&os.ModeCharDevice != 0 {
+			return fmt.Errorf("archive contains an unsupported file type")
+		}
+		if f.UncompressedSize64 > maxArchiveFileBytes {
+			return fmt.Errorf("archive entry exceeds the individual size limit")
+		}
+		if f.CompressedSize64 > maxArchiveTotalBytes {
+			return fmt.Errorf("archive entry exceeds the compressed size limit")
+		}
+		total += f.UncompressedSize64
+		if total > maxArchiveTotalBytes {
+			return fmt.Errorf("archive exceeds the expanded size limit")
 		}
 
 		if f.FileInfo().IsDir() {
@@ -446,35 +511,96 @@ func extractZIP(archive, destDir string) error {
 			return fmt.Errorf("create file: %w", err)
 		}
 
-		if _, err := io.Copy(outFile, rc); err != nil {
+		written, err := io.Copy(outFile, io.LimitReader(rc, maxArchiveFileBytes+1))
+		if err != nil {
 			outFile.Close()
 			rc.Close()
 			return fmt.Errorf("write file: %w", err)
 		}
-		outFile.Close()
+		if written > maxArchiveFileBytes {
+			outFile.Close()
+			rc.Close()
+			return fmt.Errorf("archive entry exceeds the individual size limit")
+		}
+		if err := outFile.Close(); err != nil {
+			rc.Close()
+			return fmt.Errorf("close extracted file: %w", err)
+		}
 		rc.Close()
+		mode = f.Mode().Perm()
+		if mode == 0 {
+			mode = 0644
+		}
+		if err := os.Chmod(target, mode); err != nil {
+			return fmt.Errorf("set extracted file mode: %w", err)
+		}
 	}
 	return nil
 }
 
+func safeArchiveTarget(destDir, name string) (string, error) {
+	if name == "" || strings.ContainsRune(name, '\x00') || !utf8.ValidString(name) {
+		return "", errors.New("archive entry name is invalid")
+	}
+	if strings.HasPrefix(name, "/") || strings.HasPrefix(name, "\\") || (len(name) >= 2 && name[1] == ':') {
+		return "", errors.New("archive contains an absolute path")
+	}
+	name = strings.ReplaceAll(name, "\\", "/")
+	cleanName := filepath.Clean(filepath.FromSlash(name))
+	if cleanName == "." || filepath.IsAbs(cleanName) {
+		return "", errors.New("archive contains an invalid path")
+	}
+	root := filepath.Clean(destDir)
+	target := filepath.Join(root, cleanName)
+	rel, err := filepath.Rel(root, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", errors.New("archive path escapes extraction directory")
+	}
+	return target, nil
+}
+
 // copyFile copies src to dst.
 func copyFile(src, dst string) error {
-	in, err := os.ReadFile(src)
+	info, err := os.Lstat(src)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(dst, in, 0755)
-}
-
-// removeAllThenCopy removes dst (if it exists) and copies src into it.
-func removeAllThenCopy(dst, src string) error {
-	if err := os.RemoveAll(dst); err != nil {
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return fmt.Errorf("source is not a regular file: %s", src)
+	}
+	f, err := os.Open(src)
+	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+	in, readErr := io.ReadAll(io.LimitReader(f, maxArchiveFileBytes+1))
+	closeErr := f.Close()
+	if readErr != nil {
+		return readErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if len(in) > maxArchiveFileBytes {
+		return fmt.Errorf("source file exceeds the supported size limit")
+	}
+	mode := info.Mode().Perm()
+	if mode == 0 {
+		mode = 0644
+	}
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+	if err != nil {
 		return err
 	}
-	return copyDir(dst, src)
+	if _, err := out.Write(in); err != nil {
+		_ = out.Close()
+		_ = os.Remove(dst)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(dst)
+		return err
+	}
+	return nil
 }
 
 // copyDir recursively copies src directory into dst directory.
@@ -491,10 +617,17 @@ func copyDir(dst, src string) error {
 		if info.IsDir() {
 			return os.MkdirAll(dstPath, 0755)
 		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("unsupported plugin file type: %s", rel)
+		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
-		return os.WriteFile(dstPath, data, 0755)
+		mode := info.Mode().Perm()
+		if mode == 0 {
+			mode = 0644
+		}
+		return os.WriteFile(dstPath, data, mode)
 	})
 }

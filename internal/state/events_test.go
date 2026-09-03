@@ -2,6 +2,7 @@ package state
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -42,6 +43,48 @@ func TestAppendEventRejectsUnknownType(t *testing.T) {
 	if err := AppendEvent(paths, schema.ClientClaudeCode, "s1",
 		Event{Type: "prompt_text_leaked"}); err == nil {
 		t.Error("unknown event type must be rejected")
+	}
+}
+
+func TestEventPathsRejectUnknownClientWithoutCreatingDirectories(t *testing.T) {
+	paths := testPaths(t)
+	if err := AppendEvent(paths, "attacker", "s1", Event{Type: EventSessionStarted}); err == nil {
+		t.Fatal("unknown client must be rejected")
+	}
+	if err := RotateEvents(paths, "attacker", "s1"); err == nil {
+		t.Fatal("unknown client rotation must be rejected")
+	}
+	if _, err := os.Stat(paths.CacheDir + "/sessions"); !os.IsNotExist(err) {
+		t.Fatalf("invalid client created cache directories: %v", err)
+	}
+}
+
+func TestSessionPathsRejectEmptyOversizedAndControlIDs(t *testing.T) {
+	paths := testPaths(t)
+	for _, sessionID := range []string{"", strings.Repeat("x", MaxSessionIDBytes+1), "bad\nvalue"} {
+		if err := paths.EnsureSessionDir(schema.ClientClaudeCode, sessionID); err == nil {
+			t.Fatalf("session ID %q must be rejected", sessionID)
+		}
+		if err := AppendEvent(paths, schema.ClientClaudeCode, sessionID, Event{Type: EventSessionStarted}); err == nil {
+			t.Fatalf("event append accepted invalid session ID %q", sessionID)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(paths.CacheDir, "sessions")); !os.IsNotExist(err) {
+		t.Fatalf("invalid session IDs created session state: %v", err)
+	}
+}
+
+func TestReadEventsRejectsOversizedLog(t *testing.T) {
+	paths := testPaths(t)
+	if err := paths.EnsureSessionDir(schema.ClientClaudeCode, "s1"); err != nil {
+		t.Fatal(err)
+	}
+	path := paths.SessionEvents(schema.ClientClaudeCode, "s1")
+	if err := os.WriteFile(path, make([]byte, MaxEventBytesPerSession+1), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadEvents(paths, schema.ClientClaudeCode, "s1", 0); err == nil {
+		t.Fatal("oversized event log must be rejected")
 	}
 }
 
@@ -97,15 +140,32 @@ func TestRotateEventsBoundsSize(t *testing.T) {
 	if err := paths.EnsureSessionDir(schema.ClientClaudeCode, "s1"); err != nil {
 		t.Fatal(err)
 	}
-	// Write more lines than MaxEventsPerSession and force the file size past
-	// the byte bound by giving each event a sizeable detail.
+	// Write more lines than MaxEventsPerSession. AppendEvent opportunistically
+	// applies line-count retention, so append a second valid batch directly to
+	// create the oversized fixture that explicit rotation must handle.
 	for i := 0; i < MaxEventsPerSession+50; i++ {
 		if err := AppendEvent(paths, schema.ClientClaudeCode, "s1",
 			Event{Type: EventPromptSubmitted, Detail: strings.Repeat("a", 300)}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	info, _ := os.Stat(paths.SessionEvents(schema.ClientClaudeCode, "s1"))
+	path := paths.SessionEvents(schema.ClientClaudeCode, "s1")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	info, _ := os.Stat(path)
 	if info.Size() < MaxEventBytesPerSession {
 		t.Fatalf("precondition: file too small (%d bytes)", info.Size())
 	}

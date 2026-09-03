@@ -63,10 +63,31 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int
 	if cmd == "update" {
 		return cmdUpdate(state.Paths{}, rest, stdout, stderr)
 	}
+	if cmd == "uninstall" {
+		return cmdUninstall(rest, stdout, stderr)
+	}
+	if cmd == "codex-footer" {
+		return cmdCodexFooter(rest, stdout, stderr)
+	}
 	// Persistent companion controls are intentionally stateless: disabling the
 	// companion must not create cache, salt, session, or provider directories.
 	if cmd == "companion" {
 		return cmdCompanion(state.Paths{}, rest, stdout, stderr)
+	}
+	if cmd == "fi-status" {
+		if printCmdHelp(stdout, stderr, "fi-status", rest) {
+			return 0
+		}
+		return cmdFIStatus(rest, stdout, stderr)
+	}
+	if cmd == "run" {
+		return cmdRun(rest, stdout, stderr)
+	}
+	automaticStdin := (cmd == "status" || cmd == "snapshot" || cmd == "render") && stdinHasData(stdin)
+	if automaticStdin && !runtime.EvaluateForClient(runtime.ClientClaudeCode).Active {
+		// Automatic status-line surfaces are a true no-op for non-FreeInference
+		// Claude sessions: no paths, locks, or state directories are created.
+		return 0
 	}
 
 	paths, err := state.NewPaths()
@@ -76,21 +97,33 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int
 	}
 
 	// Derive an activation identity so global state is namespaced under
-	// providers/<id>/ and different endpoints/keys don't share data.
-	activation := runtime.Evaluate()
+	// providers/<id>/ and different endpoints/keys don't share data. When the
+	// command names a client, resolve that client's actual route; a generic
+	// shell credential is not evidence that the named client uses FreeInference.
+	activation := activationForCLICommand(cmd, rest)
+	if automaticStdin {
+		activation = runtime.EvaluateForClient(runtime.ClientClaudeCode)
+	}
 
 	// Commands that read/write provider-level state (models, health, circuit
 	// breakers, account usage) require an active FreeInference runtime.
 	// Session-only commands (sessions, snapshot, context, render) may use
 	// unnamespaced paths because session state is independent of the provider.
 	requiresActiveProvider := map[string]bool{
-		"status":  true,
 		"models":  true,
-		"report":  true,
 		"refresh": true,
-		"cache":   true,
 	}
 	needsProviderState := requiresActiveProvider[cmd]
+	if cmd == "refresh" && refreshOnlyPublicStatus(rest) {
+		needsProviderState = false
+	}
+	// An interactive status lookup without an explicit session is a live
+	// provider view. An explicit session is a historical diagnostic and remains
+	// readable after activation ends. Automatic status-line input is handled by
+	// the strict no-op gate above.
+	if cmd == "status" && !automaticStdin && !explicitSessionRequested(rest) {
+		needsProviderState = true
+	}
 
 	if !activation.Active {
 		if activation.Disabled {
@@ -101,6 +134,9 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int
 			}
 			fmt.Fprintf(stderr, "         All hooks and automatic features are suppressed.\n")
 			fmt.Fprintf(stderr, "         Run \"freeinference companion enable\" to re-enable.\n")
+		}
+		if activation.Disabled && (cmd == "status" || cmd == "report") {
+			return 1
 		}
 		if needsProviderState {
 			if !activation.Disabled {
@@ -165,6 +201,16 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int
 			return 0
 		}
 		return cmdReport(paths, rest, stdout, stderr)
+	case "failures", "incidents":
+		if printCmdHelp(stdout, stderr, "failures", rest) {
+			return 0
+		}
+		return cmdFailures(paths, rest, stdout, stderr)
+	case "trace":
+		if printCmdHelp(stdout, stderr, "trace", rest) {
+			return 0
+		}
+		return cmdTrace(paths, rest, stdout, stderr)
 	case "context":
 		if printCmdHelp(stdout, stderr, "context", rest) {
 			return 0
@@ -197,6 +243,50 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int
 		printUsage(stderr)
 		return 1
 	}
+}
+
+func refreshOnlyPublicStatus(args []string) bool {
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--worker" && i+1 < len(args) {
+			return args[i+1] == "public-status"
+		}
+	}
+	return false
+}
+
+func activationForCLICommand(cmd string, args []string) runtime.Activation {
+	client := ""
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--client" && i+1 < len(args) {
+			client = args[i+1]
+			i++
+		}
+	}
+	// An explicit client selector always wins. The automatic hook and
+	// status-line paths use EvaluateForClient directly.
+	if client != "" {
+		switch client {
+		case schema.ClientClaudeCode:
+			return runtime.EvaluateForClient(runtime.ClientClaudeCode)
+		case schema.ClientCodex:
+			return runtime.EvaluateForClient(runtime.ClientCodex)
+		}
+	}
+
+	activation := runtime.Evaluate()
+	if !activation.Active {
+		// Interactive/provider commands may be invoked from either client. Use
+		// concrete client evidence when it exists so Claude's Anthropic route
+		// and Codex's selected provider are both valid sources for management
+		// API access. Automatic surfaces do not use this fallback.
+		if claude := runtime.EvaluateForClient(runtime.ClientClaudeCode); claude.Active {
+			return claude
+		}
+		if codex := runtime.EvaluateForClient(runtime.ClientCodex); codex.Active {
+			return codex
+		}
+	}
+	return activation
 }
 
 // cmdVersion implements `freeinference version`, `freeinference --version`, and `freeinference -v`. Supports
@@ -241,30 +331,39 @@ Usage:
   freeinference doctor [--probe --model <name>] [--help]
   freeinference report [--client <type>] [--session <id>] [--format markdown|json]
     [--include-identifiers] [--help]
+  freeinference failures [--client <type>] [--session <id>] [--model <name>]
+    [--since <duration|timestamp>] [--json] [--help]
   freeinference dashboard
   freeinference install [--manifest <url>] [--platform <key>] [--dry-run] [--no-plugin] [--force]
   freeinference update [--manifest <url>] [--platform <key>] [--dry-run] [--force]
+  freeinference uninstall [--help]
   freeinference context [--client <type>] [--session <id>] [--help]
   freeinference cache [--client <type>] [--session <id>] [--help]
   freeinference refresh [--force|--if-stale] [--detach]
-    [--worker models|health|account-usage] [--help]
+    [--worker models|health|account-usage|public-status] [--help]
   freeinference status-line install|uninstall
+  freeinference codex-footer install|uninstall|status
   freeinference config show|set|reset|path [--json]
   freeinference companion status|enable|disable
+  freeinference fi-status [--json] [--problems|--down] [--details] [--fail-degraded] [--refresh] [--all]
+  freeinference run claude|codex [args...]
+  freeinference trace [status|setup|uninstall] [codex] [--json] [--client claude-code|codex] [--session <id>]
   freeinference version [--json]
   freeinference hook <client> <event>
 
 Environment:
   FREEINFERENCE_API_KEY    FreeInference API credential
-  FREEINFERENCE_BASE_URL   API base URL (default: https://freeinference.org/v1)
+  FREEINFERENCE_BASE_URL   Generic provider API URL (not Claude/Codex activation evidence)
   ANTHROPIC_AUTH_TOKEN     Claude Code credential for the FreeInference Anthropic endpoint
   FI_HEALTH_URL            Health monitoring URL (optional)
   FI_CACHE_DIR             Cache directory (default: ~/.cache/freeinference-companion)
   FI_SESSION_ID            Explicit session override for status/context/report
   FI_PROVIDER              Attribution metadata only; does not activate the companion
-  FI_NO_BACKGROUND         Disable background refresh
+  FI_AUTO_REFRESH          Opt in to stale metadata refreshes from lifecycle hooks
+  FI_NO_BACKGROUND         Disable detached background refresh after opting in
   FI_DISABLED              Disable all companion features
   FI_ALLOW_INSECURE_LOCALHOST  Allow http:// loopback (development only)
+  FI_TRACING                Enable/disable Companion launch tracing (default: enabled for run)
   NO_COLOR                 Disable colors (see https://no-color.org)
   FORCE_COLOR              Force color output even without a terminal
   COLUMNS                  Terminal width in columns (0 = auto-detect)
@@ -295,20 +394,6 @@ Flags:
   --include-identifiers  Show full session IDs (default: masked)
   --json                 Output machine-readable JSON
   --help                 Show this help message
-`
-
-	helpCompanion = `Usage: freeinference companion status|enable|disable [--json] [--help]
-
-Inspect or change the persistent companion enabled state.
-
-Subcommands:
-  status   Show enabled, configured, runtime-active, and disable-source state
-  enable   Remove the persistent disable marker
-  disable  Create the persistent disable marker
-
-Flags:
-  --json    Output machine-readable JSON
-  --help    Show this help message
 `
 
 	helpSnapshot = `Usage: freeinference snapshot --json [--client <type>] [--session <id>] [--include-identifiers] [--help]
@@ -379,6 +464,19 @@ Flags:
   --help                  Show this help message
 `
 
+	helpFailures = `Usage: freeinference failures [--client <type>] [--session <id>] [--model <name>] [--since <duration|timestamp>] [--json] [--help]
+
+Show a sanitized summary of retained turn failures from local session events.
+
+Flags:
+  --client <type>       Limit results to claude-code or codex
+  --session <id>        Limit results to one session
+  --model <name>        Limit results to one model ID
+  --since <value>       Look back by duration (24h default) or RFC3339 timestamp
+  --json                Output machine-readable JSON
+  --help                Show this help message
+`
+
 	helpDashboard = `Usage: freeinference dashboard [--status] [--account] [--print-url] [--help]
 
 Open the FreeInference dashboard in your browser.
@@ -400,7 +498,7 @@ Flags:
   --help           Show this help message
 `
 
-	helpRefresh = `Usage: freeinference refresh [--force|--if-stale] [--detach] [--worker models|health] [--help]
+	helpRefresh = `Usage: freeinference refresh [--force|--if-stale] [--detach] [--worker models|health|account-usage|public-status] [--help]
 
 Refresh cached data (models, health, account usage).
 
@@ -408,7 +506,7 @@ Modes (mutually exclusive):
   --force             Force refresh regardless of staleness
   --if-stale          Refresh only if caches are stale (default)
   --detach            Spawn detached background workers for stale caches
-  --worker <name>     Single worker: models or health
+  --worker <name>     Single worker: models, health, account-usage, or public-status
 
 Flags:
   --help  Show this help message
@@ -424,6 +522,29 @@ Flags:
   --include-identifiers   Show full session IDs (default: masked)
   --json                  Output machine-readable JSON
   --help                  Show this help message
+`
+
+	helpFIStatus = `Usage: freeinference fi-status [--json] [--problems|--down] [--details] [--fail-degraded] [--refresh] [--all] [--help]
+
+Fetch the public FreeInference service status without reading local state or sending credentials.
+
+Flags:
+  --json           Output a stable machine-readable status object
+  --problems       Show only down or unknown models
+  --down           Alias for --problems
+  --details        Include metric ranges, completion tokens, and state duration
+  --fail-degraded  Exit 1 when any model is down
+  --refresh        Deprecated compatibility no-op; every run fetches directly
+  --all            Deprecated compatibility no-op; all models are shown by default
+  --help           Show this help message
+`
+
+	helpTrace = `Usage: freeinference trace [status|setup|uninstall] [codex] [--json] [--client claude-code|codex] [--session <id>] [--help]
+
+Show the current per-launch X-Session-ID correlation metadata and Codex mapping state.
+
+Trace IDs are opaque, random, and retained only as private session metadata.
+No request content or credentials are included.
 `
 
 	helpStatusLine = `Usage: freeinference status-line install|uninstall|status [--scope user|project|local] [--project <dir>] [--help] [--json]
@@ -442,6 +563,22 @@ Flags:
   --help           Show this help message
 `
 
+	helpCodexFooter = `Usage: freeinference codex-footer install|uninstall|status [--json] [--help]
+
+Configure Codex's native tui.status_line footer. This makes Codex render its
+own model, remaining-context, and current-directory items; it is not a
+script-backed FreeInference telemetry status line.
+
+Subcommands:
+  install    Preserve existing items and add the native footer items
+  uninstall  Restore the prior footer when Companion still owns it
+  status     Show configuration and ownership status
+
+Flags:
+  --json     Output machine-readable status
+  --help     Show this help message
+`
+
 	helpVersion = `Usage: freeinference version [--json] [--help]
 
 Show the freeinference companion version and schema information.
@@ -455,10 +592,10 @@ Flags:
 
 Internal hook entry point for Claude Code and Codex. Never called directly.
 
-Arguments:
-  client    Client type: claude-code or codex
-  event     Event name: SessionStart, SessionEnd, UserPromptSubmit,
-            PreCompact, PostCompact, Stop, StopFailure
+	Arguments:
+	  client    Client type: claude-code or codex
+	  event     Event name: SessionStart, SessionEnd, UserPromptSubmit,
+	            PreCompact, PostCompact, PostModelSwitch, Stop, StopFailure (Claude only)
 `
 )
 
@@ -482,6 +619,8 @@ func printCmdHelp(stdout, stderr io.Writer, cmd string, args []string) bool {
 				fmt.Fprint(stdout, helpDoctor)
 			case "report":
 				fmt.Fprint(stdout, helpReport)
+			case "failures":
+				fmt.Fprint(stdout, helpFailures)
 			case "dashboard":
 				fmt.Fprint(stdout, helpDashboard)
 			case "context":
@@ -490,8 +629,14 @@ func printCmdHelp(stdout, stderr io.Writer, cmd string, args []string) bool {
 				fmt.Fprint(stdout, helpRefresh)
 			case "cache":
 				fmt.Fprint(stdout, helpCache)
+			case "fi-status":
+				fmt.Fprint(stdout, helpFIStatus)
+			case "trace":
+				fmt.Fprint(stdout, helpTrace)
 			case "status-line":
 				fmt.Fprint(stdout, helpStatusLine)
+			case "codex-footer":
+				fmt.Fprint(stdout, helpCodexFooter)
 			case "version":
 				fmt.Fprint(stdout, helpVersion)
 			case "install":

@@ -631,3 +631,29 @@ func TestSymlinkInParentChain(t *testing.T) {
 		t.Errorf("error should mention symlink, got: %v", err)
 	}
 }
+
+func TestRefreshThrottleReservesAndDefersSlots(t *testing.T) {
+	paths := testPaths(t)
+	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+
+	allowed, err := ReserveRefreshSlot(paths, now, time.Minute)
+	if err != nil || !allowed {
+		t.Fatalf("first refresh slot = %v, %v", allowed, err)
+	}
+	allowed, err = ReserveRefreshSlot(paths, now.Add(30*time.Second), time.Minute)
+	if err != nil || allowed {
+		t.Fatalf("second refresh slot should be deferred = %v, %v", allowed, err)
+	}
+
+	if err := ExtendRefreshCooldown(paths, now.Add(15*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	allowed, err = ReserveRefreshSlot(paths, now.Add(2*time.Minute), time.Minute)
+	if err != nil || allowed {
+		t.Fatalf("rate-limit cooldown should defer refresh = %v, %v", allowed, err)
+	}
+	allowed, err = ReserveRefreshSlot(paths, now.Add(16*time.Minute), time.Minute)
+	if err != nil || !allowed {
+		t.Fatalf("refresh should resume after cooldown = %v, %v", allowed, err)
+	}
+}

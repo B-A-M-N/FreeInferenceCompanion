@@ -48,6 +48,10 @@ const (
 	CacheWarningCooldown = 30 * time.Minute
 	// TrendThreshold is the read-share delta (in share points) that marks a trend.
 	TrendThreshold = 0.05
+	// FallbackDedupWindow limits how long a token-only fingerprint can suppress
+	// another request. Token tuples are not request identities: two real turns
+	// can legitimately have the same counts after this short re-render window.
+	FallbackDedupWindow = 2 * time.Second
 )
 
 // MaxUsageObservations is retained as an alias for CacheHistoryRetention
@@ -135,6 +139,33 @@ func fingerprintID(buf []byte) string {
 	return hex.EncodeToString(sum[:16])
 }
 
+// ObservationIdentity describes the evidence behind a usage observation's
+// fingerprint. Client turn IDs are stable request identities; token fallbacks
+// are only short-lived re-render identities.
+type ObservationIdentity struct {
+	Fingerprint       string
+	Source            schema.FingerprintSource
+	RequestReference  string
+	DeduplicationNote string
+}
+
+// BuildObservationIdentity creates the explicit identity record used by
+// AddObservation. Keeping the source visible prevents a fallback token tuple
+// from being treated as an eternal request ID.
+func BuildObservationIdentity(modelID, promptID string, totalInput, totalOutput int64, fresh, cacheRead, cacheCreation, output *int64) ObservationIdentity {
+	fingerprint, source := ObservationFingerprint(modelID, promptID, totalInput, totalOutput, fresh, cacheRead, cacheCreation, output)
+	note := "short re-render window"
+	if source == schema.FingerprintClientTurnID {
+		note = "provider/client request reference"
+	}
+	return ObservationIdentity{
+		Fingerprint:       fingerprint,
+		Source:            source,
+		RequestReference:  promptID,
+		DeduplicationNote: note,
+	}
+}
+
 func derefI64(p *int64) int64 {
 	if p == nil {
 		return -1
@@ -146,7 +177,18 @@ func derefI64(p *int64) int64 {
 // Returns true if the observation was new (fingerprint not seen before).
 func AddObservation(snap *schema.Snapshot, obs schema.UsageObservation) bool {
 	for i := range snap.UsageObservations {
-		if snap.UsageObservations[i].Fingerprint == obs.Fingerprint {
+		existing := snap.UsageObservations[i]
+		if existing.Fingerprint != obs.Fingerprint {
+			continue
+		}
+		// A client request reference is an exact identity. It remains
+		// deduplicated for the lifetime of the retained history.
+		if obs.FingerprintSource == schema.FingerprintClientTurnID || existing.FingerprintSource == schema.FingerprintClientTurnID || obs.RequestReference != "" || existing.RequestReference != "" {
+			return false
+		}
+		// Token-only fingerprints identify repeated renders only within a
+		// bounded interval. Beyond it, accept the sample as a distinct request.
+		if obs.ObservedAt.IsZero() || existing.ObservedAt.IsZero() || absDuration(obs.ObservedAt.Sub(existing.ObservedAt)) <= FallbackDedupWindow {
 			return false
 		}
 	}
@@ -157,6 +199,13 @@ func AddObservation(snap *schema.Snapshot, obs schema.UsageObservation) bool {
 	return true
 }
 
+func absDuration(value time.Duration) time.Duration {
+	if value < 0 {
+		return -value
+	}
+	return value
+}
+
 // observationInput sums the observed input components of one observation.
 func observationInput(o schema.UsageObservation) (fresh, read, creation int64, ok bool) {
 	if o.FreshInputTokens == nil || o.CacheReadInputTokens == nil || o.CacheCreationInputTokens == nil {
@@ -165,8 +214,37 @@ func observationInput(o schema.UsageObservation) (fresh, read, creation int64, o
 	return *o.FreshInputTokens, *o.CacheReadInputTokens, *o.CacheCreationInputTokens, true
 }
 
+func currentEpochObservations(snap *schema.Snapshot) []schema.UsageObservation {
+	if snap == nil {
+		return nil
+	}
+	if snap.CacheEpochID == "" {
+		return snap.UsageObservations
+	}
+	observations := make([]schema.UsageObservation, 0, len(snap.UsageObservations))
+	for _, observation := range snap.UsageObservations {
+		if observation.EpochID == snap.CacheEpochID {
+			observations = append(observations, observation)
+		}
+	}
+	return observations
+}
+
+// effectiveUsableSamples preserves the v2 interpretation for manually
+// constructed/legacy analyses while treating an explicitly unavailable v3
+// analysis as unavailable rather than silently falling back to retained count.
+func effectiveUsableSamples(analysis *schema.CacheAnalysis) int {
+	if analysis == nil {
+		return 0
+	}
+	if analysis.Availability != "" || analysis.ObservationCount != 0 || analysis.AnalysisWindowCount != 0 {
+		return analysis.UsableSampleCount
+	}
+	return analysis.RequestSamples
+}
+
 // AnalyzeCache recomputes the rolling cache analysis on the snapshot from its
-// unique usage observations. currentContextTokens is the best available
+// retained usage observations. currentContextTokens is the best available
 // estimate of the active context size (used for warning qualification).
 //
 // This function is idempotent: consecutive counters are recomputed from the
@@ -181,11 +259,18 @@ func AnalyzeCache(snap *schema.Snapshot, currentContextTokens int64, now time.Ti
 
 	obs := snap.UsageObservations
 	analysis.RequestSamples = len(obs)
+	analysis.ObservationCount = len(obs)
+	analysis.Source = "claude_statusline"
+	if snap.LiveContext != nil && snap.LiveContext.Source != "" {
+		analysis.Source = snap.LiveContext.Source
+	}
 
-	window := obs
+	analysisObs := currentEpochObservations(snap)
+	window := analysisObs
 	if len(window) > AnalysisWindow {
 		window = window[len(window)-AnalysisWindow:]
 	}
+	analysis.AnalysisWindowCount = len(window)
 
 	var totalFresh, totalRead, totalCreation int64
 	var counted int
@@ -204,6 +289,8 @@ func AnalyzeCache(snap *schema.Snapshot, currentContextTokens int64, now time.Ti
 		analysis.CacheReadShare = nil
 		analysis.CacheCreationShare = nil
 		analysis.FreshInputShare = nil
+		analysis.UsableSampleCount = 0
+		analysis.Availability = cacheAvailability(len(window), 0)
 		analysis.Trend = schema.TrendInsufficientData
 		analysis.ConsecutiveLow = 0
 		analysis.ConsecutiveRecovered = 0
@@ -215,6 +302,8 @@ func AnalyzeCache(snap *schema.Snapshot, currentContextTokens int64, now time.Ti
 		analysis.CacheReadShare = nil
 		analysis.CacheCreationShare = nil
 		analysis.FreshInputShare = nil
+		analysis.UsableSampleCount = counted
+		analysis.Availability = cacheAvailability(len(window), counted)
 		analysis.Trend = schema.TrendInsufficientData
 		analysis.ConsecutiveLow = 0
 		analysis.ConsecutiveRecovered = 0
@@ -245,6 +334,9 @@ func AnalyzeCache(snap *schema.Snapshot, currentContextTokens int64, now time.Ti
 	analysis.CacheReadShare = &readShare
 	analysis.CacheCreationShare = &creationShare
 	analysis.FreshInputShare = &freshShare
+	analysis.UsableSampleCount = counted
+	analysis.Availability = cacheAvailability(len(window), counted)
+	analysis.TrendDefinition = "rolling cache-read share over the preceding analysis window; rising/declining means a >=5 percentage-point change"
 
 	// Idempotent consecutive counters: walk the observation sequence from
 	// most recent backward, counting how many consecutive observations had
@@ -255,8 +347,8 @@ func AnalyzeCache(snap *schema.Snapshot, currentContextTokens int64, now time.Ti
 	analysis.ConsecutiveLow = 0
 	analysis.ConsecutiveRecovered = 0
 	var streak int // 0 = unset, -1 = low, +1 = recovered
-	for i := len(obs) - 1; i >= 0; i-- {
-		share := observationReadShare(obs[i])
+	for i := len(analysisObs) - 1; i >= 0; i-- {
+		share := observationReadShare(analysisObs[i])
 		if share == nil {
 			break // incomplete observation breaks the streak
 		}
@@ -284,6 +376,19 @@ func AnalyzeCache(snap *schema.Snapshot, currentContextTokens int64, now time.Ti
 		} else {
 			analysis.ConsecutiveRecovered++
 		}
+	}
+}
+
+func cacheAvailability(windowCount, usableCount int) schema.CacheTelemetryAvailability {
+	switch {
+	case windowCount == 0:
+		return schema.CacheTelemetryUnavailable
+	case usableCount == windowCount:
+		return schema.CacheTelemetryAvailable
+	case usableCount > 0:
+		return schema.CacheTelemetryPartial
+	default:
+		return schema.CacheTelemetryUnavailable
 	}
 }
 
@@ -327,7 +432,7 @@ func QualifyCacheWarning(snap *schema.Snapshot, currentContextTokens int64, prov
 	if !providerConfirmed {
 		return decision
 	}
-	if analysis.RequestSamples < MinObservationsForWarning {
+	if effectiveUsableSamples(analysis) < MinObservationsForWarning {
 		return decision
 	}
 	if currentContextTokens < MinContextTokensForWarning {

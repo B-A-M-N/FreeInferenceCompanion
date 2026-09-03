@@ -147,6 +147,9 @@ func TestInstallFresh(t *testing.T) {
 	if !strings.Contains(string(content), "status --compact --color=always --client claude-code") {
 		t.Error("wrapper should invoke freeinference status with the canonical client name")
 	}
+	if !strings.Contains(string(content), "$HOME/.local/bin/freeinference") {
+		t.Error("wrapper with a recorded binary path should retain the ~/.local/bin fallback")
+	}
 
 	settings := loadSettingsMap(t, home)
 	sl, ok := settings["statusLine"].(map[string]any)

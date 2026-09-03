@@ -10,6 +10,7 @@ import (
 	"github.com/b-a-m-n/freeinference-companion/internal/background"
 	"github.com/b-a-m-n/freeinference-companion/internal/runtime"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
+	"github.com/b-a-m-n/freeinference-companion/internal/tracing"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
 
@@ -30,11 +31,21 @@ func runHook(args []string, stdin io.Reader, stdout io.Writer, _ io.Writer) {
 	}
 	clientType := args[0]
 	eventName := args[1]
+	var client runtime.ClientKind
+	switch clientType {
+	case schema.ClientClaudeCode:
+		client = runtime.ClientClaudeCode
+	case schema.ClientCodex:
+		client = runtime.ClientCodex
+	default:
+		// Unknown clients are rejected before activation or filesystem work.
+		return
+	}
 
 	// Activation gate: evaluated exactly once per process. Must be the FIRST
 	// real work this function does — every step below touches the filesystem
 	// or the network and must be skipped when inactive.
-	activation := runtime.Evaluate()
+	activation := runtime.EvaluateForClient(client)
 	if !activation.Active {
 		return
 	}
@@ -89,7 +100,7 @@ func handleClaudeHook(paths state.Paths, eventName string, stdin io.Reader, stdo
 
 	switch eventName {
 	case "SessionStart":
-		_ = adapter.HandleSessionStartWith(input, activation)
+		_ = adapter.HandleSessionStartWithTrace(input, activation, consumeTraceForHook(schema.ClientClaudeCode, activation))
 		maybeRequestDetachedRefresh(paths, activation)
 	case "SessionEnd":
 		_ = adapter.HandleSessionEnd(sessionID)
@@ -105,6 +116,8 @@ func handleClaudeHook(paths state.Paths, eventName string, stdin io.Reader, stdo
 		_ = adapter.HandlePreCompact(input, sessionID)
 	case "PostCompact":
 		_ = adapter.HandlePostCompact(input, sessionID)
+	case "PostModelSwitch":
+		_ = adapter.HandlePostModelSwitch(input, sessionID)
 	case "Stop":
 		_ = adapter.HandleStop(sessionID)
 	case "StopFailure":
@@ -128,13 +141,13 @@ func handleCodexHook(paths state.Paths, eventName string, stdin io.Reader, stdou
 
 	switch eventName {
 	case "SessionStart":
-		_ = adapter.HandleSessionStartWith(input, activation)
+		_ = adapter.HandleSessionStartWithTrace(input, activation, consumeTraceForHook(schema.ClientCodex, activation))
 		maybeRequestDetachedRefresh(paths, activation)
 	case "SessionEnd":
-		_ = adapter.HandleSessionEnd(sessionID)
+		_ = adapter.HandleSessionEnd(sessionID, input)
 		maybeRequestDetachedRefresh(paths, activation)
 	case "UserPromptSubmit":
-		output, err := adapter.HandleUserPromptSubmit(input, sessionID)
+		output, err := adapter.HandleUserPromptSubmitWith(input, sessionID, activation)
 		if err == nil && output != nil {
 			if data, merr := json.Marshal(output); merr == nil {
 				fmt.Fprintln(stdout, string(data))
@@ -145,24 +158,53 @@ func handleCodexHook(paths state.Paths, eventName string, stdin io.Reader, stdou
 	case "PostCompact":
 		_ = adapter.HandlePostCompact(input, sessionID)
 	case "Stop":
-		_ = adapter.HandleStop(sessionID)
-	case "StopFailure":
-		_ = adapter.HandleStopFailure(input, sessionID)
+		_ = adapter.HandleStop(sessionID, input)
 	default:
 		return
 	}
 }
 
-// maybeRequestDetachedRefresh spawns detached refresh workers when caches are
-// stale. Called only after the activation gate has already confirmed an active
-// FreeInference runtime (P0-2), so the permissive DetectProvider check is gone.
-// FI_NO_BACKGROUND=1 still suppresses spawning.
+func consumeTraceForHook(client string, activation runtime.Activation) *schema.TraceInfo {
+	path := os.Getenv(tracing.TraceReceiptEnv)
+	if path == "" {
+		return nil
+	}
+	receipt, err := tracing.ConsumeLaunchReceipt(path, string(client), activation.Origin)
+	if err != nil {
+		return nil
+	}
+	return &schema.TraceInfo{
+		Enabled:        true,
+		Verified:       true,
+		SessionID:      receipt.TraceID,
+		Source:         string(receipt.Source),
+		StartedAt:      receipt.StartedAt,
+		Provider:       receipt.Provider,
+		Client:         receipt.Client,
+		Header:         receipt.HeaderName,
+		EndpointOrigin: receipt.EndpointOrigin,
+	}
+}
+
+// maybeRequestDetachedRefresh spawns detached refresh workers only when stale
+// refreshes have been explicitly enabled. Normal lifecycle hooks are local
+// recording only, so installing or using the plugin cannot consume provider
+// metadata/API quota by default. Called only after the activation gate has
+// already confirmed an active FreeInference runtime (P0-2).
+// FI_NO_BACKGROUND=1 still suppresses spawning when auto-refresh is enabled.
 //
 // Detached children re-validate activation independently — the parent gate
 // alone is insufficient because environment or configuration may change
 // between spawn and child exec.
 func maybeRequestDetachedRefresh(paths state.Paths, activation runtime.Activation) {
-	if os.Getenv("FI_NO_BACKGROUND") == "1" {
+	maybeRequestDetachedRefreshWith(paths, activation, background.SpawnDetachedWorkers)
+}
+
+// maybeRequestDetachedRefreshWith is split out so the default-off contract can
+// be tested without starting a child process. The production callback is the
+// only implementation that can launch refresh workers.
+func maybeRequestDetachedRefreshWith(paths state.Paths, activation runtime.Activation, spawn func(string, []string) error) {
+	if os.Getenv("FI_NO_BACKGROUND") == "1" || !automaticRefreshEnabled() {
 		return
 	}
 	if !activation.Active {
@@ -176,5 +218,9 @@ func maybeRequestDetachedRefresh(paths state.Paths, activation runtime.Activatio
 	if err != nil {
 		return
 	}
-	_ = background.SpawnDetachedWorkers(exe, stale)
+	_ = spawn(exe, stale)
+}
+
+func automaticRefreshEnabled() bool {
+	return os.Getenv("FI_AUTO_REFRESH") == "1"
 }

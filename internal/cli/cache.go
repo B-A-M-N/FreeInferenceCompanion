@@ -20,6 +20,9 @@ func cmdCache(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "usage error: %v\n", err)
 		return 2
 	}
+	if clientType == schema.ClientCodex {
+		return printCodexCacheUnavailable(stdout, jsonOut)
+	}
 
 	resolved, err := resolveSession(paths, clientType, sessionID, stdout)
 	if err != nil {
@@ -32,6 +35,9 @@ func cmdCache(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 	lc := (*schema.LiveContext)(nil)
 	if resolved != nil {
 		snap = resolved.Snap
+		if resolved.Client == schema.ClientCodex {
+			return printCodexCacheUnavailable(stdout, jsonOut)
+		}
 		ca = snap.CacheAnalysis
 		lc = snap.LiveContext
 	}
@@ -65,7 +71,7 @@ func cmdCache(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 	)
 	fmt.Fprintln(stdout, strings.Repeat("-", 60))
 
-	if ca == nil || ca.RequestSamples == 0 {
+	if ca == nil || ca.ObservationCount == 0 && ca.RequestSamples == 0 {
 		fmt.Fprintln(stdout, "No cache data yet. Send a few requests first.")
 		fmt.Fprintln(stdout)
 		printCacheBasics(stdout, lc)
@@ -86,7 +92,10 @@ func cmdCache(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 		freshPct = *ca.FreshInputShare * 100
 	}
 
-	fmt.Fprintf(stdout, "Samples:     %d unique requests\n", ca.RequestSamples)
+	fmt.Fprintf(stdout, "Observed:    %d retained requests\n", ca.ObservationCount)
+	fmt.Fprintf(stdout, "Analyzed:    %d recent requests\n", ca.AnalysisWindowCount)
+	fmt.Fprintf(stdout, "Usable:      %d requests\n", ca.UsableSampleCount)
+	fmt.Fprintf(stdout, "Availability: %s\n", ca.Availability)
 	fmt.Fprintf(stdout, "Cache Read:  %.1f%%\n", readPct)
 	fmt.Fprintf(stdout, "Cache New:   %.1f%%\n", createPct)
 	fmt.Fprintf(stdout, "Fresh Input: %.1f%%\n", freshPct)
@@ -124,14 +133,14 @@ func cmdCache(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 		case schema.AttributionProviderConfirmed:
 			fmt.Fprintf(stdout, "  Provider-confirmed:\n")
 		}
-		fmt.Fprintf(stdout, "     Cache read: %.0f%% over %d samples\n", readPct, ca.RequestSamples)
+		fmt.Fprintf(stdout, "     Cache read: %.0f%% over %d usable samples\n", readPct, ca.UsableSampleCount)
 
 		if len(diag.CandidateCauses) > 0 {
 			top := diag.CandidateCauses[0]
-			fmt.Fprintf(stdout, "     Possible cause: %s (likelihood: %.0f%%)\n", top.Label, top.Likelihood*100)
+			fmt.Fprintf(stdout, "     Possible cause: %s (heuristic score: %.0f%%)\n", top.Label, top.HeuristicScore*100)
 			if len(diag.CandidateCauses) > 1 {
 				for _, cc := range diag.CandidateCauses[1:] {
-					fmt.Fprintf(stdout, "     Also possible: %s (%.0f%%)\n", cc.Label, cc.Likelihood*100)
+					fmt.Fprintf(stdout, "     Also possible: %s (heuristic score: %.0f%%)\n", cc.Label, cc.HeuristicScore*100)
 				}
 			}
 		}
@@ -178,6 +187,16 @@ func cmdCache(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+func printCodexCacheUnavailable(stdout io.Writer, jsonOut bool) int {
+	if jsonOut {
+		fmt.Fprintln(stdout, `{"client":"codex","availability":"unavailable","reason":"client_telemetry_unavailable","cache":null}`)
+		return 0
+	}
+	fmt.Fprintln(stdout, "Cache telemetry: unavailable")
+	fmt.Fprintln(stdout, "Reason: Codex does not expose per-request cache usage to FreeInference Companion.")
+	return 0
+}
+
 func printCacheBasics(stdout io.Writer, lc *schema.LiveContext) {
 	if lc == nil || lc.LatestRequest == nil {
 		return
@@ -200,10 +219,16 @@ func cacheJSON(stdout io.Writer, snap *schema.Snapshot, ca *schema.CacheAnalysis
 		obj["client"] = resolved.Client
 	}
 
-	if ca != nil && ca.RequestSamples > 0 {
+	if ca != nil {
 		cacheObj := map[string]any{
-			"samples": ca.RequestSamples,
-			"trend":   ca.Trend,
+			"observed_samples": ca.ObservationCount,
+			"analyzed_samples": ca.AnalysisWindowCount,
+			"usable_samples":   ca.UsableSampleCount,
+			"availability":     ca.Availability,
+			"trend":            ca.Trend,
+		}
+		if ca.ObservationCount == 0 {
+			cacheObj["observed_samples"] = ca.RequestSamples
 		}
 		if ca.CacheReadShare != nil {
 			cacheObj["read_share"] = *ca.CacheReadShare
@@ -251,9 +276,9 @@ func cacheJSON(stdout io.Writer, snap *schema.Snapshot, ca *schema.CacheAnalysis
 			causes := make([]map[string]any, len(dd.CandidateCauses))
 			for i, cc := range dd.CandidateCauses {
 				causes[i] = map[string]any{
-					"reason":     string(cc.Reason),
-					"label":      cc.Label,
-					"likelihood": cc.Likelihood,
+					"reason":          string(cc.Reason),
+					"label":           cc.Label,
+					"heuristic_score": cc.HeuristicScore,
 				}
 			}
 			diagObj["candidate_causes"] = causes

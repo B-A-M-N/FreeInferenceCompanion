@@ -7,7 +7,6 @@ import (
 
 	"github.com/b-a-m-n/freeinference-companion/internal/installer"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
-	"github.com/b-a-m-n/freeinference-companion/pkg/version"
 )
 
 const (
@@ -17,9 +16,8 @@ const (
 // cmdInstall implements `freeinference install`.
 func cmdInstall(paths state.Paths, rest []string, stdout, stderr io.Writer) int {
 	opts := installer.Options{
-		ManifestURL:     defaultManifestURL,
-		Platform:        installer.PlatformKey(runtime.GOOS + "-" + runtime.GOARCH),
-		ExistingVersion: version.Version,
+		ManifestURL: defaultManifestURL,
+		Platform:    installer.PlatformKey(runtime.GOOS + "-" + runtime.GOARCH),
 	}
 
 	for i := 0; i < len(rest); i++ {
@@ -40,8 +38,6 @@ func cmdInstall(paths state.Paths, rest []string, stdout, stderr io.Writer) int 
 			opts.Platform = installer.PlatformKey(rest[i])
 		case "--dry-run":
 			opts.DryRun = true
-		case "--no-browser":
-			opts.NoBrowser = true
 		case "--no-plugin":
 			opts.NoPlugin = true
 		case "--no-bin":
@@ -72,9 +68,8 @@ func cmdInstall(paths state.Paths, rest []string, stdout, stderr io.Writer) int 
 // cmdUpdate implements `freeinference update`.
 func cmdUpdate(paths state.Paths, rest []string, stdout, stderr io.Writer) int {
 	opts := installer.Options{
-		ManifestURL:     defaultManifestURL,
-		Platform:        installer.PlatformKey(runtime.GOOS + "-" + runtime.GOARCH),
-		ExistingVersion: version.Version,
+		ManifestURL: defaultManifestURL,
+		Platform:    installer.PlatformKey(runtime.GOOS + "-" + runtime.GOARCH),
 	}
 
 	for i := 0; i < len(rest); i++ {
@@ -95,8 +90,6 @@ func cmdUpdate(paths state.Paths, rest []string, stdout, stderr io.Writer) int {
 			opts.Platform = installer.PlatformKey(rest[i])
 		case "--dry-run":
 			opts.DryRun = true
-		case "--no-browser":
-			opts.NoBrowser = true
 		case "--no-plugin":
 			opts.NoPlugin = true
 		case "--force":
@@ -122,7 +115,28 @@ func cmdUpdate(paths state.Paths, rest []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-const helpInstall = `Usage: freeinference install [--manifest <url>] [--platform <key>] [--dry-run] [--no-browser] [--no-plugin] [--force] [--help]
+func cmdUninstall(rest []string, stdout, stderr io.Writer) int {
+	if len(rest) > 0 {
+		if rest[0] == "--help" || rest[0] == "-h" {
+			fmt.Fprint(stdout, "Usage: freeinference uninstall\n\nRemove installer-owned application files while preserving configuration and local diagnostic history.\n")
+			return 0
+		}
+		fmt.Fprintf(stderr, "unknown flag: %s\n", rest[0])
+		return 2
+	}
+	paths, err := installer.DefaultPaths()
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	if err := installer.Uninstall(paths, stdout, stderr); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+const helpInstall = `Usage: freeinference install [--manifest <url>] [--platform <key>] [--dry-run] [--no-plugin] [--force] [--help]
 
 Download and install the FreeInference Companion CLI binary and plugins.
 
@@ -132,20 +146,21 @@ The installer:
   3. Verifies the SHA-256 checksum
   4. Extracts the binary to ~/.local/freeinference/bin/
   5. Symlinks to ~/.local/bin/freeinference (or adds to PATH)
-  6. Extracts plugins to ~/.claude/plugins/ and ~/.codex/plugins/
+  6. Extracts Claude and Codex plugins (including lifecycle hooks)
+  7. Registers the Codex plugin through a local Codex marketplace when the
+     Codex CLI is available; otherwise prints the manual registration command
 
 Flags:
   --manifest <url>     URL of the marketplace.json file (default: GitHub latest release)
   --platform <key>     Platform override (e.g. linux-amd64, darwin-arm64)
   --dry-run            Show what would be done without making changes
-  --no-browser         Skip opening a browser after installation
   --no-plugin          Skip plugin extraction
   --no-bin             Skip binary installation (extract plugins only)
   --force              Force reinstallation even if already at latest version
   --help               Show this help message
 `
 
-const helpUpdate = `Usage: freeinference update [--manifest <url>] [--platform <key>] [--dry-run] [--no-browser] [--no-plugin] [--force] [--help]
+const helpUpdate = `Usage: freeinference update [--manifest <url>] [--platform <key>] [--dry-run] [--no-plugin] [--force] [--help]
 
 Check for updates and upgrade the FreeInference Companion installation.
 
@@ -159,8 +174,7 @@ Flags:
   --manifest <url>     URL of the marketplace.json file
   --platform <key>     Platform override (default: current platform)
   --dry-run            Show what would be done without making changes
-  --no-browser         Skip opening a browser after update
   --no-plugin          Skip plugin updates
-  --force              Force update even if already at latest version
+  --force              Reinstall the same release; never downgrade
   --help               Show this help message
 `

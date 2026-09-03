@@ -1,6 +1,7 @@
 package background
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -139,6 +140,21 @@ func TestRateLimitOpensBreakerAndHonorsRetryAfter(t *testing.T) {
 	if calls.Load() != 1 {
 		t.Errorf("open breaker must block requests: %d calls", calls.Load())
 	}
+	allowed, err := state.ReserveRefreshSlot(r.Paths, time.Now(), AutomaticRefreshMinInterval)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allowed {
+		t.Fatal("provider rate-limit cooldown must block other automatic refresh workers")
+	}
+	accountRefresher := NewRefresher(api.NewClientForTest(server.URL+"/v1", "test-key", time.Second), r.Paths, "")
+	res = accountRefresher.WorkerRefresh(WorkerAccountUsage)
+	if !res.Skipped || res.SkipReason != "automatic refresh cooldown" {
+		t.Fatalf("shared rate-limit cooldown should defer account refresh, got %+v", res)
+	}
+	if calls.Load() != 1 {
+		t.Errorf("shared rate-limit cooldown must prevent another provider request: %d calls", calls.Load())
+	}
 }
 
 func TestServerErrorBackoffEscalates(t *testing.T) {
@@ -214,20 +230,79 @@ func TestHealthWorkerRespectsMissingURL(t *testing.T) {
 	}
 }
 
+func TestPublicStatusWorkerUsesUnauthenticatedBoundedCache(t *testing.T) {
+	paths := state.NewPathsWithDir(t.TempDir())
+	r := NewRefresher(nil, paths, "")
+	now := time.Now().UTC().Truncate(time.Second)
+	ok := true
+	latency := int64(412)
+	uptime := 0.998
+	r.PublicStatusFetch = func(context.Context) (*api.PublicStatusResponse, error) {
+		return &api.PublicStatusResponse{
+			Total: 1, Healthy: 1,
+			Cycle: api.PublicStatusCycle{OK: &ok, CheckedAt: now.Format(time.RFC3339)},
+			Models: []api.PublicStatusModel{{
+				ModelID: "glm-5.1", UptimeRatio: &uptime,
+				Latest: &api.PublicStatusSample{OK: &ok, CheckedAt: now.Format(time.RFC3339), LatencyMs: &latency},
+			}},
+		}, nil
+	}
+	res := r.WorkerRefresh(WorkerPublicStatus)
+	if !res.PublicStatusRefreshed || res.Error != "" {
+		t.Fatalf("public status refresh = %+v", res)
+	}
+	gs, err := state.LoadGlobal(r.Paths)
+	if err != nil || gs.PublicStatus == nil || len(gs.PublicStatus.Models) != 1 {
+		t.Fatalf("public status cache = %#v, err=%v", gs.PublicStatus, err)
+	}
+	if gs.PublicStatus.Models[0].Latest == nil || gs.PublicStatus.Models[0].Latest.LatencyMs == nil || *gs.PublicStatus.Models[0].Latest.LatencyMs != latency {
+		t.Fatalf("cached model metrics = %#v", gs.PublicStatus.Models[0])
+	}
+}
+
+func TestPublicStatusCacheRetainsBoundedHistoryForCorrelation(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	ok := true
+	history := make([]api.PublicStatusSample, 0, schema.MaxPublicStatusSamplesPerModel+10)
+	for i := 0; i < schema.MaxPublicStatusSamplesPerModel+10; i++ {
+		checked := now.Add(-time.Duration(i+1) * 20 * time.Minute)
+		history = append(history, api.PublicStatusSample{OK: &ok, CheckedAt: checked.Format(time.RFC3339)})
+	}
+	latest := api.PublicStatusSample{OK: &ok, CheckedAt: now.Format(time.RFC3339)}
+	cache, err := publicStatusCache(&api.PublicStatusResponse{
+		Total: 1, Healthy: 1,
+		Cycle:  api.PublicStatusCycle{OK: &ok, CheckedAt: now.Format(time.RFC3339)},
+		Models: []api.PublicStatusModel{{ModelID: "glm-5.2", Latest: &latest, History: history}},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := cache.Models[0]
+	if len(model.History) != schema.MaxPublicStatusSamplesPerModel {
+		t.Fatalf("history length=%d, want %d", len(model.History), schema.MaxPublicStatusSamplesPerModel)
+	}
+	if !model.History[0].CheckedAt.After(model.History[len(model.History)-1].CheckedAt) {
+		t.Fatalf("history is not newest-first: first=%s last=%s", model.History[0].CheckedAt, model.History[len(model.History)-1].CheckedAt)
+	}
+	if model.History[0].CheckedAt.Equal(model.Latest.CheckedAt) {
+		t.Fatal("latest sample was duplicated into history")
+	}
+}
+
 func TestStaleWorkers(t *testing.T) {
 	server := modelsServer(t, nil, func(w http.ResponseWriter, r *http.Request) { writeModelsJSON(w) })
 	defer server.Close()
 
 	r := testRefresher(t, server, "")
 	stale := StaleWorkers(r.Paths, "")
-	if len(stale) != 1 || stale[0] != WorkerModels {
+	if len(stale) != 2 || stale[0] != WorkerModels || stale[1] != WorkerPublicStatus {
 		t.Errorf("stale = %v", stale)
 	}
 
 	r.WorkerRefresh(WorkerModels)
 	stale = StaleWorkers(r.Paths, "")
-	if len(stale) != 0 {
-		t.Errorf("after refresh, stale = %v", stale)
+	if len(stale) != 1 || stale[0] != WorkerPublicStatus {
+		t.Errorf("after model refresh, stale = %v", stale)
 	}
 }
 
@@ -245,6 +320,17 @@ func expireBreaker(t *testing.T, paths state.Paths, endpoint string) {
 		}
 	}
 	if err := state.SaveCircuitBreakers(paths, gs.CircuitBreakers); err != nil {
+		t.Fatal(err)
+	}
+	throttle := &schema.RefreshThrottle{}
+	if err := state.ReadJSON(paths.GlobalRefreshThrottle(), throttle); err == nil {
+		past := time.Now().Add(-time.Minute)
+		throttle.LastRequestAt = &past
+		throttle.CooldownUntil = &past
+		if err := state.WriteJSONAtomically(paths.GlobalRefreshThrottle(), throttle); err != nil {
+			t.Fatal(err)
+		}
+	} else if !os.IsNotExist(err) {
 		t.Fatal(err)
 	}
 }

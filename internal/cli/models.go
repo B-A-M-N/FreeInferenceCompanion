@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/background"
+	"github.com/b-a-m-n/freeinference-companion/internal/secure"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
@@ -47,7 +48,7 @@ func cmdModels(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		refresher := background.NewRefresher(client, paths, os.Getenv("FI_HEALTH_URL"))
-		result := refresher.ForceRefresh()
+		result := refresher.ForceWorkerRefresh(background.WorkerModels)
 		if result.Error != "" {
 			fmt.Fprintf(stderr, "refresh error: %s\n", result.Error)
 			return 1
@@ -67,24 +68,22 @@ func cmdModels(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 				return 0
 			}
 		}
-		fmt.Fprintf(stdout, "Model '%s' not found in catalog.\n", modelName)
+		fmt.Fprintf(stdout, "Model '%s' not found in catalog.\n", secure.SanitizeField(modelName))
 		return 1
 	}
 
 	fmt.Fprintf(stdout, "FreeInference Models (cached at %s):\n", gs.Models.FetchedAt.Format(time.RFC3339))
-	fmt.Fprintf(stdout, "%-24s %-12s %-12s %-6s %s\n", "MODEL", "CONTEXT", "MAX OUTPUT", "STATE", "FEATURES")
-	fmt.Fprintln(stdout, repeat("-", 90))
+	fmt.Fprintf(stdout, "%-24s %-12s %-12s %s\n", "MODEL", "CONTEXT", "MAX OUTPUT", "FEATURES")
+	fmt.Fprintln(stdout, repeat("-", 82))
 	for _, m := range gs.Models.Models {
-		state := accessSymbol(m.AccessState)
-		features := strings.Join(m.Features, ",")
+		features := secure.SanitizeField(strings.Join(m.Features, ","))
 		if len(features) > 30 {
 			features = features[:30] + "..."
 		}
-		fmt.Fprintf(stdout, "%-24s %-12s %-12s %-6s %s\n",
-			m.ID,
+		fmt.Fprintf(stdout, "%-24s %-12s %-12s %s\n",
+			secure.SanitizeField(m.ID),
 			formatTokenCount(int64(m.ContextLength)),
 			formatTokenCount(int64(m.MaxOutputLength)),
-			state,
 			features,
 		)
 	}
@@ -92,9 +91,9 @@ func cmdModels(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 }
 
 func printModelDetail(stdout io.Writer, m schema.CatalogModel) {
-	fmt.Fprintf(stdout, "Model: %s\n", m.ID)
+	fmt.Fprintf(stdout, "Model: %s\n", secure.SanitizeField(m.ID))
 	if m.Name != "" {
-		fmt.Fprintf(stdout, "Name:  %s\n", m.Name)
+		fmt.Fprintf(stdout, "Name:  %s\n", secure.SanitizeField(m.Name))
 	}
 	fmt.Fprintf(stdout, "Context Window: %s\n", formatTokenCount(int64(m.ContextLength)))
 	fmt.Fprintf(stdout, "Max Output:     %s\n", formatTokenCount(int64(m.MaxOutputLength)))
@@ -104,12 +103,12 @@ func printModelDetail(stdout io.Writer, m schema.CatalogModel) {
 	}
 	fmt.Fprintf(stdout, "Access:         %s\n", access)
 	if len(m.Features) > 0 {
-		fmt.Fprintf(stdout, "Features:       %s\n", strings.Join(m.Features, ", "))
+		fmt.Fprintf(stdout, "Features:       %s\n", secure.SanitizeField(strings.Join(m.Features, ", ")))
 	}
 	if len(m.Pricing) > 0 {
 		fmt.Fprintln(stdout, "Pricing (per MTok):")
 		for k, v := range m.Pricing {
-			fmt.Fprintf(stdout, "  %s: $%s\n", k, v)
+			fmt.Fprintf(stdout, "  %s: $%s\n", secure.SanitizeField(k), secure.SanitizeField(v))
 		}
 	}
 }

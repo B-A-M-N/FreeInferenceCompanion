@@ -17,6 +17,7 @@ import (
 
 	"github.com/b-a-m-n/freeinference-companion/internal/secure"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
+	"github.com/b-a-m-n/freeinference-companion/pkg/version"
 )
 
 const (
@@ -35,6 +36,7 @@ const (
 	MaxHealthBody  = 1 << 20 // 1 MiB
 	MaxErrorBody   = 64 << 10
 	MaxProbeBody   = 1 << 20
+	MaxRetryAfter  = 7 * 24 * time.Hour
 
 	SyntheticProbeHeader = "X-Probe"
 	SyntheticProbeValue  = "synthetic"
@@ -107,9 +109,9 @@ type EndpointIdentity struct {
 //   - Must not have a fragment.
 //   - Query strings are NOT persisted (they may carry secrets).
 //
-// Returns an error if the URL is invalid. A valid non-FreeInference URL returns
-// a non-nil identity with IsFI=false and no error — callers decide whether to
-// accept unapproved hosts.
+// Returns an error if the URL is invalid. IsFI is true only for the same
+// HTTPS/port policy used when attaching credentials, so activation and API
+// requests cannot disagree about whether a route is approved.
 func NormalizeEndpoint(rawURL string) (*EndpointIdentity, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -145,7 +147,7 @@ func NormalizeEndpoint(rawURL string) (*EndpointIdentity, error) {
 		Host:       host,
 		Origin:     origin,
 		RequestURL: requestURL,
-		IsFI:       isApprovedCredentialHost(host),
+		IsFI:       isApprovedCredentialURL(u),
 	}, nil
 }
 func isLoopbackHost(host string) bool {
@@ -158,15 +160,32 @@ func isLoopbackHost(host string) bool {
 	return false
 }
 
-// isApprovedCredentialHost reports whether host is one of the approved
-// FreeInference hostnames that may receive the configured API key.
-func isApprovedCredentialHost(host string) bool {
+// IsApprovedCredentialHost reports whether host is one of the explicitly
+// approved FreeInference API hostnames. Arbitrary subdomains are not trusted
+// because DNS or a provider-side routing change must not widen credential
+// delivery implicitly.
+func IsApprovedCredentialHost(host string) bool {
 	host = strings.ToLower(host)
-	if host == "freeinference.org" {
+	switch host {
+	case "freeinference.org", "api.freeinference.org":
 		return true
+	default:
+		return false
 	}
-	return strings.HasSuffix(host, ".freeinference.org")
 }
+
+func isApprovedCredentialHost(host string) bool { return IsApprovedCredentialHost(host) }
+
+func isApprovedCredentialURL(u *url.URL) bool {
+	if u == nil || u.User != nil || u.RawQuery != "" || u.Fragment != "" || !isApprovedCredentialHost(u.Hostname()) {
+		return false
+	}
+	return u.Scheme == "https" && (u.Port() == "" || u.Port() == "443")
+}
+
+// IsApprovedCredentialURL reports whether a parsed endpoint satisfies the
+// production FreeInference credential-routing policy.
+func IsApprovedCredentialURL(u *url.URL) bool { return isApprovedCredentialURL(u) }
 
 // CredentialError is returned when a credential would be sent to a host that
 // is not an approved FreeInference endpoint and the user has not explicitly
@@ -274,13 +293,17 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	identity, err := NormalizeEndpoint(normalized)
+	if err != nil {
+		return nil, err
+	}
 
 	dialer := &net.Dialer{Timeout: DialTimeout}
 	return &Client{
 		baseURL:          normalized,
-		endpointIdentity: &EndpointIdentity{Host: extractHost(normalized), Origin: extractOrigin(normalized), RequestURL: normalized, IsFI: isApprovedCredentialHost(extractHost(normalized))},
+		endpointIdentity: identity,
 		apiKey:           cfg.APIKey,
-		version:          "dev",
+		version:          version.Version,
 		customEndpoint:   customCfg,
 		httpClient: &http.Client{
 			Timeout: cfg.Timeout,
@@ -297,24 +320,6 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 			},
 		},
 	}, nil
-}
-
-// extractHost extracts the host from a normalized URL string.
-func extractHost(u string) string {
-	parsed, err := url.Parse(u)
-	if err != nil {
-		return ""
-	}
-	return parsed.Hostname()
-}
-
-// extractOrigin extracts the origin (scheme://host) from a normalized URL string.
-func extractOrigin(u string) string {
-	parsed, err := url.Parse(u)
-	if err != nil {
-		return ""
-	}
-	return parsed.Scheme + "://" + parsed.Host
 }
 
 // approvedBaseURL validates a base URL and, when an API key is present,
@@ -346,7 +351,7 @@ func approvedBaseURL(rawURL string, apiKey string, customCfg *CustomEndpointConf
 		if err != nil {
 			return "", fmt.Errorf("invalid base URL: %w", err)
 		}
-		if !isApprovedCredentialHost(u.Hostname()) {
+		if !isApprovedCredentialURL(u) {
 			return "", &CredentialError{
 				Host: u.Hostname(),
 			}
@@ -358,11 +363,13 @@ func approvedBaseURL(rawURL string, apiKey string, customCfg *CustomEndpointConf
 	// being sent to a custom endpoint while allowing a user to configure
 	// their own endpoint + key pair.
 	if customCfg != nil {
+		u, err := url.Parse(normalized)
+		if err != nil {
+			return "", fmt.Errorf("invalid base URL: %w", err)
+		}
 		// Verify the configured endpoint matches the requested one
 		if !strings.EqualFold(normalized, customCfg.EndpointIdentity.RequestURL) {
-			return "", &CredentialError{
-				Host: normalized,
-			}
+			return "", &CredentialError{Host: u.Hostname()}
 		}
 		return normalized, nil
 	}
@@ -372,7 +379,7 @@ func approvedBaseURL(rawURL string, apiKey string, customCfg *CustomEndpointConf
 	if err != nil {
 		return "", fmt.Errorf("invalid base URL: %w", err)
 	}
-	if !isApprovedCredentialHost(u.Hostname()) {
+	if !isApprovedCredentialURL(u) {
 		return "", &CredentialError{
 			Host: u.Hostname(),
 		}
@@ -396,7 +403,7 @@ func newClientLegacyWithMode(baseURL, apiKey string, timeout time.Duration, test
 	return &Client{
 		baseURL: baseURL,
 		apiKey:  apiKey,
-		version: "dev",
+		version: version.Version,
 		httpClient: &http.Client{
 			Timeout: timeout,
 			Transport: &http.Transport{
@@ -467,7 +474,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body io.Rea
 		// exfiltration to an arbitrary host.
 		// _testMode bypasses this check for httptest server usage in tests.
 		if !c._testMode {
-			if !c.shouldAttachCredential(req.URL.Hostname()) {
+			if !c.shouldAttachCredential(req.URL) {
 				return nil, &CredentialError{Host: req.URL.Hostname()}
 			}
 		}
@@ -478,17 +485,17 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body io.Rea
 
 // shouldAttachCredential determines if the credential should be attached to a request
 // for the given hostname. It checks both the endpoint identity and any custom endpoint.
-func (c *Client) shouldAttachCredential(hostname string) bool {
-	hostname = strings.ToLower(strings.TrimSpace(hostname))
-	if hostname == "" {
+func (c *Client) shouldAttachCredential(target *url.URL) bool {
+	if target == nil || strings.TrimSpace(target.Hostname()) == "" {
 		return false
 	}
 	// If custom endpoint is configured, only attach credential to that exact origin
 	if c.customEndpoint != nil {
-		return strings.EqualFold(hostname, c.customEndpoint.EndpointIdentity.Host)
+		targetOrigin := target.Scheme + "://" + target.Host
+		return strings.EqualFold(targetOrigin, c.customEndpoint.EndpointIdentity.Origin)
 	}
 	// Otherwise, attach credential only to approved FreeInference hosts
-	return isApprovedCredentialHost(hostname)
+	return isApprovedCredentialURL(target)
 }
 
 // HTTPError is a sanitized non-2xx API response. RetryAfter is honored when
@@ -508,12 +515,21 @@ func (e *HTTPError) Error() string {
 
 // readErrorBody reads a bounded error body and extracts a sanitized message.
 func readErrorBody(resp *http.Response) *HTTPError {
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, MaxErrorBody))
+	body, _ := readBoundedBody(resp.Body, MaxErrorBody)
 	he := &HTTPError{StatusCode: resp.StatusCode}
 
 	if ra := resp.Header.Get("Retry-After"); ra != "" {
-		if secs, err := strconv.Atoi(strings.TrimSpace(ra)); err == nil && secs >= 0 {
+		ra = strings.TrimSpace(ra)
+		if secs, err := strconv.ParseInt(ra, 10, 64); err == nil && secs >= 0 && secs <= int64(MaxRetryAfter/time.Second) {
 			he.RetryAfter = time.Duration(secs) * time.Second
+		} else if retryAt, err := http.ParseTime(ra); err == nil {
+			d := time.Until(retryAt)
+			if d < 0 {
+				d = 0
+			}
+			if d <= MaxRetryAfter {
+				he.RetryAfter = d
+			}
 		}
 	}
 
@@ -524,7 +540,9 @@ func readErrorBody(resp *http.Response) *HTTPError {
 		// key-shaped token in a structured response cannot leak.
 		he.Message = secure.Redact(errResp.Error.Message)
 		if he.RetryAfter == 0 && errResp.Error.RetryAfter != nil && *errResp.Error.RetryAfter >= 0 {
-			he.RetryAfter = time.Duration(*errResp.Error.RetryAfter) * time.Second
+			if int64(*errResp.Error.RetryAfter) <= int64(MaxRetryAfter/time.Second) {
+				he.RetryAfter = time.Duration(*errResp.Error.RetryAfter) * time.Second
+			}
 		}
 		return he
 	}
@@ -538,6 +556,17 @@ func readErrorBody(resp *http.Response) *HTTPError {
 	// headers or auth tokens from a misbehaving upstream.
 	he.Message = secure.Redact(msg)
 	return he
+}
+
+func readBoundedBody(reader io.Reader, max int64) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(reader, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > max {
+		return nil, fmt.Errorf("response body exceeds %d bytes", max)
+	}
+	return body, nil
 }
 
 // ============================================================
@@ -580,6 +609,31 @@ type HealthResponse struct {
 	CycleOk                        bool   `json:"cycleOk"`
 	LastCycleAt                    string `json:"lastCycleAt"`
 	PendingControlPlaneTransitions int    `json:"pendingControlPlaneTransitions"`
+}
+
+// ValidateHealthResponse rejects malformed or contradictory provider health
+// data before it can be cached and rendered as a live green state.
+func ValidateHealthResponse(h *HealthResponse) error {
+	if h == nil {
+		return errors.New("nil health response")
+	}
+	switch h.Status {
+	case "healthy", "degraded", "unreachable", "unknown":
+	default:
+		return fmt.Errorf("invalid status %q", h.Status)
+	}
+	if h.Total < 0 || h.Healthy < 0 || h.Unhealthy < 0 || h.PendingControlPlaneTransitions < 0 {
+		return errors.New("health counts must be non-negative")
+	}
+	if h.Healthy > h.Total || h.Unhealthy > h.Total-h.Healthy {
+		return errors.New("health counts exceed total")
+	}
+	if h.LastCycleAt != "" {
+		if _, err := time.Parse(time.RFC3339Nano, h.LastCycleAt); err != nil {
+			return fmt.Errorf("invalid last cycle timestamp: %w", err)
+		}
+	}
+	return nil
 }
 
 // ============================================================
@@ -625,7 +679,7 @@ func (c *Client) ListModels() ([]Model, error) {
 		return nil, readErrorBody(resp)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxCatalogBody))
+	body, err := readBoundedBody(resp.Body, MaxCatalogBody)
 	if err != nil {
 		return nil, fmt.Errorf("read models response: %w", err)
 	}
@@ -637,6 +691,9 @@ func (c *Client) ListModels() ([]Model, error) {
 			return nil, fmt.Errorf("parse models: %w", err)
 		}
 		return models, nil
+	}
+	if modelsResp.Object != "" && modelsResp.Object != "list" {
+		return nil, fmt.Errorf("parse models: unexpected object %q", modelsResp.Object)
 	}
 	return modelsResp.Data, nil
 }
@@ -680,7 +737,7 @@ func (c *Client) GetHealth(healthURL string) (*HealthResponse, error) {
 		return nil, readErrorBody(resp)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxHealthBody))
+	body, err := readBoundedBody(resp.Body, MaxHealthBody)
 	if err != nil {
 		return nil, fmt.Errorf("read health response: %w", err)
 	}
@@ -688,6 +745,9 @@ func (c *Client) GetHealth(healthURL string) (*HealthResponse, error) {
 	var healthResp HealthResponse
 	if err := json.Unmarshal(body, &healthResp); err != nil {
 		return nil, fmt.Errorf("parse health: %w", err)
+	}
+	if err := ValidateHealthResponse(&healthResp); err != nil {
+		return nil, fmt.Errorf("validate health: %w", err)
 	}
 	return &healthResp, nil
 }
@@ -850,7 +910,7 @@ func (c *Client) GetAccountUsage() (*schema.AccountUsage, schema.AccountUsageCap
 	}
 
 	var bodyBytes []byte
-	bodyBytes, err = io.ReadAll(io.LimitReader(resp.Body, MaxHealthBody))
+	bodyBytes, err = readBoundedBody(resp.Body, MaxHealthBody)
 	if err != nil {
 		return nil, schema.CapabilityUnknown, fmt.Errorf("read account usage response: %w", err)
 	}
@@ -885,6 +945,9 @@ func (c *Client) GetAccountUsage() (*schema.AccountUsage, schema.AccountUsageCap
 		RequestsLimit: usageResp.RequestsLimit,
 		TokensUsed:    usageResp.TokensUsed,
 		TokensLimit:   usageResp.TokensLimit,
+	}
+	if err := schema.ValidateAccountUsage(au); err != nil {
+		return nil, schema.CapabilitySupported, fmt.Errorf("validate account usage: %w", err)
 	}
 	return au, schema.CapabilitySupported, nil
 }

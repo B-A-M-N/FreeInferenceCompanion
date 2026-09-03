@@ -1,6 +1,7 @@
 package config
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -22,17 +23,65 @@ func TestLoadDefaultsOnMissingFile(t *testing.T) {
 	if cfg.SchemaVersion != SchemaVersion {
 		t.Errorf("schema = %d, want %d", cfg.SchemaVersion, SchemaVersion)
 	}
+	if !cfg.Tracing.Enabled {
+		t.Error("tracing should default enabled for Companion launches")
+	}
 }
 
-func ptrF(v float64) *float64 { return &v }
-func ptrI(v int) *int         { return &v }
-func ptrB(v bool) *bool       { return &v }
+func TestLoadRejectsOversizedTrailingAndFutureConfig(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FI_CONFIG_DIR", dir)
+	path, err := ConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"schema_version":1}`+string(make([]byte, maxConfigBytes))), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(); err == nil {
+		t.Fatal("oversized config must be rejected")
+	}
+	if err := os.WriteFile(path, []byte(`{"schema_version":1} {}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(); err == nil {
+		t.Fatal("trailing config data must be rejected")
+	}
+	if err := os.WriteFile(path, []byte(`{"schema_version":999}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(); err == nil {
+		t.Fatal("future config schema must be rejected")
+	}
+}
+
+func TestLoadRejectsSymlinkWithoutFollowingIt(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FI_CONFIG_DIR", dir)
+	path, err := ConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "outside.json")
+	if err := os.WriteFile(target, []byte(`{"schema_version":1}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := Load(); err == nil {
+		t.Fatal("config symlink must be rejected")
+	}
+}
 
 func TestSaveAndLoad(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("FI_CONFIG_DIR", dir)
 	cfg := defaultConfig()
-	cfg.Context.WatchEnter = 50.0
+	cfg.Context.WatchEnter = 65.0
 	cfg.Context.CriticalEnter = 95.0
 	if err := Save(&cfg); err != nil {
 		t.Fatal(err)
@@ -41,8 +90,8 @@ func TestSaveAndLoad(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Context.WatchEnter != 50.0 {
-		t.Errorf("watch = %f, want 50", loaded.Context.WatchEnter)
+	if loaded.Context.WatchEnter != 65.0 {
+		t.Errorf("watch = %f, want 65", loaded.Context.WatchEnter)
 	}
 	if loaded.Context.CriticalEnter != 95.0 {
 		t.Errorf("critical = %f, want 95", loaded.Context.CriticalEnter)
@@ -128,7 +177,7 @@ func TestResetToDefault(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("FI_CONFIG_DIR", dir)
 	cfg := defaultConfig()
-	cfg.Context.WatchEnter = 99.0
+	cfg.Context.WatchEnter = 75.0
 	if err := Save(&cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -177,6 +226,7 @@ func TestSetField(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("FI_CONFIG_DIR", dir)
 	cfg := defaultConfig()
+	cfg.Context.WatchLeave = 45.0
 	if err := SetField(&cfg, "context.watch_enter", "55.0"); err != nil {
 		t.Fatal(err)
 	}
@@ -184,6 +234,9 @@ func TestSetField(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := SetField(&cfg, "reporting.level", "standard"); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetField(&cfg, "tracing.enabled", "false"); err != nil {
 		t.Fatal(err)
 	}
 	if err := Save(&cfg); err != nil {
@@ -201,6 +254,25 @@ func TestSetField(t *testing.T) {
 	}
 	if loaded.Reporting.Level != "standard" {
 		t.Errorf("reporting level = %q, want standard", loaded.Reporting.Level)
+	}
+	if loaded.Tracing.Enabled {
+		t.Error("tracing.enabled should be false")
+	}
+}
+
+func TestTracingEnvironmentOverride(t *testing.T) {
+	t.Setenv("FI_CONFIG_DIR", t.TempDir())
+	t.Setenv("FI_TRACING", "false")
+	mgr, err := NewManager()
+	if err != nil {
+		t.Fatal(err)
+	}
+	eff, err := mgr.Resolve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eff.Tracing.Enabled.Value || eff.Tracing.Enabled.Source != SourceEnv || !eff.Tracing.Enabled.Valid {
+		t.Fatalf("unexpected tracing effective value: %#v", eff.Tracing.Enabled)
 	}
 }
 
@@ -240,6 +312,46 @@ func TestValidateRejectsCrossFieldThresholds(t *testing.T) {
 	cfg.Cache.WarnThreshold = cfg.Cache.RecoveredThreshold
 	if err := Validate(&cfg); err == nil {
 		t.Fatal("expected invalid cache threshold ordering")
+	}
+}
+
+func TestEffectiveConfigRejectsNonFiniteCacheEnvAndZeroCooldown(t *testing.T) {
+	t.Setenv("FI_CONFIG_DIR", t.TempDir())
+	t.Setenv("FI_CACHE_WARN_THRESHOLD", "NaN")
+	t.Setenv("FI_CACHE_COOLDOWN_MINS", "0")
+	mgr, err := NewManager()
+	if err != nil {
+		t.Fatal(err)
+	}
+	eff, err := mgr.Resolve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eff.Cache.WarnThreshold.Valid || eff.Cache.CooldownMins.Valid {
+		t.Fatalf("invalid effective cache values were accepted: %#v %#v", eff.Cache.WarnThreshold, eff.Cache.CooldownMins)
+	}
+
+	cfg := defaultConfig()
+	cfg.Cache.WarnThreshold = math.Inf(1)
+	if err := Validate(&cfg); err == nil {
+		t.Fatal("Validate accepted positive infinity")
+	}
+}
+
+func TestEffectiveConfigMarksCrossFieldEnvInvariant(t *testing.T) {
+	t.Setenv("FI_CONFIG_DIR", t.TempDir())
+	t.Setenv("FI_WATCH_ENTER", "90")
+	t.Setenv("FI_WARN_ENTER", "80")
+	mgr, err := NewManager()
+	if err != nil {
+		t.Fatal(err)
+	}
+	eff, err := mgr.Resolve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eff.Context.WatchEnter.Valid || eff.Context.WarnEnter.Valid || len(eff.Invalid) == 0 {
+		t.Fatalf("cross-field invariant was not surfaced: %#v", eff)
 	}
 }
 

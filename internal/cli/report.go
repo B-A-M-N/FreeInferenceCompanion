@@ -8,8 +8,11 @@ import (
 	"time"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/engine"
+	"github.com/b-a-m-n/freeinference-companion/internal/incidents"
+	"github.com/b-a-m-n/freeinference-companion/internal/runtime"
 	"github.com/b-a-m-n/freeinference-companion/internal/secure"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
+	"github.com/b-a-m-n/freeinference-companion/internal/tracing"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
 
@@ -21,8 +24,13 @@ type reportData struct {
 	Version          string              `json:"version"`
 	GeneratedAt      string              `json:"generated_at"`
 	Client           string              `json:"client,omitempty"`
+	Historical       bool                `json:"historical,omitempty"`
+	RuntimeActive    bool                `json:"runtime_active"`
+	Trace            *reportTrace        `json:"trace,omitempty"`
 	Session          *reportSession      `json:"session,omitempty"`
 	Health           *reportHealth       `json:"health,omitempty"`
+	ModelMonitor     *reportModelMonitor `json:"model_monitor,omitempty"`
+	Incidents        *incidents.Report   `json:"incidents,omitempty"`
 	AccountUsage     *reportAccountUsage `json:"account_usage,omitempty"`
 	BudgetProjection string              `json:"budget_projection,omitempty"`
 	Note             string              `json:"note"`
@@ -37,12 +45,27 @@ type reportSession struct {
 	ProviderConfirmed bool              `json:"provider_confirmed"`
 	ContextUsedPct    *float64          `json:"context_used_pct,omitempty"`
 	ContextLimit      *int64            `json:"context_limit,omitempty"`
+	ContextTelemetry  string            `json:"context_telemetry"`
 	PressureState     string            `json:"pressure_state"`
 	CacheReadShare    *float64          `json:"cache_read_share,omitempty"`
 	CacheTrend        string            `json:"cache_trend,omitempty"`
-	CacheSamples      int               `json:"cache_samples,omitempty"`
+	CacheObserved     int               `json:"cache_observed_samples,omitempty"`
+	CacheAnalyzed     int               `json:"cache_analyzed_samples,omitempty"`
+	CacheUsable       int               `json:"cache_usable_samples,omitempty"`
+	CacheTelemetry    string            `json:"cache_telemetry"`
 	LastFailure       string            `json:"last_failure,omitempty"`
 	LastCompaction    *reportCompaction `json:"last_compaction,omitempty"`
+}
+
+type reportTrace struct {
+	Enabled        bool   `json:"enabled"`
+	TraceID        string `json:"trace_id"`
+	Client         string `json:"client"`
+	Provider       string `json:"provider"`
+	Source         string `json:"source"`
+	Header         string `json:"header"`
+	StartedAt      string `json:"started_at"`
+	EndpointOrigin string `json:"endpoint_origin,omitempty"`
 }
 
 type reportCompaction struct {
@@ -56,12 +79,28 @@ type reportCompaction struct {
 type reportHealth struct {
 	Status    string `json:"status"`
 	Checked   string `json:"checked"`
+	AgeSecs   int64  `json:"age_seconds"`
+	Stale     bool   `json:"stale"`
 	Healthy   *int   `json:"healthy_count,omitempty"`
 	Unhealthy *int   `json:"unhealthy_count,omitempty"`
 }
 
+type reportModelMonitor struct {
+	Model         string     `json:"model"`
+	OK            *bool      `json:"ok,omitempty"`
+	UptimeRatio   *float64   `json:"uptime_ratio,omitempty"`
+	LatencyMs     *int64     `json:"latency_ms,omitempty"`
+	TTFTMs        *int64     `json:"ttft_ms,omitempty"`
+	ThroughputTps *float64   `json:"throughput_tps,omitempty"`
+	CheckedAt     *time.Time `json:"checked_at,omitempty"`
+	AgeSecs       *int64     `json:"age_seconds,omitempty"`
+	Stale         bool       `json:"stale,omitempty"`
+}
+
 type reportAccountUsage struct {
 	FetchedAt     string `json:"fetched_at"`
+	AgeSecs       int64  `json:"age_seconds"`
+	Stale         bool   `json:"stale"`
 	RequestsUsed  *int64 `json:"requests_used,omitempty"`
 	RequestsLimit *int64 `json:"requests_limit,omitempty"`
 	TokensUsed    *int64 `json:"tokens_used,omitempty"`
@@ -86,29 +125,43 @@ func cmdReport(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 	}
 
 	gs := loadGlobal(paths)
+	now := time.Now().UTC()
 	report := &reportData{
 		Tool:        "freeinference-companion",
 		Version:     Version,
-		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		GeneratedAt: now.Format(time.RFC3339),
 		Note:        reportNote,
 	}
+	activation := activationForCLICommand("report", args)
+	report.RuntimeActive = activation.Active
 	if gs.Health != nil {
+		age := now.Sub(gs.Health.FetchedAt)
 		report.Health = &reportHealth{
 			Status:    gs.Health.Status,
 			Checked:   gs.Health.FetchedAt.UTC().Format(time.RFC3339),
+			AgeSecs:   max(0, int64(age.Seconds())),
+			Stale:     age < 0 || age > schema.DefaultHealthMaxAge,
 			Healthy:   gs.Health.HealthyCount,
 			Unhealthy: gs.Health.UnhealthyCount,
 		}
 	}
-	if gs.HasAuthoritativeAccountUsage() {
-		report.AccountUsage = &reportAccountUsage{
-			FetchedAt:     gs.AccountUsage.FetchedAt.UTC().Format(time.RFC3339),
-			RequestsUsed:  gs.AccountUsage.RequestsUsed,
-			RequestsLimit: gs.AccountUsage.RequestsLimit,
-			TokensUsed:    gs.AccountUsage.TokensUsed,
-			TokensLimit:   gs.AccountUsage.TokensLimit,
+	if gs != nil && gs.AccountUsage != nil && gs.AccountUsageCapability != nil &&
+		gs.AccountUsageCapability.State == schema.CapabilitySupported && schema.ValidateAccountUsage(gs.AccountUsage) == nil {
+		age := now.Sub(gs.AccountUsage.FetchedAt)
+		usage := &reportAccountUsage{
+			FetchedAt: gs.AccountUsage.FetchedAt.UTC().Format(time.RFC3339),
+			AgeSecs:   max(0, int64(age.Seconds())),
+			Stale:     age < 0 || age > schema.DefaultAccountUsageMaxAge,
 		}
+		if !usage.Stale {
+			usage.RequestsUsed = gs.AccountUsage.RequestsUsed
+			usage.RequestsLimit = gs.AccountUsage.RequestsLimit
+			usage.TokensUsed = gs.AccountUsage.TokensUsed
+			usage.TokensLimit = gs.AccountUsage.TokensLimit
+		}
+		report.AccountUsage = usage
 	}
+	incidentFilter := incidents.Filter{Since: time.Now().UTC().Add(-24 * time.Hour)}
 
 	resolved, err := resolveSession(paths, clientType, sessionID, stdout)
 	if err != nil {
@@ -116,14 +169,43 @@ func cmdReport(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if resolved != nil {
+		// Resolve activation for the client that owns the selected snapshot;
+		// the command's inherited activation may describe a different client.
+		activation = runtime.EvaluateForClient(runtime.ClientKind(resolved.Client))
+		report.RuntimeActive = activation.Active
 		report.Client = resolved.Client
+		report.Historical = !activation.Active && !activation.Disabled
 		report.Session = buildReportSession(resolved.Snap, reveal)
+		incidentFilter.Client = resolved.Client
+		incidentFilter.SessionID = resolved.SessionID
+		if currentID, idErr := activationID(activation); idErr == nil {
+			report.ModelMonitor = buildReportModelMonitorForActivation(gs, resolved.Snap, currentID, now)
+		}
 
 		// Compute budget projection for the markdown report.
-		if gs.HasAuthoritativeAccountUsage() {
-			proj := engine.ProjectBudget(gs.AccountUsage, resolved.Snap, time.Now().UTC(), gs.CircuitBreakers)
+		if report.AccountUsage != nil && !report.AccountUsage.Stale {
+			proj := engine.ProjectBudget(gs.AccountUsage, resolved.Snap, now, gs.CircuitBreakers)
 			if proj.Status != engine.BudgetUnknown {
 				report.BudgetProjection = engineProjectBudgetFromProj(proj)
+			}
+		}
+	}
+	if incidentReport, incidentErr := incidents.Collect(paths, incidentFilter, time.Now().UTC()); incidentErr == nil {
+		report.Incidents = incidentReport
+	}
+	if enabled, valid, _ := effectiveTracing(); valid && enabled {
+		traceActivation := activation
+		if resolved != nil {
+			traceActivation = runtime.EvaluateForClient(runtime.ClientKind(resolved.Client))
+		} else if inherited, ok := tracing.EnvironmentTrace(); ok {
+			traceActivation = runtime.EvaluateForClient(runtime.ClientKind(inherited.Client))
+		}
+		if traceActivation.Active && resolved != nil {
+			if currentID, idErr := activationID(activation); idErr == nil {
+				report.Trace = buildReportTraceForActivation(resolved.Snap, currentID)
+			}
+			if report.Trace != nil && !reveal {
+				report.Trace.TraceID = displaySessionID(report.Trace.TraceID, false)
 			}
 		}
 	}
@@ -154,14 +236,33 @@ func buildReportSession(snap *schema.Snapshot, reveal bool) *reportSession {
 		ProviderConfirmed: snap.Provider.Confirmed,
 		PressureState:     snap.Pressure.State,
 		ContextLimit:      snap.Model.ContextLength,
+		ContextTelemetry:  "unknown",
+		CacheTelemetry:    "unknown",
 	}
-	if snap.LiveContext != nil {
+	if snap.Client.Type == schema.ClientCodex {
+		rs.ContextTelemetry = "unavailable"
+		rs.CacheTelemetry = "unavailable"
+	}
+	if snap.Client.Type != schema.ClientCodex && snap.LiveContext != nil {
 		rs.ContextUsedPct = snap.LiveContext.UsedPercentage
+		rs.ContextTelemetry = string(snap.LiveContext.TotalTokenSemantics)
+		if rs.ContextTelemetry == "" {
+			rs.ContextTelemetry = "available"
+		}
 	}
-	if snap.CacheAnalysis != nil {
+	if snap.Client.Type != schema.ClientCodex && snap.CacheAnalysis != nil {
 		rs.CacheReadShare = snap.CacheAnalysis.CacheReadShare
 		rs.CacheTrend = snap.CacheAnalysis.Trend
-		rs.CacheSamples = snap.CacheAnalysis.RequestSamples
+		rs.CacheObserved = snap.CacheAnalysis.ObservationCount
+		if rs.CacheObserved == 0 {
+			rs.CacheObserved = snap.CacheAnalysis.RequestSamples
+		}
+		rs.CacheAnalyzed = snap.CacheAnalysis.AnalysisWindowCount
+		rs.CacheUsable = snap.CacheAnalysis.UsableSampleCount
+		rs.CacheTelemetry = string(snap.CacheAnalysis.Availability)
+		if rs.CacheTelemetry == "" {
+			rs.CacheTelemetry = "available"
+		}
 	}
 	if snap.LastFailure != nil {
 		rs.LastFailure = snap.LastFailure.Category
@@ -179,6 +280,79 @@ func buildReportSession(snap *schema.Snapshot, reveal bool) *reportSession {
 	return rs
 }
 
+func buildReportModelMonitor(gs *schema.GlobalState, modelID string, now time.Time) *reportModelMonitor {
+	if gs == nil || gs.PublicStatus == nil || modelID == "" {
+		return nil
+	}
+	for _, metric := range gs.PublicStatus.Models {
+		if metric.ModelID != modelID {
+			continue
+		}
+		monitor := &reportModelMonitor{Model: secure.SanitizeField(metric.ModelID), UptimeRatio: metric.UptimeRatio}
+		if metric.Latest != nil {
+			monitor.OK = metric.Latest.OK
+			monitor.LatencyMs = metric.Latest.LatencyMs
+			monitor.TTFTMs = metric.Latest.TTFTMs
+			monitor.ThroughputTps = metric.Latest.ThroughputTps
+			checked := metric.Latest.CheckedAt
+			monitor.CheckedAt = &checked
+			age := max(0, int64(now.Sub(checked).Seconds()))
+			monitor.AgeSecs = &age
+			monitor.Stale = now.Before(checked) || now.Sub(checked) > 45*time.Minute
+			// Do not copy upstream error bodies into a shareable support report.
+			// They are not a typed, locally-controlled field and may contain
+			// infrastructure details or other sensitive text.
+		}
+		return monitor
+	}
+	return nil
+}
+
+func buildReportModelMonitorForActivation(gs *schema.GlobalState, snap *schema.Snapshot, currentActivationID string, now time.Time) *reportModelMonitor {
+	if snap == nil || !snap.Provider.Confirmed || snap.Provider.Name != schema.ProviderFreeInference ||
+		currentActivationID == "" || snap.ActivationID == "" || snap.ActivationID != currentActivationID {
+		return nil
+	}
+	return buildReportModelMonitor(gs, snap.Model.ID, now)
+}
+
+func buildReportTrace(snap *schema.Snapshot) *reportTrace {
+	if snap == nil || snap.Trace == nil || !snap.Trace.Verified || !snap.Provider.Confirmed || snap.Provider.Name != schema.ProviderFreeInference {
+		return nil
+	}
+	if snap.Trace.Client != "" && snap.Trace.Client != snap.Client.Type {
+		return nil
+	}
+	return buildReportTraceInfo(snap.Trace)
+}
+
+func buildReportTraceForActivation(snap *schema.Snapshot, currentActivationID string) *reportTrace {
+	if snap == nil || currentActivationID == "" || snap.ActivationID == "" || snap.ActivationID != currentActivationID {
+		return nil
+	}
+	return buildReportTrace(snap)
+}
+
+func buildReportTraceInfo(trace *schema.TraceInfo) *reportTrace {
+	if trace == nil || !trace.Enabled || !trace.Verified || trace.Provider != schema.ProviderFreeInference ||
+		trace.Header != tracing.SessionHeader || trace.Source == schema.TraceSourceNone || !tracing.ValidateTraceID(trace.SessionID) {
+		return nil
+	}
+	result := &reportTrace{
+		Enabled:        true,
+		TraceID:        trace.SessionID,
+		Client:         secure.SanitizeField(trace.Client),
+		Provider:       secure.SanitizeField(trace.Provider),
+		Source:         secure.SanitizeField(trace.Source),
+		Header:         secure.SanitizeField(trace.Header),
+		EndpointOrigin: secure.SanitizeField(trace.EndpointOrigin),
+	}
+	if !trace.StartedAt.IsZero() {
+		result.StartedAt = trace.StartedAt.UTC().Format(time.RFC3339)
+	}
+	return result
+}
+
 func printMarkdownReport(stdout io.Writer, report *reportData, reveal bool) {
 	fmt.Fprintln(stdout, "FreeInference Companion Report")
 	fmt.Fprintln(stdout, repeat("=", 60))
@@ -193,12 +367,42 @@ func printMarkdownReport(stdout io.Writer, report *reportData, reveal bool) {
 			fmt.Fprintf(stdout, "Models:  %d healthy, %d unhealthy\n", *report.Health.Healthy, *report.Health.Unhealthy)
 		}
 		fmt.Fprintf(stdout, "Checked: %s\n", report.Health.Checked)
+		if report.Health.Stale {
+			fmt.Fprintln(stdout, "Freshness: stale")
+		}
+	}
+
+	if report.ModelMonitor != nil {
+		fmt.Fprintln(stdout)
+		fmt.Fprintln(stdout, "--- Model Monitor ---")
+		fmt.Fprintf(stdout, "Model:   %s\n", report.ModelMonitor.Model)
+		if report.ModelMonitor.OK != nil {
+			fmt.Fprintf(stdout, "Status:  %s\n", map[bool]string{true: "up", false: "down"}[*report.ModelMonitor.OK])
+		}
+		if report.ModelMonitor.UptimeRatio != nil {
+			fmt.Fprintf(stdout, "Uptime:  %.1f%%\n", *report.ModelMonitor.UptimeRatio*100)
+		}
+		if report.ModelMonitor.LatencyMs != nil {
+			fmt.Fprintf(stdout, "Latency: %dms\n", *report.ModelMonitor.LatencyMs)
+		}
+		if report.ModelMonitor.ThroughputTps != nil {
+			fmt.Fprintf(stdout, "Throughput: %.1f t/s\n", *report.ModelMonitor.ThroughputTps)
+		}
+		if report.ModelMonitor.CheckedAt != nil {
+			fmt.Fprintf(stdout, "Checked: %s\n", report.ModelMonitor.CheckedAt.UTC().Format(time.RFC3339))
+		}
+		if report.ModelMonitor.Stale {
+			fmt.Fprintln(stdout, "Freshness: stale")
+		}
 	}
 
 	if report.AccountUsage != nil {
 		fmt.Fprintln(stdout)
 		fmt.Fprintln(stdout, "--- Account Usage ---")
 		fmt.Fprintf(stdout, "Updated: %s\n", report.AccountUsage.FetchedAt)
+		if report.AccountUsage.Stale {
+			fmt.Fprintln(stdout, "Freshness: stale (not used for budget calculations)")
+		}
 		if report.AccountUsage.RequestsUsed != nil || report.AccountUsage.RequestsLimit != nil {
 			fmt.Fprintf(stdout, "Requests: %s\n", formatQuotaPair(report.AccountUsage.RequestsUsed, report.AccountUsage.RequestsLimit))
 		}
@@ -211,11 +415,51 @@ func printMarkdownReport(stdout io.Writer, report *reportData, reveal bool) {
 		fmt.Fprintf(stdout, "Budget:   %s\n", report.BudgetProjection)
 	}
 
+	if report.Incidents != nil {
+		fmt.Fprintln(stdout)
+		fmt.Fprintln(stdout, "--- Incident Summary ---")
+		fmt.Fprintf(stdout, "Failures: %d\n", report.Incidents.Total)
+		for _, count := range report.Incidents.ByStatus {
+			fmt.Fprintf(stdout, "  HTTP %-19s %d\n", count.Name, count.Count)
+		}
+		for _, count := range report.Incidents.ByCategory {
+			fmt.Fprintf(stdout, "  %-24s %d\n", count.Name, count.Count)
+		}
+		if len(report.Incidents.Recent) > 0 {
+			fmt.Fprintln(stdout, "Latest:")
+			limit := len(report.Incidents.Recent)
+			if limit > 5 {
+				limit = 5
+			}
+			for _, incident := range report.Incidents.Recent[:limit] {
+				status := "—"
+				if incident.HTTPStatus != nil {
+					status = fmt.Sprintf("%d", *incident.HTTPStatus)
+				}
+				model := incident.Model
+				if model == "" {
+					model = "?"
+				}
+				fmt.Fprintf(stdout, "  %s  %-16s %-4s %-20s", incident.At.UTC().Format(time.RFC3339), model, status, incident.Category)
+				if incident.Retryable != nil {
+					fmt.Fprintf(stdout, " retryable=%t", *incident.Retryable)
+				}
+				if incident.PublicMonitor != nil {
+					fmt.Fprintf(stdout, " monitor=%s", incident.PublicMonitor.Status)
+				}
+				fmt.Fprintln(stdout)
+			}
+		}
+	}
+
 	if report.Session == nil {
 		fmt.Fprintln(stdout)
 		fmt.Fprintln(stdout, "No session resolved. Use --session <id> or see `freeinference sessions`.")
 	} else {
 		s := report.Session
+		if report.Historical {
+			fmt.Fprintln(stdout, "Historical session — FreeInference is not currently active.")
+		}
 		fmt.Fprintln(stdout)
 		fmt.Fprintln(stdout, "--- Session ---")
 		fmt.Fprintf(stdout, "Client:   %s\n", report.Client)
@@ -225,6 +469,8 @@ func printMarkdownReport(stdout io.Writer, report *reportData, reveal bool) {
 		fmt.Fprintf(stdout, "Provider: %s (confirmed: %t)\n", s.Provider, s.ProviderConfirmed)
 		if s.ContextUsedPct != nil {
 			fmt.Fprintf(stdout, "Context:  %.1f%% used\n", *s.ContextUsedPct)
+		} else if s.ContextTelemetry == "unavailable" {
+			fmt.Fprintln(stdout, "Context:  unavailable (Codex does not expose live context telemetry)")
 		} else {
 			fmt.Fprintln(stdout, "Context:  unknown")
 		}
@@ -232,9 +478,11 @@ func printMarkdownReport(stdout io.Writer, report *reportData, reveal bool) {
 			fmt.Fprintf(stdout, "Limit:    %s\n", formatTokenCount(*s.ContextLimit))
 		}
 		fmt.Fprintf(stdout, "Pressure: %s\n", s.PressureState)
-		if s.CacheSamples > 0 {
-			fmt.Fprintf(stdout, "Cache:    %s read share over %d samples (trend: %s)\n",
-				formatPctPtr(s.CacheReadShare), s.CacheSamples, s.CacheTrend)
+		if s.CacheTelemetry == "unavailable" {
+			fmt.Fprintln(stdout, "Cache:    unavailable (Codex does not expose cache telemetry)")
+		} else if s.CacheObserved > 0 {
+			fmt.Fprintf(stdout, "Cache:    %s read share (%d usable of %d observed; trend: %s)\n",
+				formatPctPtr(s.CacheReadShare), s.CacheUsable, s.CacheObserved, s.CacheTrend)
 		}
 		if s.LastCompaction != nil {
 			fmt.Fprintln(stdout)
@@ -255,6 +503,19 @@ func printMarkdownReport(stdout io.Writer, report *reportData, reveal bool) {
 			fmt.Fprintln(stdout)
 			fmt.Fprintln(stdout, "--- Last Failure ---")
 			fmt.Fprintf(stdout, "Category: %s\n", s.LastFailure)
+		}
+	}
+	if report.Trace != nil {
+		fmt.Fprintln(stdout)
+		fmt.Fprintln(stdout, "--- Trace Correlation ---")
+		fmt.Fprintf(stdout, "Enabled:  %t\n", report.Trace.Enabled)
+		fmt.Fprintf(stdout, "Trace ID: %s\n", report.Trace.TraceID)
+		fmt.Fprintf(stdout, "Client:   %s\n", report.Trace.Client)
+		fmt.Fprintf(stdout, "Provider: %s\n", report.Trace.Provider)
+		fmt.Fprintf(stdout, "Header:   %s\n", report.Trace.Header)
+		fmt.Fprintf(stdout, "Source:   %s\n", report.Trace.Source)
+		if report.Trace.StartedAt != "" {
+			fmt.Fprintf(stdout, "Started:  %s\n", report.Trace.StartedAt)
 		}
 	}
 

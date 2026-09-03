@@ -102,10 +102,14 @@ func cmdSnapshot(paths state.Paths, args []string, stdin io.Reader, stdout, stde
 		fmt.Fprintf(stderr, "usage error: %v\n", err)
 		return 2
 	}
+	historical := explicitSessionRequested(flagArgs)
 
 	// Derive activation ID to check for identity errors.
 	// Identity failures are reported before any state access.
-	activation := runtime.Evaluate()
+	activation := activationForCLICommand("snapshot", flagArgs)
+	if stdinHasData(stdin) {
+		activation = runtime.EvaluateForClient(runtime.ClientClaudeCode)
+	}
 	aid, aidErr := activationID(activation)
 
 	// Status-line mode (stdin input): zero output on identity failure.
@@ -127,10 +131,18 @@ func cmdSnapshot(paths state.Paths, args []string, stdin io.Reader, stdout, stde
 			if clientType == "" {
 				clientType = schema.ClientClaudeCode
 			}
-			_ = adapters.NewClaudeAdapter(paths).HandleStatusLineUpdateWith(&statusInput, statusInput.SessionID, runtime.Evaluate())
+			activation := runtime.EvaluateForClient(runtime.ClientClaudeCode)
+			if !activation.Active {
+				return 0
+			}
+			aid, aidErr = activationID(activation)
+			if aidErr != nil {
+				return 0
+			}
+			_ = adapters.NewClaudeAdapter(paths).HandleStatusLineUpdateWithTrace(&statusInput, statusInput.SessionID, activation, environmentTraceInfo(schema.ClientClaudeCode, activation))
 			snap, _ := state.LoadSnapshot(paths, schema.ClientClaudeCode, statusInput.SessionID)
 			if snap != nil {
-				return printSnapshot(stdout, stderr, snap, loadGlobal(paths), jsonOut, aid, aidErr, reveal)
+				return printSnapshot(stdout, stderr, snap, loadGlobal(paths), jsonOut, aid, aidErr, reveal, false)
 			}
 		}
 	}
@@ -150,13 +162,22 @@ func cmdSnapshot(paths state.Paths, args []string, stdin io.Reader, stdout, stde
 		fmt.Fprintln(stdout, "FI: no session")
 		return 0
 	}
-	return printSnapshot(stdout, stderr, resolved.Snap, loadGlobal(paths), jsonOut, aid, aidErr, reveal)
+	return printSnapshot(stdout, stderr, resolved.Snap, loadGlobal(paths), jsonOut, aid, aidErr, reveal, historical)
 }
 
-func printSnapshot(stdout, stderr io.Writer, snap *schema.Snapshot, gs *schema.GlobalState, jsonOut bool, aid string, aidErr error, reveal bool) int {
+func printSnapshot(stdout, stderr io.Writer, snap *schema.Snapshot, gs *schema.GlobalState, jsonOut bool, aid string, aidErr error, reveal bool, historical bool) int {
 	// Handle identity error: report sanitized error for interactive mode.
 	// For status-line mode (jsonOut with no snapshot), fail-closed with zero output.
 	if aidErr != nil {
+		if historical && strings.Contains(aidErr.Error(), "runtime not active") {
+			if jsonOut {
+				writeHistoricalSnapshotJSON(stdout, snap, reveal, false, "runtime_not_active")
+				return 0
+			}
+			fmt.Fprintln(stdout, "Historical session — FreeInference is not currently active.")
+			printFullStatus(stdout, snap, gs, reveal)
+			return 0
+		}
 		if jsonOut {
 			// Status-line mode: zero output on identity failure
 			return 0
@@ -169,6 +190,15 @@ func printSnapshot(stdout, stderr io.Writer, snap *schema.Snapshot, gs *schema.G
 	// Interactive diagnostic mode: show data.
 	// The strict gate applies via buildView which receives the current activation ID.
 	vm := buildView(snap, gs, aid, true, snap.Client.Type, snap.Session.ID)
+	if historical && !vm.Eligible {
+		if jsonOut {
+			writeHistoricalSnapshotJSON(stdout, snap, reveal, true, "historical_snapshot")
+			return 0
+		}
+		fmt.Fprintln(stdout, "Historical session — not a current live surface.")
+		printFullStatus(stdout, snap, gs, reveal)
+		return 0
+	}
 	rc := renderConfig()
 	if jsonOut {
 		data, err := vm.JSON()
@@ -181,6 +211,26 @@ func printSnapshot(stdout, stderr io.Writer, snap *schema.Snapshot, gs *schema.G
 	}
 	fmt.Fprintln(stdout, vm.Expanded(rc))
 	return 0
+}
+
+func writeHistoricalSnapshotJSON(stdout io.Writer, snap *schema.Snapshot, reveal, runtimeActive bool, reason string) {
+	provider := secure.SanitizeField(snap.Provider.Name)
+	if !snap.Provider.Confirmed {
+		provider = "unknown (unconfirmed)"
+	}
+	obj := map[string]any{
+		"historical":     true,
+		"runtime_active": runtimeActive,
+		"reason":         reason,
+		"session_id":     displaySessionID(snap.Session.ID, reveal),
+		"client":         secure.SanitizeField(snap.Client.Type),
+		"session_status": secure.SanitizeField(snap.Session.Status),
+		"model_id":       secure.SanitizeField(snap.Model.ID),
+		"provider":       provider,
+	}
+	enc := json.NewEncoder(stdout)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(obj)
 }
 
 // cmdRender implements `freeinference render --mode line|standard|expanded`.
@@ -213,6 +263,7 @@ func cmdRender(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 		fmt.Fprintf(stderr, "usage error: %v\n", err)
 		return 2
 	}
+	historical := explicitSessionRequested(parseArgs)
 	if mode == "" {
 		mode = "line"
 	}
@@ -222,7 +273,10 @@ func cmdRender(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 	}
 
 	// Derive activation ID to check for identity errors.
-	activation := runtime.Evaluate()
+	activation := activationForCLICommand("render", parseArgs)
+	if stdinHasData(stdin) {
+		activation = runtime.EvaluateForClient(runtime.ClientClaudeCode)
+	}
 	aid, aidErr := activationID(activation)
 
 	// Status-line mode (stdin input): zero output on identity failure.
@@ -232,8 +286,11 @@ func cmdRender(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 
 	// Status payload on stdin takes priority (same path as status line).
 	if sessionID == "" {
-		if snap := updateFromStdinStatus(paths, stdin); snap != nil {
-			return printRendered(stdout, stderr, snap, loadGlobal(paths), mode, aid, aidErr, reveal)
+		if snap, consumed := updateFromStdinStatus(paths, stdin); consumed {
+			if snap == nil {
+				return 0
+			}
+			return printRendered(stdout, stderr, snap, loadGlobal(paths), mode, aid, aidErr, reveal, false)
 		}
 	}
 
@@ -246,12 +303,19 @@ func cmdRender(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 		fmt.Fprintln(stdout, "FI: no session")
 		return 0
 	}
-	return printRendered(stdout, stderr, resolved.Snap, loadGlobal(paths), mode, aid, aidErr, reveal)
+	return printRendered(stdout, stderr, resolved.Snap, loadGlobal(paths), mode, aid, aidErr, reveal, historical)
 }
 
-func printRendered(stdout, stderr io.Writer, snap *schema.Snapshot, gs *schema.GlobalState, mode string, aid string, aidErr error, reveal bool) int {
+func printRendered(stdout, stderr io.Writer, snap *schema.Snapshot, gs *schema.GlobalState, mode string, aid string, aidErr error, reveal bool, historical bool) int {
 	// Handle identity error: report sanitized error for interactive mode.
 	if aidErr != nil {
+		if historical && strings.Contains(aidErr.Error(), "runtime not active") {
+			fmt.Fprintln(stdout, "Historical session — FreeInference is not currently active.")
+			if mode == "expanded" {
+				printFullStatus(stdout, snap, gs, reveal)
+			}
+			return 0
+		}
 		fmt.Fprintf(stderr, "error: %s\n", secure.SanitizeField(aidErr.Error()))
 		return 1
 	}
@@ -259,6 +323,13 @@ func printRendered(stdout, stderr io.Writer, snap *schema.Snapshot, gs *schema.G
 	// Interactive diagnostic mode: show data regardless of activation state.
 	// Note: For render, we use the activation ID (aid) to gate visibility via SurfaceEligibility.
 	vm := buildView(snap, gs, aid, true, snap.Client.Type, snap.Session.ID)
+	if historical && !vm.Eligible {
+		fmt.Fprintln(stdout, "Historical session — not a current live surface.")
+		if mode == "expanded" {
+			printFullStatus(stdout, snap, gs, reveal)
+		}
+		return 0
+	}
 	rc := renderConfig()
 	switch mode {
 	case "expanded":
@@ -277,16 +348,20 @@ func printRendered(stdout, stderr io.Writer, snap *schema.Snapshot, gs *schema.G
 // updateFromStdinStatus reads a Claude status payload from stdin (if any),
 // updates state, and returns the updated snapshot. Returns nil when stdin
 // has no usable payload.
-func updateFromStdinStatus(paths state.Paths, stdin io.Reader) *schema.Snapshot {
+func updateFromStdinStatus(paths state.Paths, stdin io.Reader) (*schema.Snapshot, bool) {
 	if !stdinHasData(stdin) {
-		return nil
+		return nil, false
 	}
 	var statusInput schema.ClaudeStatusLineInput
 	if err := json.NewDecoder(io.LimitReader(stdin, 1<<20)).Decode(&statusInput); err != nil || statusInput.SessionID == "" {
-		return nil
+		return nil, false
+	}
+	activation := runtime.EvaluateForClient(runtime.ClientClaudeCode)
+	if !activation.Active {
+		return nil, true
 	}
 	adapter := adapters.NewClaudeAdapter(paths)
-	_ = adapter.HandleStatusLineUpdate(&statusInput, statusInput.SessionID)
+	_ = adapter.HandleStatusLineUpdateWithTrace(&statusInput, statusInput.SessionID, activation, environmentTraceInfo(schema.ClientClaudeCode, activation))
 	snap, _ := state.LoadSnapshot(paths, schema.ClientClaudeCode, statusInput.SessionID)
-	return snap
+	return snap, true
 }

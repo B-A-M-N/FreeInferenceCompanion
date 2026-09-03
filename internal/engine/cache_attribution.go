@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
@@ -73,7 +74,7 @@ func BuildCacheDiagnosis(snap *schema.Snapshot, now time.Time) schema.CacheDiagn
 		ObservedAt:       now,
 	}
 
-	if snap == nil || snap.CacheAnalysis == nil || len(snap.UsageObservations) < MinObservationsForWarning {
+	if snap == nil || snap.CacheAnalysis == nil || effectiveUsableSamples(snap.CacheAnalysis) < MinObservationsForWarning {
 		diag.Evidence = []schema.EvidenceItem{
 			{Description: "Insufficient observations to analyze cache behavior", Source: "inferred"},
 		}
@@ -86,6 +87,7 @@ func BuildCacheDiagnosis(snap *schema.Snapshot, now time.Time) schema.CacheDiagn
 	}
 
 	analysis := snap.CacheAnalysis
+	analysisObs := currentEpochObservations(snap)
 	readShare := 0.0
 	creationShare := 0.0
 	freshShare := 0.0
@@ -102,7 +104,7 @@ func BuildCacheDiagnosis(snap *schema.Snapshot, now time.Time) schema.CacheDiagn
 	// Build evidence from what we can observe.
 	diag.Evidence = []schema.EvidenceItem{
 		{
-			Description: fmt.Sprintf("Cache read share: %.0f%% over %d unique observations", readShare*100, analysis.RequestSamples),
+			Description: fmt.Sprintf("Cache read share: %.0f%% over %d usable observations", readShare*100, effectiveUsableSamples(analysis)),
 			Value:       fmt.Sprintf("%.2f", readShare),
 			Source:      "client_observed",
 		},
@@ -134,11 +136,11 @@ func BuildCacheDiagnosis(snap *schema.Snapshot, now time.Time) schema.CacheDiagn
 	// Classify observed status based on available data.
 	diag.Status = classifyCacheStatus(readShare, creationShare, freshShare)
 
-	// Build candidate causes with ranked likelihood.
+	// Build candidate causes with ranked heuristic evidence scores.
 	diag.CandidateCauses = buildCandidateCauses(readShare, creationShare, freshShare, analysis, snap)
 
 	// Derive confidence from sample size and data quality.
-	diag.Confidence = deriveConfidence(analysis.RequestSamples, snap.UsageObservations)
+	diag.Confidence = deriveConfidence(effectiveUsableSamples(analysis), analysisObs)
 
 	// Set attribution kind: always heuristic since we lack provider metadata.
 	diag.Kind = schema.AttributionHeuristic
@@ -166,7 +168,7 @@ func classifyCacheStatus(readShare, creationShare, freshShare float64) schema.Ca
 }
 
 // buildCandidateCauses ranks possible causes for poor cache performance.
-// Returns causes sorted by likelihood (highest first). Each cause is explicitly
+// Returns causes sorted by heuristic evidence score (highest first). Each cause is explicitly
 // labeled as a hypothesis — never a definitive causal claim.
 func buildCandidateCauses(readShare, creationShare, freshShare float64, analysis *schema.CacheAnalysis, snap *schema.Snapshot) []schema.RankedCause {
 	var causes []schema.RankedCause
@@ -179,84 +181,99 @@ func buildCandidateCauses(readShare, creationShare, freshShare float64, analysis
 	// Cause 1: Prefix changed (common when read is low and creation is high)
 	if creationShare >= CacheCreationHighThreshold && readShare < CacheReadLowThreshold {
 		causes = append(causes, schema.RankedCause{
-			Reason:     schema.ReasonPrefixChanged,
-			Label:      "Cache prefix instability",
-			Likelihood: 0.6,
+			Reason:         schema.ReasonPrefixChanged,
+			Label:          "Cache prefix instability",
+			HeuristicScore: 0.6,
 		})
 		// Thrashing pattern also suggests this
 		causes = append(causes, schema.RankedCause{
-			Reason:     schema.ReasonCapacityEviction,
-			Label:      "Cache capacity eviction or TTL expiry between requests",
-			Likelihood: 0.3,
+			Reason:         schema.ReasonCapacityEviction,
+			Label:          "Cache capacity eviction or TTL expiry between requests",
+			HeuristicScore: 0.3,
 		})
 	}
 
 	// Cause 2: No caching established
 	if freshShare >= FreshInputDominantThreshold && creationShare < 0.10 && readShare < 0.10 {
-		causes = prependCause(causes, schema.RankedCause{
-			Reason:     schema.ReasonBreakpointMissing,
-			Label:      "Prompt caching not active — no cache_control breakpoints configured",
-			Likelihood: 0.7,
+		causes = append(causes, schema.RankedCause{
+			Reason:         schema.ReasonBreakpointMissing,
+			Label:          "Prompt caching not active — no cache_control breakpoints configured",
+			HeuristicScore: 0.7,
 		})
 		causes = append(causes, schema.RankedCause{
-			Reason:     schema.ReasonUnsupported,
-			Label:      "Client or model does not support prompt caching",
-			Likelihood: 0.2,
+			Reason:         schema.ReasonUnsupported,
+			Label:          "Client or model does not support prompt caching",
+			HeuristicScore: 0.2,
 		})
 	}
 
 	// Cause 3: Decay — declining read share
 	if analysis.Trend == schema.TrendDeclining && analysis.PreviousReadShare != nil &&
 		*analysis.PreviousReadShare >= CacheReadLowThreshold && readShare < CacheReadLowThreshold {
-		causes = prependCause(causes, schema.RankedCause{
-			Reason:     schema.ReasonPrefixChanged,
-			Label:      "Conversation growing past cached prefix",
-			Likelihood: 0.6,
+		causes = append(causes, schema.RankedCause{
+			Reason:         schema.ReasonPrefixChanged,
+			Label:          "Conversation growing past cached prefix",
+			HeuristicScore: 0.6,
 		})
 	}
 
 	// Cause 4: Model change
-	if len(snap.UsageObservations) >= 2 {
-		lastModel := snap.UsageObservations[len(snap.UsageObservations)-1].ModelID
-		prevModel := snap.UsageObservations[len(snap.UsageObservations)-2].ModelID
+	analysisObs := currentEpochObservations(snap)
+	if len(analysisObs) >= 2 {
+		lastModel := analysisObs[len(analysisObs)-1].ModelID
+		prevModel := analysisObs[len(analysisObs)-2].ModelID
 		if lastModel != prevModel && lastModel != "" && prevModel != "" {
-			causes = prependCause(causes, schema.RankedCause{
-				Reason:     schema.ReasonModelChanged,
-				Label:      "Model changed between requests",
-				Likelihood: 0.8,
+			causes = append(causes, schema.RankedCause{
+				Reason:         schema.ReasonModelChanged,
+				Label:          "Model changed between requests",
+				HeuristicScore: 0.8,
 			})
 		}
 	}
 
 	// Cause 5: Intermittent — high variance
-	variance := computeReadShareVariance(snap.UsageObservations)
+	variance := computeReadShareVariance(analysisObs)
 	if variance >= IntermittentMissVariance && readShare < CacheReadLowThreshold {
 		causes = append(causes, schema.RankedCause{
-			Reason:     schema.ReasonPrefixChanged,
-			Label:      "Variable content before cache breakpoint (e.g., tool results)",
-			Likelihood: 0.5,
+			Reason:         schema.ReasonPrefixChanged,
+			Label:          "Variable content before cache breakpoint (e.g., tool results)",
+			HeuristicScore: 0.5,
 		})
 	}
 
 	// Fallback: generic causes when nothing specific matched
 	if len(causes) == 0 && readShare < CacheReadLowThreshold {
 		causes = append(causes, schema.RankedCause{
-			Reason:     schema.ReasonColdStart,
-			Label:      "Cache cold — insufficient recent request history",
-			Likelihood: 0.4,
+			Reason:         schema.ReasonColdStart,
+			Label:          "Cache cold — insufficient recent request history",
+			HeuristicScore: 0.4,
 		})
 		causes = append(causes, schema.RankedCause{
-			Reason:     schema.ReasonUnknown,
-			Label:      "Provider did not expose enough information to determine cause",
-			Likelihood: 0.6,
+			Reason:         schema.ReasonUnknown,
+			Label:          "Provider did not expose enough information to determine cause",
+			HeuristicScore: 0.6,
 		})
 	}
 
+	// Multiple signals can point at the same hypothesis. Keep the strongest
+	// evidence for each reason, then make the advertised ordering true.
+	best := make(map[schema.CacheReasonCode]schema.RankedCause, len(causes))
+	for _, cause := range causes {
+		if current, ok := best[cause.Reason]; !ok || cause.HeuristicScore > current.HeuristicScore {
+			best[cause.Reason] = cause
+		}
+	}
+	causes = causes[:0]
+	for _, cause := range best {
+		causes = append(causes, cause)
+	}
+	sort.SliceStable(causes, func(i, j int) bool {
+		if causes[i].HeuristicScore == causes[j].HeuristicScore {
+			return causes[i].Reason < causes[j].Reason
+		}
+		return causes[i].HeuristicScore > causes[j].HeuristicScore
+	})
 	return causes
-}
-
-func prependCause(causes []schema.RankedCause, cause schema.RankedCause) []schema.RankedCause {
-	return append([]schema.RankedCause{cause}, causes...)
 }
 
 // deriveConfidence computes a confidence score from sample size and data completeness.
@@ -300,7 +317,7 @@ func deriveConfidence(sampleCount int, observations []schema.UsageObservation) f
 // patterns as PatternThrashing, which is misleading when there is insufficient
 // evidence to support that conclusion.
 func AttributeCacheMisses(snap *schema.Snapshot) CacheAttribution {
-	if snap == nil || snap.CacheAnalysis == nil || len(snap.UsageObservations) < MinObservationsForWarning {
+	if snap == nil || snap.CacheAnalysis == nil || effectiveUsableSamples(snap.CacheAnalysis) < MinObservationsForWarning {
 		return CacheAttribution{
 			Pattern:    PatternInsufficientData,
 			Confidence: "low",

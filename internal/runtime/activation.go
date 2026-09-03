@@ -27,6 +27,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,20 +42,28 @@ import (
 type ActivationReason string
 
 const (
-	ReasonActive                 ActivationReason = ""
-	ReasonDisabled               ActivationReason = "disabled"
-	ReasonEndpointAndKeyRequired ActivationReason = "endpoint_and_key_required"
-	ReasonEndpointOnly           ActivationReason = "endpoint_only_no_key"
-	ReasonKeyOnly                ActivationReason = "key_only_no_endpoint"
-	ReasonProviderFlagOnly       ActivationReason = "provider_flag_only"
-	ReasonEndpointInvalid        ActivationReason = "endpoint_invalid"
-	ReasonEndpointNotApproved    ActivationReason = "endpoint_not_approved"
-	ReasonCredentialInvalid      ActivationReason = "credential_invalid"
-	ReasonConflictingEndpoints   ActivationReason = "conflicting_runtime_endpoints"
-	ReasonUnsafeForced           ActivationReason = "unsafe_force_activation"
+	ReasonActive                  ActivationReason = ""
+	ReasonDisabled                ActivationReason = "disabled"
+	ReasonEndpointAndKeyRequired  ActivationReason = "endpoint_and_key_required"
+	ReasonEndpointOnly            ActivationReason = "endpoint_only_no_key"
+	ReasonKeyOnly                 ActivationReason = "key_only_no_endpoint"
+	ReasonProviderFlagOnly        ActivationReason = "provider_flag_only"
+	ReasonEndpointInvalid         ActivationReason = "endpoint_invalid"
+	ReasonEndpointNotApproved     ActivationReason = "endpoint_not_approved"
+	ReasonCredentialInvalid       ActivationReason = "credential_invalid"
+	ReasonConflictingEndpoints    ActivationReason = "conflicting_runtime_endpoints"
+	ReasonClientEvidenceRequired  ActivationReason = "client_evidence_required"
+	ReasonCodexProviderUnverified ActivationReason = "codex_provider_unverified"
+	ReasonUnsafeForced            ActivationReason = "unsafe_force_activation"
 )
 
 const companionDisabledMarker = ".companion-disabled"
+
+// ProxyUpstreamEnv is an explicit integration attestation for clients that
+// intentionally route through a local FreeInference compatibility proxy. A
+// loopback URL alone is never enough to activate the companion, and this
+// variable is ignored unless the Claude runtime endpoint is loopback.
+const ProxyUpstreamEnv = "FI_PROXY_UPSTREAM_URL"
 
 // RuntimeKind identifies which coding-agent runtime the activation targets.
 type RuntimeKind string
@@ -63,6 +73,18 @@ const (
 	RuntimeAnthropic RuntimeKind = "anthropic"     // ANTHROPIC_BASE_URL
 	RuntimeOpenAI    RuntimeKind = "openai"        // OPENAI_BASE_URL
 	RuntimeFreeInfer RuntimeKind = "freeinference" // FREEINFERENCE_BASE_URL
+)
+
+// ClientKind identifies the coding client whose process is being evaluated.
+// Client-specific activation is stricter than provider configuration: a
+// credential and endpoint that happen to exist in the shell do not prove that
+// the current client is routing requests through FreeInference.
+type ClientKind string
+
+const (
+	ClientUnknown    ClientKind = ""
+	ClientClaudeCode ClientKind = "claude-code"
+	ClientCodex      ClientKind = "codex"
 )
 
 // CredentialSource identifies which environment variable supplied the
@@ -78,6 +100,33 @@ const (
 	CredAnthropicAPIKey    CredentialSource = "ANTHROPIC_API_KEY"
 	CredOpenAIAPIKey       CredentialSource = "OPENAI_API_KEY"
 )
+
+// ClientEvidence is optional evidence supplied by an integration that knows
+// which provider configuration the client selected. CredentialValue is held
+// only in memory and is never serialized or logged.
+type ClientEvidence struct {
+	Client                    ClientKind
+	EndpointSource            string
+	EndpointURL               string
+	CredentialSource          CredentialSource
+	CredentialValue           string
+	ProviderID                string
+	ProviderEnvKey            string
+	ProviderSelectionVerified bool
+	ProviderSelectionSource   string
+}
+
+// ProviderConfiguration describes provider setup without exposing a secret.
+// It is intentionally not sufficient for automatic telemetry unless the
+// client-specific resolver also confirms the selected runtime.
+type ProviderConfiguration struct {
+	FreeInferenceConfigured bool   `json:"freeinference_configured"`
+	ProviderID              string `json:"provider_id,omitempty"`
+	EndpointURL             string `json:"endpoint_url,omitempty"`
+	CredentialSource        string `json:"credential_source,omitempty"`
+	SelectionVerified       bool   `json:"selection_verified"`
+	SelectionSource         string `json:"selection_source,omitempty"`
+}
 
 // Activation is the authoritative activation result. Pass this object into
 // adapters, refreshers, and CLI commands rather than re-reading env vars.
@@ -95,6 +144,11 @@ type Activation struct {
 	// Recorded so downstream code and audits can distinguish a real activation
 	// from a dev override.
 	UnsafeForced bool `json:"unsafe_forced,omitempty"`
+	// Client identifies the client for which this activation was evaluated.
+	// Empty means the legacy provider-level evaluation.
+	Client ClientKind `json:"client,omitempty"`
+	// Evidence records non-secret proof used by a client-specific resolver.
+	Evidence ClientEvidenceSummary `json:"evidence,omitempty"`
 
 	// EndpointPresent: an env var supplied a runtime endpoint.
 	EndpointPresent bool `json:"endpoint_present"`
@@ -114,6 +168,11 @@ type Activation struct {
 	// or fragments. Management requests use ManagementBaseURL instead because
 	// FreeInference's Anthropic runtime path is distinct from its /v1 catalog API.
 	EndpointURL string `json:"endpoint_url,omitempty"`
+	// ProxyActive indicates that Claude reaches FreeInference through an
+	// explicitly attested loopback compatibility proxy. ProxyUpstreamURL is the
+	// sanitized upstream route used for provider identity and management calls.
+	ProxyActive      bool   `json:"proxy_active,omitempty"`
+	ProxyUpstreamURL string `json:"proxy_upstream_url,omitempty"`
 	// RuntimeKind: which runtime matched (anthropic/openai/freeinference).
 	RuntimeKind RuntimeKind `json:"runtime_kind,omitempty"`
 	// InactiveReason: machine code from ActivationReason.
@@ -123,6 +182,13 @@ type Activation struct {
 	// capturedCredential stores the credential value at evaluation time.
 	// This ensures Identity() never re-reads environment variables.
 	capturedCredential string `json:"-"`
+}
+
+// ClientEvidenceSummary is the persisted-safe portion of ClientEvidence.
+type ClientEvidenceSummary struct {
+	ProviderID                string `json:"provider_id,omitempty"`
+	ProviderSelectionVerified bool   `json:"provider_selection_verified,omitempty"`
+	ProviderSelectionSource   string `json:"provider_selection_source,omitempty"`
 }
 
 // Identity is a stable, non-secret fingerprint of the active runtime. Two
@@ -267,6 +333,239 @@ func EvaluateWithModel(modelID string) Activation {
 	// Capture credential at evaluation time so Identity() never re-reads env.
 	a.capturedCredential = a.rawCredential()
 	return a
+}
+
+// EvaluateForClient evaluates activation for one concrete coding client. This
+// is the only resolver automatic integrations should use. It deliberately
+// does not treat a generic FreeInference credential as proof that another
+// client is using it.
+//
+// The optional evidence argument is useful for an embedding integration that
+// already resolved the client's provider selection. When omitted, Claude is
+// resolved from its documented environment variables and Codex from its
+// selected provider configuration.
+func EvaluateForClient(client ClientKind, supplied ...ClientEvidence) Activation {
+	a := Activation{Client: client}
+	if disabled, byEnv, byMarker := disabledState(); disabled {
+		a.Disabled = true
+		a.DisabledByEnv = byEnv
+		a.DisabledByMarker = byMarker
+		a.InactiveReason = ReasonDisabled
+		return a
+	}
+
+	if os.Getenv("FI_UNSAFE_FORCE_ACTIVATION") == "1" {
+		a.UnsafeForced = true
+		a.Active = true
+		a.Origin = "unsafe://force-activation"
+		a.RuntimeKind = runtimeKindForClient(client)
+		a.InactiveReason = ReasonUnsafeForced
+		return a
+	}
+
+	var evidence ClientEvidence
+	if len(supplied) > 0 {
+		evidence = supplied[0]
+		if evidence.Client != "" && evidence.Client != client {
+			a.InactiveReason = ReasonClientEvidenceRequired
+			return a
+		}
+	}
+	switch client {
+	case ClientClaudeCode:
+		return evaluateClaudeActivation(a, evidence)
+	case ClientCodex:
+		if len(supplied) == 0 {
+			resolved, err := ResolveCodexProviderConfiguration()
+			if err != nil {
+				a.InactiveReason = ReasonCodexProviderUnverified
+				return a
+			}
+			evidence = resolved
+		}
+		return evaluateCodexActivation(a, evidence)
+	default:
+		a.InactiveReason = ReasonClientEvidenceRequired
+		return a
+	}
+}
+
+func disabledState() (disabled, byEnv, byMarker bool) {
+	if os.Getenv("FI_DISABLED") == "1" || os.Getenv("FI_RUNTIME_INACTIVE") == "1" {
+		return true, true, false
+	}
+	if marker, err := PersistentDisableState(); err == nil && marker {
+		return true, false, true
+	}
+	return false, false, false
+}
+
+func runtimeKindForClient(client ClientKind) RuntimeKind {
+	if client == ClientClaudeCode {
+		return RuntimeAnthropic
+	}
+	if client == ClientCodex {
+		return RuntimeOpenAI
+	}
+	return RuntimeNone
+}
+
+func evaluateClaudeActivation(a Activation, evidence ClientEvidence) Activation {
+	a.Client = ClientClaudeCode
+	a.RuntimeKind = RuntimeAnthropic
+
+	// Claude Code consumes ANTHROPIC_BASE_URL. Client-specific activation must
+	// evaluate Claude's route and credential together; unrelated OpenAI or
+	// companion-native variables in the parent shell are not Claude evidence
+	// and do not make this selected runtime ambiguous.
+	anthropicURL := os.Getenv("ANTHROPIC_BASE_URL")
+	if strings.TrimSpace(anthropicURL) == "" {
+		a.EndpointPresent = false
+	} else {
+		a.EndpointPresent = true
+	}
+
+	credSource, credValue := claudeCredential()
+	a.KeyPresent = credValue != ""
+	a.CredentialSource = credSource
+	if evidence.EndpointURL != "" {
+		// Supplied evidence is accepted only when it still identifies the
+		// Claude endpoint source; it cannot turn a random shell credential into
+		// Claude activation.
+		if evidence.EndpointSource != "" && evidence.EndpointSource != "ANTHROPIC_BASE_URL" {
+			a.InactiveReason = ReasonClientEvidenceRequired
+			return a
+		}
+		anthropicURL = evidence.EndpointURL
+		a.EndpointPresent = strings.TrimSpace(anthropicURL) != ""
+	}
+
+	if !a.EndpointPresent && !a.KeyPresent {
+		a.InactiveReason = ReasonEndpointAndKeyRequired
+		return a
+	}
+	if !a.EndpointPresent {
+		a.InactiveReason = ReasonKeyOnly
+		return a
+	}
+	if !a.KeyPresent {
+		a.InactiveReason = ReasonEndpointOnly
+		return a
+	}
+
+	id, err := api.NormalizeEndpoint(anthropicURL)
+	if err != nil {
+		a.EndpointSource = "ANTHROPIC_BASE_URL"
+		a.InactiveReason = ReasonEndpointInvalid
+		return a
+	}
+	a.EndpointValid = true
+	a.EndpointSource = "ANTHROPIC_BASE_URL"
+	a.Origin = id.Origin
+	a.EndpointURL = id.RequestURL
+	if !id.IsFI {
+		// HarvardClaude and similar explicit integrations may put a local
+		// compatibility proxy between Claude Code and FreeInference. Do not
+		// treat every loopback endpoint as FI: require a separately declared,
+		// approved HTTPS upstream route. This keeps ordinary local proxies and
+		// unrelated Claude sessions completely silent.
+		if !isLoopbackEndpoint(anthropicURL) {
+			a.InactiveReason = ReasonEndpointNotApproved
+			return a
+		}
+		upstreamRaw := strings.TrimSpace(os.Getenv(ProxyUpstreamEnv))
+		upstream, upstreamErr := api.NormalizeEndpoint(upstreamRaw)
+		if upstreamErr != nil || upstream == nil || !upstream.IsFI || !isClaudeRoute(upstream) {
+			a.InactiveReason = ReasonEndpointNotApproved
+			return a
+		}
+		a.ProxyActive = true
+		a.ProxyUpstreamURL = upstream.RequestURL
+		a.Origin = upstream.Origin
+	}
+	a.Active = true
+	a.capturedCredential = credValue
+	return a
+}
+
+func isLoopbackEndpoint(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u == nil || u.Host == "" {
+		return false
+	}
+	host := strings.TrimSpace(strings.ToLower(u.Hostname()))
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func isClaudeRoute(id *api.EndpointIdentity) bool {
+	if id == nil {
+		return false
+	}
+	return strings.TrimRight(id.RequestURL, "/") == strings.TrimRight(id.Origin, "/")+"/anthropic"
+}
+
+func evaluateCodexActivation(a Activation, evidence ClientEvidence) Activation {
+	a.Client = ClientCodex
+	a.RuntimeKind = RuntimeOpenAI
+	a.EndpointSource = evidence.EndpointSource
+	a.CredentialSource = evidence.CredentialSource
+	a.KeyPresent = evidence.CredentialValue != ""
+	a.Evidence = ClientEvidenceSummary{
+		ProviderID:                evidence.ProviderID,
+		ProviderSelectionVerified: evidence.ProviderSelectionVerified,
+		ProviderSelectionSource:   evidence.ProviderSelectionSource,
+	}
+
+	if evidence.ProviderID == "" || !evidence.ProviderSelectionVerified {
+		a.InactiveReason = ReasonCodexProviderUnverified
+		return a
+	}
+	if evidence.EndpointURL == "" {
+		a.InactiveReason = ReasonEndpointAndKeyRequired
+		return a
+	}
+	a.EndpointPresent = true
+	id, err := api.NormalizeEndpoint(evidence.EndpointURL)
+	if err != nil {
+		a.InactiveReason = ReasonEndpointInvalid
+		return a
+	}
+	a.EndpointValid = true
+	a.Origin = id.Origin
+	a.EndpointURL = id.RequestURL
+	if !id.IsFI {
+		a.InactiveReason = ReasonEndpointNotApproved
+		return a
+	}
+	if strings.TrimRight(id.RequestURL, "/") != id.Origin+"/v1" {
+		a.InactiveReason = ReasonEndpointInvalid
+		return a
+	}
+	if evidence.ProviderEnvKey == "" || evidence.CredentialSource != CredentialSource(evidence.ProviderEnvKey) {
+		a.InactiveReason = ReasonCodexProviderUnverified
+		return a
+	}
+	if !a.KeyPresent {
+		a.InactiveReason = ReasonEndpointOnly
+		return a
+	}
+	a.Active = true
+	a.capturedCredential = evidence.CredentialValue
+	return a
+}
+
+func claudeCredential() (CredentialSource, string) {
+	if k := os.Getenv("ANTHROPIC_AUTH_TOKEN"); k != "" {
+		return CredAnthropicAuthToken, k
+	}
+	if k := os.Getenv("ANTHROPIC_API_KEY"); k != "" {
+		return CredAnthropicAPIKey, k
+	}
+	return CredNone, ""
 }
 
 // CompanionConfigDir returns the private configuration directory used for
@@ -464,10 +763,19 @@ func selectFIEndpoint(cands []EndpointCandidate) (*EndpointCandidate, bool) {
 // This prevents a generic API key from being treated as FreeInference creds
 // unless the endpoint is already confirmed.
 func detectCredential(kind RuntimeKind) (CredentialSource, bool) {
-	if k := os.Getenv("FREEINFERENCE_API_KEY"); k != "" {
-		return CredFreeInferenceAPIKey, true
-	}
 	switch kind {
+	case RuntimeFreeInfer:
+		if k := os.Getenv("FREEINFERENCE_API_KEY"); k != "" {
+			return CredFreeInferenceAPIKey, true
+		}
+	case RuntimeNone:
+		// Retain the legacy diagnostic distinction between "no credential"
+		// and "credential without endpoint". This branch never activates:
+		// Evaluate still requires a validated endpoint, while client-specific
+		// resolvers intentionally ignore this generic key as route evidence.
+		if k := os.Getenv("FREEINFERENCE_API_KEY"); k != "" {
+			return CredFreeInferenceAPIKey, true
+		}
 	case RuntimeAnthropic:
 		if k := os.Getenv("ANTHROPIC_AUTH_TOKEN"); k != "" {
 			return CredAnthropicAuthToken, true
@@ -498,14 +806,7 @@ func (a Activation) ManagementBaseURL() string {
 // hostnames that may receive a runtime credential. Exposed so other layers
 // (api client, install) share one definition.
 func IsFreeInferenceHost(host string) bool {
-	host = strings.ToLower(strings.TrimSpace(host))
-	if host == "" {
-		return false
-	}
-	if host == "freeinference.org" {
-		return true
-	}
-	return strings.HasSuffix(host, ".freeinference.org")
+	return api.IsApprovedCredentialHost(strings.TrimSpace(host))
 }
 
 // ProviderInfo converts an activation result into the persisted schema form.

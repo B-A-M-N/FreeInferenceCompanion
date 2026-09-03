@@ -51,7 +51,7 @@ Live Context (from claude_statusline):
 Pressure: warn
 Turn:     active
 
-Cache Analysis (12 unique samples):
+Cache Analysis (12 observed, 5 analyzed, 5 usable; client-observed):
   Read share:  78%
   New share:   6%
   Fresh share: 16%
@@ -61,4 +61,4 @@ Cache Analysis (12 unique samples):
 ### Notes
 
 - Context data comes from the Claude Code status line (live, authoritative)
-- Cache analysis uses a rolling window of the last 5 unique requests (duplicate status-line renders are deduplicated)
+- Cache analysis uses a rolling window of the last 5 usable observations. Repeated status-line renders are deduplicated, while identical token tuples after the short re-render window remain distinct observations.

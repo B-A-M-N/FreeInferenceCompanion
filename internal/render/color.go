@@ -10,6 +10,7 @@ package render
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/secure"
+	"github.com/b-a-m-n/freeinference-companion/internal/tracing"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
 
@@ -458,11 +460,31 @@ type ViewModel struct {
 	Eligible    bool               `json:"eligible"`
 	Eligibility SurfaceEligibility `json:"-"`
 
-	ProviderName      string `json:"provider_name"`
-	ProviderConfirmed bool   `json:"provider_confirmed"`
+	ProviderName          string                `json:"provider_name"`
+	ProviderConfirmed     bool                  `json:"provider_confirmed"`
+	ContextTokenSemantics schema.TokenSemantics `json:"context_token_semantics,omitempty"`
+	TraceActive           bool                  `json:"trace_active,omitempty"`
+	TraceSessionID        string                `json:"trace_session_id,omitempty"`
+	TraceSource           string                `json:"trace_source,omitempty"`
+	TraceProvider         string                `json:"trace_provider,omitempty"`
+	TraceHeader           string                `json:"trace_header,omitempty"`
+	TraceStartedAt        *time.Time            `json:"trace_started_at,omitempty"`
 
 	HealthStatus  string `json:"health_status,omitempty"`
 	HealthAgeSecs *int64 `json:"health_age_seconds,omitempty"`
+	HealthStale   bool   `json:"health_stale,omitempty"`
+
+	// Model-specific public monitor metrics. These are cache-only and never
+	// trigger a request from a render or status-line path.
+	ModelMonitorOK            *bool      `json:"model_monitor_ok,omitempty"`
+	ModelMonitorUptimeRatio   *float64   `json:"model_monitor_uptime_ratio,omitempty"`
+	ModelMonitorLatencyMs     *int64     `json:"model_monitor_latency_ms,omitempty"`
+	ModelMonitorTTFTMs        *int64     `json:"model_monitor_ttft_ms,omitempty"`
+	ModelMonitorThroughputTps *float64   `json:"model_monitor_throughput_tps,omitempty"`
+	ModelMonitorCheckedAt     *time.Time `json:"model_monitor_checked_at,omitempty"`
+	ModelMonitorAgeSecs       *int64     `json:"model_monitor_age_seconds,omitempty"`
+	ModelMonitorStale         bool       `json:"model_monitor_stale,omitempty"`
+	ModelMonitorError         string     `json:"model_monitor_error,omitempty"`
 
 	ContextUsedTokens *int64   `json:"context_used_tokens,omitempty"`
 	ContextWindowSize *int64   `json:"context_window_size,omitempty"`
@@ -486,11 +508,15 @@ type ViewModel struct {
 	WarningActive bool `json:"warning_active"`
 
 	// Cache analysis fields
-	CacheAnalysisRequestSamples int      `json:"cache_analysis_request_samples,omitempty"`
-	CacheAnalysisReadShare      *float64 `json:"cache_analysis_read_share,omitempty"`
-	CacheAnalysisCreationShare  *float64 `json:"cache_analysis_creation_share,omitempty"`
-	CacheAnalysisFreshShare     *float64 `json:"cache_analysis_fresh_share,omitempty"`
-	CacheAnalysisTrend          string   `json:"cache_analysis_trend,omitempty"`
+	CacheAnalysisRequestSamples  int                               `json:"cache_analysis_request_samples,omitempty"`
+	CacheAnalysisObservedSamples int                               `json:"cache_analysis_observed_samples,omitempty"`
+	CacheAnalysisWindowSamples   int                               `json:"cache_analysis_window_samples,omitempty"`
+	CacheAnalysisUsableSamples   int                               `json:"cache_analysis_usable_samples,omitempty"`
+	CacheAnalysisAvailability    schema.CacheTelemetryAvailability `json:"cache_analysis_availability,omitempty"`
+	CacheAnalysisReadShare       *float64                          `json:"cache_analysis_read_share,omitempty"`
+	CacheAnalysisCreationShare   *float64                          `json:"cache_analysis_creation_share,omitempty"`
+	CacheAnalysisFreshShare      *float64                          `json:"cache_analysis_fresh_share,omitempty"`
+	CacheAnalysisTrend           string                            `json:"cache_analysis_trend,omitempty"`
 
 	// Compaction fields
 	CompactionLastResultAt           *time.Time `json:"compaction_last_result_at,omitempty"`
@@ -504,6 +530,8 @@ type ViewModel struct {
 
 	// Account usage fields (FreeInference account-level quotas)
 	AccountUsageFetchedAt     *time.Time `json:"account_usage_fetched_at,omitempty"`
+	AccountUsageAgeSecs       *int64     `json:"account_usage_age_seconds,omitempty"`
+	AccountUsageStale         bool       `json:"account_usage_stale,omitempty"`
 	AccountUsageRequestsUsed  *int64     `json:"account_usage_requests_used,omitempty"`
 	AccountUsageRequestsLimit *int64     `json:"account_usage_requests_limit,omitempty"`
 	AccountUsageTokensUsed    *int64     `json:"account_usage_tokens_used,omitempty"`
@@ -561,16 +589,31 @@ func BuildViewModel(version string, snap *schema.Snapshot, gs *schema.GlobalStat
 	vm.ModelID = secure.SanitizeField(snap.Model.ID)
 	vm.ProviderName = secure.SanitizeField(snap.Provider.Name)
 	vm.ProviderConfirmed = snap.Provider.Confirmed && snap.Provider.Name == schema.ProviderFreeInference
+	if snap.Trace != nil && snap.Trace.Enabled && snap.Trace.Verified && vm.ProviderConfirmed &&
+		(snap.Trace.Client == "" || snap.Trace.Client == snap.Client.Type) &&
+		snap.Trace.Provider == schema.ProviderFreeInference && snap.Trace.Header == tracing.SessionHeader &&
+		snap.Trace.Source != schema.TraceSourceNone && tracing.ValidateTraceID(snap.Trace.SessionID) {
+		vm.TraceActive = true
+		vm.TraceSessionID = secure.MaskSessionID(snap.Trace.SessionID)
+		vm.TraceSource = secure.SanitizeField(snap.Trace.Source)
+		vm.TraceProvider = secure.SanitizeField(snap.Trace.Provider)
+		vm.TraceHeader = secure.SanitizeField(snap.Trace.Header)
+		if !snap.Trace.StartedAt.IsZero() {
+			started := snap.Trace.StartedAt
+			vm.TraceStartedAt = &started
+		}
+	}
 
-	if snap.LiveContext != nil {
+	if snap.Client.Type != schema.ClientCodex && snap.LiveContext != nil {
 		lc := snap.LiveContext
 		vm.ContextWindowSize = lc.ContextWindowSize
 		vm.ContextUsedPct = lc.UsedPercentage
-		if lc.TotalInputTokens != nil {
+		vm.ContextTokenSemantics = lc.TotalTokenSemantics
+		if lc.TotalTokenSemantics == schema.TokenSemanticsCurrentContext && lc.TotalInputTokens != nil {
 			used := *lc.TotalInputTokens
-			if lc.TotalOutputTokens != nil {
-				used += *lc.TotalOutputTokens
-			}
+			vm.ContextUsedTokens = &used
+		} else if lc.UsedPercentage != nil && lc.ContextWindowSize != nil {
+			used := int64(math.Round(*lc.UsedPercentage / 100 * float64(*lc.ContextWindowSize)))
 			vm.ContextUsedTokens = &used
 		}
 		if lc.LatestRequest != nil {
@@ -586,10 +629,17 @@ func BuildViewModel(version string, snap *schema.Snapshot, gs *schema.GlobalStat
 	// LiveContext, once again further down). Aside from being dead work, the
 	// duplication masked future edits that touched only one of the two
 	// blocks.
-	if snap.CacheAnalysis != nil {
+	if snap.Client.Type != schema.ClientCodex && snap.CacheAnalysis != nil {
 		vm.CacheReadShare = snap.CacheAnalysis.CacheReadShare
 		vm.CacheTrend = snap.CacheAnalysis.Trend
 		vm.CacheAnalysisRequestSamples = snap.CacheAnalysis.RequestSamples
+		vm.CacheAnalysisObservedSamples = snap.CacheAnalysis.ObservationCount
+		vm.CacheAnalysisWindowSamples = snap.CacheAnalysis.AnalysisWindowCount
+		vm.CacheAnalysisUsableSamples = snap.CacheAnalysis.UsableSampleCount
+		vm.CacheAnalysisAvailability = snap.CacheAnalysis.Availability
+		if vm.CacheAnalysisObservedSamples == 0 {
+			vm.CacheAnalysisObservedSamples = snap.CacheAnalysis.RequestSamples
+		}
 		vm.CacheAnalysisReadShare = snap.CacheAnalysis.CacheReadShare
 		vm.CacheAnalysisCreationShare = snap.CacheAnalysis.CacheCreationShare
 		vm.CacheAnalysisFreshShare = snap.CacheAnalysis.FreshInputShare
@@ -616,10 +666,41 @@ func BuildViewModel(version string, snap *schema.Snapshot, gs *schema.GlobalStat
 	// P0-5: also require activation identity match.
 	if vm.ProviderConfirmed && activationMatches && gs != nil && gs.Health != nil {
 		vm.HealthStatus = secure.SanitizeField(gs.Health.Status)
-		age := max(int64(0), int64(now.Sub(gs.Health.FetchedAt).Seconds()))
+		delta := now.Sub(gs.Health.FetchedAt)
+		age := max(int64(0), int64(delta.Seconds()))
 		vm.HealthAgeSecs = &age
+		vm.HealthStale = delta < 0 || delta > schema.DefaultHealthMaxAge
 		if vm.LastFailureCategory == "" && gs.Health.UnhealthyCount != nil && *gs.Health.UnhealthyCount > 0 {
 			vm.HealthStatus = "degraded"
+		}
+	}
+
+	// Public model monitor data is read from the detached worker's bounded
+	// cache. A model without a valid cached record remains unknown.
+	if vm.ProviderConfirmed && activationMatches && gs != nil && gs.PublicStatus != nil {
+		for _, metric := range gs.PublicStatus.Models {
+			if metric.ModelID != snap.Model.ID {
+				continue
+			}
+			vm.ModelMonitorUptimeRatio = metric.UptimeRatio
+			if metric.Latest != nil {
+				vm.ModelMonitorOK = metric.Latest.OK
+				vm.ModelMonitorLatencyMs = metric.Latest.LatencyMs
+				vm.ModelMonitorTTFTMs = metric.Latest.TTFTMs
+				vm.ModelMonitorThroughputTps = metric.Latest.ThroughputTps
+				checked := metric.Latest.CheckedAt
+				vm.ModelMonitorCheckedAt = &checked
+				vm.ModelMonitorError = secure.SanitizeField(metric.Latest.Error)
+			} else if !gs.PublicStatus.CheckedAt.IsZero() {
+				checked := gs.PublicStatus.CheckedAt
+				vm.ModelMonitorCheckedAt = &checked
+			}
+			if vm.ModelMonitorCheckedAt != nil {
+				age := max(int64(0), int64(now.Sub(*vm.ModelMonitorCheckedAt).Seconds()))
+				vm.ModelMonitorAgeSecs = &age
+				vm.ModelMonitorStale = age > int64((45 * time.Minute).Seconds())
+			}
+			break
 		}
 	}
 
@@ -652,13 +733,20 @@ func BuildViewModel(version string, snap *schema.Snapshot, gs *schema.GlobalStat
 	// Account usage is authoritative account-level quota data. Like health
 	// and circuit breakers, gate it by activation identity match so switching
 	// endpoints or keys does not surface quotas from another runtime.
-	if activationMatches && gs.HasAuthoritativeAccountUsage() {
+	if activationMatches && gs != nil && gs.AccountUsage != nil && schema.ValidateAccountUsage(gs.AccountUsage) == nil {
 		au := gs.AccountUsage
 		vm.AccountUsageFetchedAt = &au.FetchedAt
-		vm.AccountUsageRequestsUsed = au.RequestsUsed
-		vm.AccountUsageRequestsLimit = au.RequestsLimit
-		vm.AccountUsageTokensUsed = au.TokensUsed
-		vm.AccountUsageTokensLimit = au.TokensLimit
+		delta := now.Sub(au.FetchedAt)
+		age := max(int64(0), int64(delta.Seconds()))
+		vm.AccountUsageAgeSecs = &age
+		vm.AccountUsageStale = delta < 0 || delta > schema.DefaultAccountUsageMaxAge ||
+			gs.AccountUsageCapability == nil || gs.AccountUsageCapability.State != schema.CapabilitySupported
+		if !vm.AccountUsageStale {
+			vm.AccountUsageRequestsUsed = au.RequestsUsed
+			vm.AccountUsageRequestsLimit = au.RequestsLimit
+			vm.AccountUsageTokensUsed = au.TokensUsed
+			vm.AccountUsageTokensLimit = au.TokensLimit
+		}
 	}
 
 	return vm
@@ -668,7 +756,7 @@ func BuildViewModel(version string, snap *schema.Snapshot, gs *schema.GlobalStat
 //
 // Rendering tiers (based on COLUMNS):
 //
-//	wide   (≥100): model, shield, cache_read, cache_new, fresh, ctx, health, pressure
+//	wide   (≥100): model, shield, cache_read, fresh, ctx, pressure
 //	medium (60–99): model, shield, cache_read, fresh, ctx, pressure
 //	narrow (<60):   shield, cache_read, ctx
 //
@@ -791,6 +879,10 @@ func (vm *ViewModel) Expanded(config RenderConfig) string {
 	if vm.ProviderConfirmed {
 		if vm.HealthStatus != "" {
 			health = vm.HealthStatus
+			if vm.HealthStale {
+				health += " · stale"
+				healthColor = ColorYellow
+			}
 			if vm.HealthAgeSecs != nil {
 				health = fmt.Sprintf("%s · %ds old", health, *vm.HealthAgeSecs)
 			}
@@ -808,6 +900,37 @@ func (vm *ViewModel) Expanded(config RenderConfig) string {
 		healthColor = ColorGray
 	}
 	fmt.Fprintf(&b, "%s%s%s %s\n", bullet, config.colorize("Health", ColorWhite), sep, config.colorize(health, healthColor))
+
+	if vm.ModelMonitorOK != nil || vm.ModelMonitorUptimeRatio != nil || vm.ModelMonitorLatencyMs != nil || vm.ModelMonitorError != "" {
+		monitor := "unknown"
+		monitorColor := ColorGray
+		if vm.ModelMonitorOK != nil {
+			if *vm.ModelMonitorOK {
+				monitor = "healthy"
+				monitorColor = ColorGreen
+			} else {
+				monitor = "down"
+				monitorColor = ColorRed
+			}
+		}
+		if vm.ModelMonitorStale {
+			monitor += " · stale"
+			monitorColor = ColorYellow
+		}
+		if vm.ModelMonitorUptimeRatio != nil {
+			monitor += fmt.Sprintf(" · up %.1f%%", *vm.ModelMonitorUptimeRatio*100)
+		}
+		if vm.ModelMonitorLatencyMs != nil {
+			monitor += fmt.Sprintf(" · %dms", *vm.ModelMonitorLatencyMs)
+		}
+		if vm.ModelMonitorAgeSecs != nil {
+			monitor += fmt.Sprintf(" · checked %ds ago", *vm.ModelMonitorAgeSecs)
+		}
+		if vm.ModelMonitorError != "" && (vm.ModelMonitorOK == nil || !*vm.ModelMonitorOK) {
+			monitor += " · " + vm.ModelMonitorError
+		}
+		fmt.Fprintf(&b, "%s%s%s %s\n", bullet, config.colorize("Model monitor", ColorWhite), sep, config.colorize(monitor, monitorColor))
+	}
 
 	context := "unknown"
 	if vm.ContextUsedTokens != nil && vm.ContextWindowSize != nil {
@@ -886,10 +1009,25 @@ func (vm *ViewModel) Expanded(config RenderConfig) string {
 	}
 	fmt.Fprintf(&b, "%s%s%s %s\n", bullet, config.colorize("Last failure", ColorWhite), sep, lastFailure)
 
-	// Cache analysis
-	if vm.CacheAnalysisRequestSamples > 0 {
+	if vm.TraceActive {
 		fmt.Fprintln(&b)
-		fmt.Fprintf(&b, "%sCache Analysis (%d unique samples):\n", bullet, vm.CacheAnalysisRequestSamples)
+		fmt.Fprintf(&b, "%sTrace Correlation:\n", bullet)
+		fmt.Fprintf(&b, "%s  Status:%s active\n", bullet, sep)
+		fmt.Fprintf(&b, "%s  ID:%s %s\n", bullet, sep, vm.TraceSessionID)
+		fmt.Fprintf(&b, "%s  Header:%s %s\n", bullet, sep, vm.TraceHeader)
+		fmt.Fprintf(&b, "%s  Provider:%s %s\n", bullet, sep, vm.TraceProvider)
+		fmt.Fprintf(&b, "%s  Source:%s %s\n", bullet, sep, vm.TraceSource)
+		if vm.TraceStartedAt != nil {
+			fmt.Fprintf(&b, "%s  Started:%s %s\n", bullet, sep, vm.TraceStartedAt.UTC().Format(time.RFC3339))
+		}
+	}
+
+	// Cache analysis
+	if vm.CacheAnalysisObservedSamples > 0 {
+		fmt.Fprintln(&b)
+		fmt.Fprintf(&b, "%sCache Analysis (%d observed, %d analyzed, %d usable; %s):\n",
+			bullet, vm.CacheAnalysisObservedSamples, vm.CacheAnalysisWindowSamples,
+			vm.CacheAnalysisUsableSamples, vm.CacheAnalysisAvailability)
 		readShare := formatPct(vm.CacheAnalysisReadShare)
 		creationShare := formatPct(vm.CacheAnalysisCreationShare)
 		freshShare := formatPct(vm.CacheAnalysisFreshShare)
@@ -948,9 +1086,12 @@ func (vm *ViewModel) Expanded(config RenderConfig) string {
 	// Account Usage (account-level quotas from FreeInference)
 	hasRequests := vm.AccountUsageRequestsUsed != nil || vm.AccountUsageRequestsLimit != nil
 	hasTokens := vm.AccountUsageTokensUsed != nil || vm.AccountUsageTokensLimit != nil
-	if hasRequests || hasTokens {
+	if hasRequests || hasTokens || vm.AccountUsageStale {
 		fmt.Fprintln(&b)
 		header := "Account Usage"
+		if vm.AccountUsageStale {
+			header += " (stale)"
+		}
 		if vm.AccountUsageFetchedAt != nil {
 			header += fmt.Sprintf(" (updated %s)", vm.AccountUsageFetchedAt.Format("2006-01-02 15:04"))
 		}

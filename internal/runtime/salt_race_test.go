@@ -35,7 +35,6 @@ func TestSaltCreation_CrossProcessRace(t *testing.T) {
 	const numProcesses = 20
 	type result struct {
 		stdout string
-		stderr string
 		err    error
 	}
 	results := make(chan result, numProcesses)

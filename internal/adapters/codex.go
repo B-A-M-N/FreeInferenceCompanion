@@ -33,7 +33,7 @@ func (a *CodexAdapter) ParseHookInput(r io.Reader) (*schema.CodexHookInput, erro
 }
 
 // newCodexSnapshot builds a fresh snapshot for a newly seen Codex session.
-func newCodexSnapshot(sessionID, modelID string, now time.Time) *schema.Snapshot {
+func newCodexSnapshot(sessionID, modelID, source string, now time.Time) *schema.Snapshot {
 	modelID = secure.SanitizeField(modelID)
 	if modelID == "" {
 		modelID = "unknown"
@@ -45,12 +45,16 @@ func newCodexSnapshot(sessionID, modelID string, now time.Time) *schema.Snapshot
 			Type: schema.ClientCodex,
 		},
 		Session: schema.SessionInfo{
-			ID:          sessionID,
-			StartedAt:   now,
-			LastEventAt: now,
-			Status:      schema.SessionActive,
+			ID:                sessionID,
+			StartedAt:         now,
+			LastEventAt:       now,
+			Status:            schema.SessionActive,
+			StartSource:       source,
+			ConversationEpoch: 1,
 		},
-		Provider: DetectProvider().ToProviderInfo(),
+		// Provider identity is supplied by the activation-aware caller. Keep a
+		// new snapshot unresolved until that evidence is threaded through.
+		Provider: schema.ProviderInfo{Name: schema.ProviderUnknown, Source: "unresolved"},
 		Model: schema.ModelInfo{
 			ID:             modelID,
 			MetadataSource: "client_hook",
@@ -71,12 +75,21 @@ func newCodexSnapshot(sessionID, modelID string, now time.Time) *schema.Snapshot
 //
 // DEPRECATED: use HandleSessionStartWith, which accepts a runtime.Activation.
 func (a *CodexAdapter) HandleSessionStart(input *schema.CodexHookInput) error {
-	return a.HandleSessionStartWith(input, runtime.Evaluate())
+	return a.HandleSessionStartWith(input, runtime.EvaluateForClient(runtime.ClientCodex))
 }
 
 // HandleSessionStartWith is the activation-aware variant. The caller must
 // have already gated on activation.Active.
 func (a *CodexAdapter) HandleSessionStartWith(input *schema.CodexHookInput, activation runtime.Activation) error {
+	return a.HandleSessionStartWithTrace(input, activation, nil)
+}
+
+// HandleSessionStartWithTrace associates validated launch metadata with the
+// session without recording a trace event or raw header values.
+func (a *CodexAdapter) HandleSessionStartWithTrace(input *schema.CodexHookInput, activation runtime.Activation, trace *schema.TraceInfo) error {
+	if input == nil {
+		return nil
+	}
 	sessionID := input.SessionID
 	if sessionID == "" {
 		return nil
@@ -84,25 +97,44 @@ func (a *CodexAdapter) HandleSessionStartWith(input *schema.CodexHookInput, acti
 	now := time.Now().UTC()
 	provider := activation.ProviderInfo()
 	modelID := secure.SanitizeField(input.Model)
+	source := normalizeCodexStartSource(input.Source)
+	created := false
+	wasActive := false
+	modelChanged := false
 	err := state.UpdateSnapshot(a.Paths, schema.ClientCodex, sessionID,
 		func() *schema.Snapshot {
-			return newCodexSnapshot(sessionID, modelID, now)
+			created = true
+			return newCodexSnapshot(sessionID, modelID, source, now)
 		},
 		func(snap *schema.Snapshot) error {
+			wasActive = snap.Session.Status == schema.SessionActive
 			snap.Session.Status = schema.SessionActive
 			snap.Session.LastEventAt = now
 			snap.Session.EndedAt = nil
+			snap.Session.StartSource = source
+			if snap.Session.ConversationEpoch == 0 {
+				snap.Session.ConversationEpoch = 1
+			}
+			if source == "clear" && !created {
+				snap.Session.ConversationEpoch++
+			}
 			snap.Provider = provider
 			snap.ActivationID = a.Paths.ActivationID
-			if modelID != "" && (snap.Model.ID == "" || snap.Model.ID == "unknown") {
-				snap.Model.ID = modelID
-				snap.Model.MetadataSource = "client_hook"
+			if trace != nil && trace.Verified {
+				copy := *trace
+				snap.Trace = &copy
 			}
+			modelChanged = observeCodexModel(snap, modelID, "SessionStart", now)
 			return nil
 		})
 	if err == nil {
-		appendCodexEvent(a.Paths, sessionID,
-			state.Event{Type: state.EventSessionStarted, Model: modelID, Provider: provider.Name})
+		if modelChanged {
+			appendCodexEvent(a.Paths, sessionID, state.Event{Type: state.EventModelSwitch, Model: modelID, Provider: provider.Name, Detail: "source=codex:SessionStart"})
+		}
+		if created || source == "clear" || (source == "startup" && !wasActive) {
+			appendCodexEvent(a.Paths, sessionID,
+				state.Event{Type: state.EventSessionStarted, Model: modelID, Provider: provider.Name, Detail: "source=" + source})
+		}
 	}
 	return err
 }
@@ -111,66 +143,126 @@ func (a *CodexAdapter) HandleSessionStartWith(input *schema.CodexHookInput, acti
 // Codex hooks expose no live token/context snapshot, so no context or cache
 // warnings are ever generated — returns (nil, nil), producing no stdout.
 func (a *CodexAdapter) HandleUserPromptSubmit(input *schema.CodexHookInput, sessionID string) (*schema.CodexWarningOutput, error) {
-	if sessionID == "" {
+	return a.HandleUserPromptSubmitWith(input, sessionID, runtime.EvaluateForClient(runtime.ClientCodex))
+}
+
+// HandleUserPromptSubmitWith is the activation-aware variant. Codex still
+// emits no warning output because it has no cache/context telemetry, but the
+// snapshot retains the selected provider identity when a supported embedding
+// supplies it.
+func (a *CodexAdapter) HandleUserPromptSubmitWith(input *schema.CodexHookInput, sessionID string, activation runtime.Activation) (*schema.CodexWarningOutput, error) {
+	if sessionID == "" || input == nil {
 		return nil, nil
 	}
 	now := time.Now().UTC()
+	duplicate := false
+	modelChanged := false
 	err := state.UpdateSnapshot(a.Paths, schema.ClientCodex, sessionID,
 		func() *schema.Snapshot {
-			return newCodexSnapshot(sessionID, "", now)
+			return newCodexSnapshot(sessionID, "", "startup", now)
 		},
 		func(snap *schema.Snapshot) error {
-			active := true
-			snap.Activity.TurnActive = &active
-			snap.Activity.TurnStartedAt = &now
+			modelChanged = observeCodexModel(snap, codexInputModel(input), "UserPromptSubmit", now)
+			turnID := sanitizeCodexTurnID(input.TurnID)
+			duplicate = turnID != "" && (snap.Activity.TurnID == turnID || snap.Activity.LastTurnID == turnID)
+			if !duplicate {
+				active := true
+				snap.Activity.TurnActive = &active
+				snap.Activity.TurnStartedAt = &now
+				snap.Activity.TurnEndedAt = nil
+				snap.Activity.TurnID = turnID
+				snap.Activity.LastTurnID = turnID
+			}
 			snap.Session.Status = schema.SessionActive
 			snap.Session.LastEventAt = now
+			snap.ActivationID = a.Paths.ActivationID
+			snap.Provider = activation.ProviderInfo()
 			return nil
 		})
 	if err != nil {
 		return nil, nil
 	}
-	appendCodexEvent(a.Paths, sessionID, state.Event{Type: state.EventPromptSubmitted})
+	if modelChanged {
+		appendCodexEvent(a.Paths, sessionID, state.Event{Type: state.EventModelSwitch, Model: codexInputModel(input), Provider: activation.ProviderInfo().Name, Detail: "source=codex:UserPromptSubmit"})
+	}
+	if !duplicate {
+		appendCodexEvent(a.Paths, sessionID, state.Event{Type: state.EventPromptSubmitted, Model: codexInputModel(input), Provider: activation.ProviderInfo().Name, Detail: codexTurnDetail(input)})
+	}
 	return nil, nil
 }
 
 // HandleSessionEnd marks a Codex session as completed.
-func (a *CodexAdapter) HandleSessionEnd(sessionID string) error {
+func (a *CodexAdapter) HandleSessionEnd(sessionID string, inputs ...*schema.CodexHookInput) error {
 	if sessionID == "" {
 		return nil
 	}
 	now := time.Now().UTC()
+	modelChanged := false
 	err := state.UpdateSnapshot(a.Paths, schema.ClientCodex, sessionID, nil,
 		func(snap *schema.Snapshot) error {
+			if input := firstCodexInput(inputs); input != nil {
+				modelChanged = observeCodexModel(snap, codexInputModel(input), "SessionEnd", now)
+			}
 			inactive := false
 			snap.Session.Status = schema.SessionCompleted
 			snap.Session.EndedAt = &now
 			snap.Session.LastEventAt = now
 			snap.Activity.TurnActive = &inactive
+			snap.Activity.TurnID = ""
 			return nil
 		})
 	if err == nil {
-		appendCodexEvent(a.Paths, sessionID, state.Event{Type: state.EventSessionEnded})
+		input := firstCodexInput(inputs)
+		if modelChanged {
+			appendCodexEvent(a.Paths, sessionID, state.Event{Type: state.EventModelSwitch, Model: codexInputModel(input), Detail: "source=codex:SessionEnd"})
+		}
+		appendCodexEvent(a.Paths, sessionID, state.Event{Type: state.EventSessionEnded, Model: codexInputModel(input), Detail: codexTurnDetail(input)})
 	}
 	return err
 }
 
-// HandleStop marks the turn as inactive without ending the session.
-func (a *CodexAdapter) HandleStop(sessionID string) error {
+// HandleStop marks the turn as inactive without ending the session. The
+// optional input enables bounded turn-ID deduplication while preserving the
+// original one-argument API used by older callers.
+func (a *CodexAdapter) HandleStop(sessionID string, inputs ...*schema.CodexHookInput) error {
 	if sessionID == "" {
 		return nil
 	}
 	now := time.Now().UTC()
+	stopped := false
+	modelChanged := false
 	err := state.UpdateSnapshot(a.Paths, schema.ClientCodex, sessionID, nil,
 		func(snap *schema.Snapshot) error {
+			input := firstCodexInput(inputs)
+			if input != nil {
+				turnID := sanitizeCodexTurnID(input.TurnID)
+				if turnID != "" && snap.Activity.TurnID != "" && turnID != snap.Activity.TurnID {
+					return nil
+				}
+				if turnID != "" && snap.Activity.TurnID == "" && snap.Activity.LastTurnID == turnID {
+					return nil
+				}
+				// Only an accepted Stop may update the model. Stale or duplicate
+				// lifecycle callbacks are deliberately side-effect free.
+				modelChanged = observeCodexModel(snap, codexInputModel(input), "Stop", now)
+			}
 			inactive := false
 			snap.Activity.TurnActive = &inactive
 			snap.Activity.TurnEndedAt = &now
+			snap.Activity.LastTurnID = snap.Activity.TurnID
+			snap.Activity.TurnID = ""
 			snap.Session.LastEventAt = now
+			stopped = true
 			return nil
 		})
 	if err == nil {
-		appendCodexEvent(a.Paths, sessionID, state.Event{Type: state.EventTurnStopped})
+		input := firstCodexInput(inputs)
+		if modelChanged {
+			appendCodexEvent(a.Paths, sessionID, state.Event{Type: state.EventModelSwitch, Model: codexInputModel(input), Detail: "source=codex:Stop"})
+		}
+		if stopped {
+			appendCodexEvent(a.Paths, sessionID, state.Event{Type: state.EventTurnStopped, Model: codexInputModel(input), Detail: codexTurnDetail(input)})
+		}
 	}
 	return err
 }
@@ -182,23 +274,30 @@ func (a *CodexAdapter) HandlePreCompact(input *schema.CodexHookInput, sessionID 
 		return nil
 	}
 	now := time.Now().UTC()
+	modelChanged := false
 	err := state.UpdateSnapshot(a.Paths, schema.ClientCodex, sessionID, nil,
 		func(snap *schema.Snapshot) error {
+			if input != nil {
+				modelChanged = observeCodexModel(snap, codexInputModel(input), "PreCompact", now)
+			}
 			snap.Compaction.Pending = true
 			snap.Compaction.InitiatedAt = &now
 			if input != nil && input.Trigger != "" {
-				trigger := input.Trigger
+				trigger := secure.SanitizeField(input.Trigger)
 				snap.Compaction.Trigger = &trigger
 			}
 			snap.Session.LastEventAt = now
 			return nil
 		})
 	if err == nil {
+		if modelChanged {
+			appendCodexEvent(a.Paths, sessionID, state.Event{Type: state.EventModelSwitch, Model: codexInputModel(input), Detail: "source=codex:PreCompact"})
+		}
 		trigger := ""
 		if input != nil {
 			trigger = input.Trigger
 		}
-		appendCodexEvent(a.Paths, sessionID, state.Event{Type: state.EventCompactionStarted, Detail: trigger})
+		appendCodexEvent(a.Paths, sessionID, state.Event{Type: state.EventCompactionStarted, Model: codexInputModel(input), Detail: codexDetail(trigger, input)})
 	}
 	return err
 }
@@ -210,14 +309,18 @@ func (a *CodexAdapter) HandlePostCompact(input *schema.CodexHookInput, sessionID
 		return nil
 	}
 	now := time.Now().UTC()
+	modelChanged := false
 	err := state.UpdateSnapshot(a.Paths, schema.ClientCodex, sessionID, nil,
 		func(snap *schema.Snapshot) error {
+			if input != nil {
+				modelChanged = observeCodexModel(snap, codexInputModel(input), "PostCompact", now)
+			}
 			trigger := ""
 			if snap.Compaction.Trigger != nil {
 				trigger = *snap.Compaction.Trigger
 			}
 			if input != nil && input.Trigger != "" {
-				trigger = input.Trigger
+				trigger = secure.SanitizeField(input.Trigger)
 			}
 			snap.Compaction.Pending = false
 			snap.Compaction.AwaitingPostObservation = false
@@ -229,34 +332,10 @@ func (a *CodexAdapter) HandlePostCompact(input *schema.CodexHookInput, sessionID
 			return nil
 		})
 	if err == nil {
-		appendCodexEvent(a.Paths, sessionID, state.Event{Type: state.EventCompactionCompleted})
-	}
-	return err
-}
-
-// HandleStopFailure records a structured failure from the StopFailure hook.
-// The raw reason text is never persisted — only a sanitized category.
-func (a *CodexAdapter) HandleStopFailure(input *schema.CodexHookInput, sessionID string) error {
-	if sessionID == "" || input.Reason == "" {
-		return nil
-	}
-	category := sanitizeCodexFailureCategory(input.Reason)
-	now := time.Now().UTC()
-	err := state.UpdateSnapshot(a.Paths, schema.ClientCodex, sessionID, nil,
-		func(snap *schema.Snapshot) error {
-			inactive := false
-			snap.Activity.TurnActive = &inactive
-			snap.Activity.TurnEndedAt = &now
-			snap.LastFailure = &schema.FailureRecord{
-				Category:   category,
-				ObservedAt: now,
-				Source:     "codex_stop_failure",
-			}
-			snap.Session.LastEventAt = now
-			return nil
-		})
-	if err == nil {
-		appendCodexEvent(a.Paths, sessionID, state.Event{Type: state.EventTurnFailed, Detail: category})
+		if modelChanged {
+			appendCodexEvent(a.Paths, sessionID, state.Event{Type: state.EventModelSwitch, Model: codexInputModel(input), Detail: "source=codex:PostCompact"})
+		}
+		appendCodexEvent(a.Paths, sessionID, state.Event{Type: state.EventCompactionCompleted, Model: codexInputModel(input), Detail: codexTurnDetail(input)})
 	}
 	return err
 }
@@ -274,26 +353,71 @@ func appendCodexEvent(paths state.Paths, sessionID string, ev state.Event) {
 	_ = state.RotateEvents(paths, schema.ClientCodex, sessionID)
 }
 
-// sanitizeCodexFailureCategory collapses a raw failure reason into a short,
-// shareable category. Same scheme as the Claude adapter so reports are
-// consistent across clients.
-func sanitizeCodexFailureCategory(raw string) string {
-	raw = strings.ToLower(strings.TrimSpace(raw))
-	switch {
-	case strings.Contains(raw, "rate") && strings.Contains(raw, "limit"):
-		return "rate_limit"
-	case strings.Contains(raw, "overload"):
-		return "overloaded"
-	case strings.Contains(raw, "auth") || strings.Contains(raw, "unauthor") || strings.Contains(raw, "api key"):
-		return "authentication_failed"
-	case strings.Contains(raw, "not found") || strings.Contains(raw, "model_not_found"):
-		return "model_not_found"
-	case strings.Contains(raw, "max_output") || strings.Contains(raw, "max tokens"):
-		return "max_output_tokens"
-	case strings.Contains(raw, "invalid"):
-		return "invalid_request"
-	case strings.Contains(raw, "server") || strings.Contains(raw, "503") || strings.Contains(raw, "500"):
-		return "server_error"
+func normalizeCodexStartSource(source string) string {
+	source = strings.ToLower(strings.TrimSpace(source))
+	switch source {
+	case "startup", "resume", "compact", "clear":
+		return source
+	default:
+		return "unknown"
 	}
-	return "unknown"
+}
+
+func observeCodexModel(snap *schema.Snapshot, rawModel, _ string, now time.Time) bool {
+	model := secure.SanitizeField(rawModel)
+	if snap == nil || model == "" {
+		return false
+	}
+	previous := snap.Model.ID
+	snap.Model.ID = model
+	snap.Model.MetadataSource = "client_hook"
+	if previous == "" || previous == "unknown" || previous == model {
+		return false
+	}
+	beginCacheEpoch(snap, "model_switch", now)
+	return true
+}
+
+func codexInputModel(input *schema.CodexHookInput) string {
+	if input == nil {
+		return ""
+	}
+	return secure.SanitizeField(input.Model)
+}
+
+func firstCodexInput(inputs []*schema.CodexHookInput) *schema.CodexHookInput {
+	if len(inputs) == 0 {
+		return nil
+	}
+	return inputs[0]
+}
+
+func sanitizeCodexTurnID(turnID string) string {
+	turnID = secure.Redact(secure.SanitizeField(turnID))
+	if len(turnID) > 128 {
+		return turnID[:128]
+	}
+	return turnID
+}
+
+func codexTurnDetail(input *schema.CodexHookInput) string {
+	if input == nil {
+		return ""
+	}
+	turnID := sanitizeCodexTurnID(input.TurnID)
+	if turnID == "" {
+		return ""
+	}
+	return "turn_id=" + turnID
+}
+
+func codexDetail(trigger string, input *schema.CodexHookInput) string {
+	trigger = secure.SanitizeField(trigger)
+	if turn := codexTurnDetail(input); turn != "" {
+		if trigger != "" {
+			return trigger + " " + turn
+		}
+		return turn
+	}
+	return trigger
 }

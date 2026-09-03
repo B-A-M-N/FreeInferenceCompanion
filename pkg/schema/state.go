@@ -3,7 +3,7 @@ package schema
 import "time"
 
 // StateVersion is the schema version for state files.
-const StateVersion = 2
+const StateVersion = 3
 
 // MaxClockSkew is the maximum permitted clock skew for timestamp validation.
 // Timestamps more than this far in the future are treated as invalid.
@@ -37,15 +37,48 @@ type Snapshot struct {
 	CacheDiagnosis    *CacheDiagnosis    `json:"cache_diagnosis,omitempty"`
 	CacheTiming       *CacheTiming       `json:"cache_timing,omitempty"`
 	UsageObservations []UsageObservation `json:"usage_observations,omitempty"`
-	Activity          ActivityState      `json:"activity"`
-	Warnings          WarningState       `json:"warnings"`
-	LastFailure       *FailureRecord     `json:"last_failure"`
-	Compaction        CompactionState    `json:"compaction"`
+	// CacheEpochID scopes rolling cache statistics to one compatible model,
+	// route, and context lineage. It changes after model switches and
+	// successful compaction boundaries.
+	CacheEpochID        string          `json:"cache_epoch_id,omitempty"`
+	CacheEpochReason    string          `json:"cache_epoch_reason,omitempty"`
+	CacheEpochStartedAt time.Time       `json:"cache_epoch_started_at,omitempty"`
+	Activity            ActivityState   `json:"activity"`
+	Warnings            WarningState    `json:"warnings"`
+	LastFailure         *FailureRecord  `json:"last_failure"`
+	Compaction          CompactionState `json:"compaction"`
+	// Trace records only launch-level correlation metadata. It never contains
+	// requests, responses, raw headers, credentials, or working-directory data.
+	Trace *TraceInfo `json:"trace,omitempty"`
 	// ActivationID is the provider-level identity under which this session
 	// was recorded. Rendering only uses data from this snapshot when the
 	// current runtime activation produces the same ActivationID.
 	ActivationID string `json:"activation_id,omitempty"`
 }
+
+// TraceInfo describes the opt-in support correlation attached to one
+// Companion-launched client process. SessionID is intentionally opaque and is
+// validated before it is persisted or displayed.
+type TraceInfo struct {
+	Enabled        bool      `json:"enabled"`
+	Verified       bool      `json:"verified"`
+	SessionID      string    `json:"session_id"`
+	Source         string    `json:"source"` // companion_generated, existing_client_header, none
+	StartedAt      time.Time `json:"started_at"`
+	Provider       string    `json:"provider"`
+	Client         string    `json:"client"`
+	Header         string    `json:"header"`
+	EndpointOrigin string    `json:"endpoint_origin,omitempty"`
+}
+
+const (
+	TraceSourceCompanionGenerated      = "companion_generated"
+	TraceSourceExistingHeader          = "existing_client_header"
+	TraceSourceNone                    = "none"
+	TraceHeaderSessionID               = "X-Session-ID"
+	TraceProvenanceReceiptVerified     = "receipt_verified"
+	TraceProvenanceInheritedUnverified = "inherited_unverified"
+)
 
 // ClientInfo identifies the coding-agent client.
 type ClientInfo struct {
@@ -63,11 +96,13 @@ type ProviderInfo struct {
 
 // SessionInfo tracks session lifecycle.
 type SessionInfo struct {
-	ID          string     `json:"id"`
-	StartedAt   time.Time  `json:"started_at"`
-	LastEventAt time.Time  `json:"last_event_at"`
-	EndedAt     *time.Time `json:"ended_at,omitempty"`
-	Status      string     `json:"status"` // "active", "stopped", "completed"
+	ID                string     `json:"id"`
+	StartedAt         time.Time  `json:"started_at"`
+	LastEventAt       time.Time  `json:"last_event_at"`
+	EndedAt           *time.Time `json:"ended_at,omitempty"`
+	Status            string     `json:"status"` // "active", "stopped", "completed"
+	StartSource       string     `json:"start_source,omitempty"`
+	ConversationEpoch int        `json:"conversation_epoch,omitempty"`
 }
 
 // ModelInfo describes the current model.
@@ -81,18 +116,24 @@ type ModelInfo struct {
 	AccessState     string  `json:"access_state"`    // "available", "restricted", "unknown"
 }
 
-// LiveContext is the authoritative current context snapshot from the client status line.
-// Session totals (TotalInputTokens/TotalOutputTokens) are kept separate from the
-// latest API request usage (LatestRequest).
+// LiveContext is the authoritative current context snapshot from the client
+// status line. TotalInputTokens/TotalOutputTokens are separate from the latest
+// API request usage (LatestRequest), and their meaning is recorded in
+// TotalTokenSemantics because Claude changed these fields across client
+// versions.
 type LiveContext struct {
-	Source              string        `json:"source"`
-	ObservedAt          time.Time     `json:"observed_at"`
-	TotalInputTokens    *int64        `json:"total_input_tokens"`
-	TotalOutputTokens   *int64        `json:"total_output_tokens"`
-	ContextWindowSize   *int64        `json:"context_window_size"`
-	UsedPercentage      *float64      `json:"used_percentage"`
-	RemainingPercentage *float64      `json:"remaining_percentage,omitempty"`
-	LatestRequest       *RequestUsage `json:"latest_request"`
+	Source     string    `json:"source"`
+	ObservedAt time.Time `json:"observed_at"`
+	// TotalTokenSemantics records whether the client totals describe the
+	// current context or a cumulative session counter. Unknown means callers
+	// must not interpret totals as active context.
+	TotalTokenSemantics TokenSemantics `json:"total_token_semantics"`
+	TotalInputTokens    *int64         `json:"total_input_tokens"`
+	TotalOutputTokens   *int64         `json:"total_output_tokens"`
+	ContextWindowSize   *int64         `json:"context_window_size"`
+	UsedPercentage      *float64       `json:"used_percentage"`
+	RemainingPercentage *float64       `json:"remaining_percentage,omitempty"`
+	LatestRequest       *RequestUsage  `json:"latest_request"`
 }
 
 // RequestUsage is the token breakdown of the latest API request.
@@ -123,6 +164,8 @@ type UsageObservation struct {
 	CacheReadInputTokens     *int64            `json:"cache_read_input_tokens"`
 	CacheCreationInputTokens *int64            `json:"cache_creation_input_tokens"`
 	OutputTokens             *int64            `json:"output_tokens"`
+	EpochID                  string            `json:"epoch_id,omitempty"`
+	EpochReason              string            `json:"epoch_reason,omitempty"`
 }
 
 // PressureState represents the context pressure state machine.
@@ -133,17 +176,49 @@ type PressureState struct {
 	ChangedAt     time.Time `json:"changed_at"`
 }
 
-// CacheAnalysis tracks rolling-window cache metrics over unique usage observations.
+// CacheAnalysis tracks rolling-window cache metrics over retained usage
+// observations. RequestSamples is a compatibility alias for the retained
+// observation count; percentages use only usable samples in the current
+// analysis window.
 type CacheAnalysis struct {
-	RequestSamples       int      `json:"request_samples"`
-	CacheReadShare       *float64 `json:"cache_read_share"`
-	CacheCreationShare   *float64 `json:"cache_creation_share"`
-	FreshInputShare      *float64 `json:"fresh_input_share"`
-	PreviousReadShare    *float64 `json:"previous_read_share"`
-	Trend                string   `json:"trend"` // "rising", "stable", "declining", "insufficient_data"
-	ConsecutiveLow       int      `json:"consecutive_low"`
-	ConsecutiveRecovered int      `json:"consecutive_recovered"`
+	// RequestSamples is retained for compatibility and means retained
+	// observations, not necessarily measurements included in the percentage.
+	RequestSamples       int                        `json:"request_samples"`
+	ObservationCount     int                        `json:"observation_count"`
+	UsableSampleCount    int                        `json:"usable_sample_count"`
+	AnalysisWindowCount  int                        `json:"analysis_window_count"`
+	Availability         CacheTelemetryAvailability `json:"availability"`
+	Source               string                     `json:"source,omitempty"`
+	CacheReadShare       *float64                   `json:"cache_read_share"`
+	CacheCreationShare   *float64                   `json:"cache_creation_share"`
+	FreshInputShare      *float64                   `json:"fresh_input_share"`
+	PreviousReadShare    *float64                   `json:"previous_read_share"`
+	Trend                string                     `json:"trend"` // "rising", "stable", "declining", "insufficient_data"
+	TrendDefinition      string                     `json:"trend_definition,omitempty"`
+	ConsecutiveLow       int                        `json:"consecutive_low"`
+	ConsecutiveRecovered int                        `json:"consecutive_recovered"`
 }
+
+// TokenSemantics describes the meaning of Claude's total token fields.
+type TokenSemantics string
+
+const (
+	TokenSemanticsCurrentContext    TokenSemantics = "current_context"
+	TokenSemanticsCumulativeSession TokenSemantics = "cumulative_session"
+	TokenSemanticsUnknown           TokenSemantics = "unknown"
+)
+
+// CacheTelemetryAvailability distinguishes a measured zero from missing or
+// unsupported cache telemetry.
+type CacheTelemetryAvailability string
+
+const (
+	CacheTelemetryAvailable   CacheTelemetryAvailability = "available"
+	CacheTelemetryPartial     CacheTelemetryAvailability = "partial"
+	CacheTelemetryUnavailable CacheTelemetryAvailability = "unavailable"
+	CacheTelemetryUnsupported CacheTelemetryAvailability = "unsupported"
+	CacheTelemetryStale       CacheTelemetryAvailability = "stale"
+)
 
 // ActivityState tracks turn-level activity from lifecycle hooks.
 // TurnActive is a pointer so "unknown" (null) is distinct from "false".
@@ -152,6 +227,11 @@ type ActivityState struct {
 	TurnStartedAt *time.Time `json:"turn_started_at,omitempty"`
 	TurnEndedAt   *time.Time `json:"turn_ended_at,omitempty"`
 	Confidence    string     `json:"confidence"` // "client-lifecycle"
+	// TurnID and LastTurnID are bounded, client-provided correlation values.
+	// They suppress duplicate or stale lifecycle transitions; prompt text is
+	// never persisted.
+	TurnID     string `json:"turn_id,omitempty"`
+	LastTurnID string `json:"last_turn_id,omitempty"`
 }
 
 // WarningState tracks active and historical warnings.
@@ -171,9 +251,16 @@ type WarningState struct {
 
 // FailureRecord stores the last failure from StopFailure hooks.
 type FailureRecord struct {
-	Category   string    `json:"category"` // "rate_limit", "overloaded", "authentication_failed", "invalid_request", "model_not_found", "server_error", "max_output_tokens"
-	ObservedAt time.Time `json:"observed_at"`
-	Source     string    `json:"source"` // "claude_stop_failure"
+	Category          string    `json:"category"`
+	ObservedAt        time.Time `json:"observed_at"`
+	Source            string    `json:"source"`
+	HTTPStatus        *int      `json:"http_status,omitempty"`
+	Retryable         *bool     `json:"retryable,omitempty"`
+	TransportClass    string    `json:"transport_class,omitempty"`
+	ProviderErrorType string    `json:"provider_error_type,omitempty"`
+	ErrorOrigin       string    `json:"error_origin,omitempty"`
+	RetryAfterSeconds *int64    `json:"retry_after_seconds,omitempty"`
+	RequestReference  string    `json:"request_reference,omitempty"`
 }
 
 // CompactionState tracks pending and completed compaction operations.
@@ -239,11 +326,15 @@ type EvidenceItem struct {
 	Source      string `json:"source"` // "provider", "client_observed", "inferred"
 }
 
-// RankedCause is one possible cause with a likelihood score.
+// RankedCause is one possible cause with a heuristic evidence score. It is
+// intentionally not a probability and must not be presented as one.
 type RankedCause struct {
-	Reason     CacheReasonCode `json:"reason"`
-	Label      string          `json:"label"`
-	Likelihood float64         `json:"likelihood"` // 0.0 to 1.0
+	Reason         CacheReasonCode `json:"reason"`
+	Label          string          `json:"label"`
+	HeuristicScore float64         `json:"heuristic_score"` // 0.0 to 1.0
+	// Likelihood was the v2 name. It is read only to migrate old snapshots
+	// and is cleared before the snapshot is used or written again.
+	Likelihood *float64 `json:"likelihood,omitempty"`
 }
 
 // CacheDiagnosis is the complete structured diagnosis for cache behavior.
@@ -285,13 +376,10 @@ type UsageObservationOld = UsageObservation // keep old name for binary compat i
 // CacheTiming tracks separate cache-relevant timestamps distinct from general
 // session activity. Do not use Session.LastEventAt as the cache clock.
 type CacheTiming struct {
-	LastInferenceObservedAt time.Time  `json:"last_inference_observed_at,omitempty"`
-	LastUniqueResponseAt    *time.Time `json:"last_unique_response_at,omitempty"`
-	LastCacheWriteAt        *time.Time `json:"last_cache_write_at,omitempty"`
-	LastCacheReadAt         *time.Time `json:"last_cache_read_at,omitempty"`
-	CachePolicyObservedAt   *time.Time `json:"cache_policy_observed_at,omitempty"`
-	CacheTTLSeconds         *int       `json:"cache_ttl_seconds,omitempty"`
-	CachePolicyVersion      string     `json:"cache_policy_version,omitempty"`
+	LastInferenceObservedAt time.Time `json:"last_inference_observed_at,omitempty"`
+	// CacheTTLSeconds is populated only by provider-confirmed policy data.
+	// A local timer never promotes an inferred TTL into authoritative data.
+	CacheTTLSeconds *int `json:"cache_ttl_seconds,omitempty"`
 }
 
 // CompactionResult records the outcome of a compaction.
@@ -309,7 +397,59 @@ type GlobalState struct {
 	Models                 *ModelsCache            `json:"models"`
 	AccountUsage           *AccountUsage           `json:"account_usage"`
 	AccountUsageCapability *AccountUsageCapability `json:"account_usage_capability"`
+	PublicStatus           *PublicStatusCache      `json:"public_status"`
 	CircuitBreakers        []CircuitBreaker        `json:"circuit_breakers"`
+}
+
+// RefreshThrottle is a small provider-scoped coordination record used by
+// automatic metadata refresh workers. It never represents inference traffic
+// and contains no credentials or upstream response data.
+type RefreshThrottle struct {
+	LastRequestAt *time.Time `json:"last_request_at,omitempty"`
+	CooldownUntil *time.Time `json:"cooldown_until,omitempty"`
+}
+
+// PublicStatusCache stores the last validated unauthenticated service-status
+// response. It intentionally contains only public monitor metrics and bounded
+// refresh bookkeeping; credentials and provider request data never enter it.
+type PublicStatusCache struct {
+	FetchedAt          time.Time                `json:"fetched_at"`
+	CheckedAt          time.Time                `json:"checked_at"`
+	Source             string                   `json:"source"`
+	Total              int                      `json:"total"`
+	Healthy            int                      `json:"healthy"`
+	Unhealthy          int                      `json:"unhealthy"`
+	CycleOK            *bool                    `json:"cycle_ok,omitempty"`
+	CycleError         string                   `json:"cycle_error,omitempty"`
+	Models             []PublicStatusModelCache `json:"models,omitempty"`
+	ConsecutiveFailure int                      `json:"consecutive_failures,omitempty"`
+	LastError          string                   `json:"last_error,omitempty"`
+	NextRetryAt        *time.Time               `json:"next_retry_at,omitempty"`
+}
+
+// Public-status cache bounds keep the detached worker's durable artifact
+// predictable while retaining enough synthetic samples for incident
+// correlation across the normal 20-minute monitor cadence.
+const (
+	MaxPublicStatusModels          = 256
+	MaxPublicStatusSamplesPerModel = 64
+)
+
+type PublicStatusModelCache struct {
+	ModelID     string                    `json:"model_id"`
+	Latest      *PublicStatusSampleCache  `json:"latest,omitempty"`
+	History     []PublicStatusSampleCache `json:"history,omitempty"`
+	UptimeRatio *float64                  `json:"uptime_ratio,omitempty"`
+}
+
+type PublicStatusSampleCache struct {
+	OK               *bool     `json:"ok,omitempty"`
+	CheckedAt        time.Time `json:"checked_at"`
+	LatencyMs        *int64    `json:"latency_ms,omitempty"`
+	TTFTMs           *int64    `json:"ttft_ms,omitempty"`
+	CompletionTokens *int64    `json:"completion_tokens,omitempty"`
+	ThroughputTps    *float64  `json:"throughput_tps,omitempty"`
+	Error            string    `json:"error,omitempty"`
 }
 
 // HealthCache caches provider health information.
@@ -367,13 +507,10 @@ type AccountUsage struct {
 	TokensLimit   *int64    `json:"tokens_limit"`
 }
 
-// HasAuthoritativeAccountUsage reports whether this provider state contains
-// quota data backed by an explicitly supported capability and a validated,
-// authoritative response.
+// HasAuthoritativeAccountUsage is retained for compatibility and now applies
+// the same validation/freshness gate as the safe display/calculation path.
 func (g *GlobalState) HasAuthoritativeAccountUsage() bool {
-	return g != nil && g.AccountUsage != nil && g.AccountUsage.Authoritative &&
-		g.AccountUsageCapability != nil &&
-		g.AccountUsageCapability.State == CapabilitySupported
+	return g.HasUsableAccountUsage(time.Now().UTC(), DefaultAccountUsageMaxAge)
 }
 
 // CircuitBreaker tracks per-endpoint circuit breaker state.

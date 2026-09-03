@@ -6,17 +6,23 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"time"
+	"unicode"
 
+	"github.com/b-a-m-n/freeinference-companion/internal/secure"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
 
 const (
 	DefaultCacheDir   = ".cache/freeinference-companion"
 	DefaultConfigFile = "config.toml"
+	MaxSessionIDBytes = 512
+	maxStateJSONBytes = 8 << 20
 )
 
 // ChecksumFileSuffix is appended to cache files to store their SHA-256 checksum.
@@ -100,6 +106,21 @@ func validateClientType(clientType string) error {
 	return nil
 }
 
+func validateSessionID(sessionID string) error {
+	if strings.TrimSpace(sessionID) == "" {
+		return errors.New("session ID must not be empty")
+	}
+	if len(sessionID) > MaxSessionIDBytes {
+		return fmt.Errorf("session ID exceeds %d bytes", MaxSessionIDBytes)
+	}
+	for _, r := range sessionID {
+		if unicode.IsControl(r) {
+			return errors.New("session ID contains control characters")
+		}
+	}
+	return nil
+}
+
 // SessionDir returns the directory for a given client type and session ID.
 // Validates clientType against the fixed schema enum to prevent path injection.
 func (p Paths) SessionDir(clientType, sessionID string) string {
@@ -109,6 +130,19 @@ func (p Paths) SessionDir(clientType, sessionID string) string {
 		return filepath.Join(p.CacheDir, "sessions", "invalid-client-type", sessionKey(sessionID))
 	}
 	return filepath.Join(p.CacheDir, "sessions", clientType, sessionKey(sessionID))
+}
+
+// SessionDirFor is the error-returning form used by mutating callers. It
+// prevents an invalid client value from being turned into a writable fallback
+// directory.
+func (p Paths) SessionDirFor(clientType, sessionID string) (string, error) {
+	if err := validateClientType(clientType); err != nil {
+		return "", err
+	}
+	if err := validateSessionID(sessionID); err != nil {
+		return "", err
+	}
+	return filepath.Join(p.CacheDir, "sessions", clientType, sessionKey(sessionID)), nil
 }
 
 // SessionSnapshot returns the path to the per-session snapshot.json.
@@ -158,6 +192,12 @@ func (p Paths) GlobalAccountUsageCapability() string {
 	return filepath.Join(p.GlobalDir(), "account-usage-capability.json")
 }
 
+// GlobalPublicStatus returns the path to the unauthenticated public monitor
+// cache. It is separate from provider-authenticated health state.
+func (p Paths) GlobalPublicStatus() string {
+	return filepath.Join(p.GlobalDir(), "public-status.json")
+}
+
 // GlobalCircuitBreakersLock returns the path to the circuit breaker state lock.
 func (p Paths) GlobalCircuitBreakersLock() string {
 	return filepath.Join(p.GlobalDir(), "circuit-breakers.lock")
@@ -166,6 +206,16 @@ func (p Paths) GlobalCircuitBreakersLock() string {
 // GlobalCircuitBreakers returns the path to the circuit breaker state.
 func (p Paths) GlobalCircuitBreakers() string {
 	return filepath.Join(p.GlobalDir(), "circuit-breakers.json")
+}
+
+// GlobalRefreshThrottle returns the provider-scoped automatic refresh budget.
+func (p Paths) GlobalRefreshThrottle() string {
+	return filepath.Join(p.GlobalDir(), "refresh-throttle.json")
+}
+
+// GlobalRefreshThrottleLock returns the lock for the automatic refresh budget.
+func (p Paths) GlobalRefreshThrottleLock() string {
+	return filepath.Join(p.GlobalDir(), "refresh-throttle.lock")
 }
 
 // SessionIndexDir returns the directory for the session index. This is stored
@@ -229,7 +279,10 @@ func (p Paths) EnsureGlobalDir() error {
 // Creates the full path tree (sessions/<clientType>/<sessionKey>) and validates
 // every component against symlinks and hostile entries.
 func (p Paths) EnsureSessionDir(clientType, sessionID string) error {
-	dir := p.SessionDir(clientType, sessionID)
+	dir, err := p.SessionDirFor(clientType, sessionID)
+	if err != nil {
+		return err
+	}
 	if err := ensureSecureDirAll(dir); err != nil {
 		return err
 	}
@@ -440,6 +493,16 @@ func WriteJSONAtomically(path string, v any) error {
 // Rejects files with trailing garbage after the JSON value (likely a
 // partial write or corruption) — the decode will not reach EOF.
 func ReadJSON(path string, v any) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return fmt.Errorf("JSON state file is not a regular file: %s", path)
+	}
+	if info.Size() > maxStateJSONBytes {
+		return fmt.Errorf("JSON state file exceeds the supported size limit: %s", path)
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -449,11 +512,14 @@ func ReadJSON(path string, v any) error {
 	if err := dec.Decode(v); err != nil {
 		return err
 	}
-	// Verify there is no trailing non-whitespace content. A truncated file
-	// or one with appended garbage from a failed write would otherwise
-	// decode successfully on the prefix and silently drop the corruption.
-	if dec.More() {
-		return fmt.Errorf("trailing data after JSON value in %s", path)
+	// Verify there is no second value or trailing garbage. A truncated file or
+	// appended data would otherwise decode successfully on the valid prefix.
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return fmt.Errorf("multiple JSON values in %s", path)
+		}
+		return fmt.Errorf("trailing data after JSON value in %s: %w", path, err)
 	}
 	return nil
 }
@@ -469,6 +535,9 @@ func ReadJSON(path string, v any) error {
 // return a clear incompatibility error so a downgrade does not destroy valid
 // newer state.
 func LoadSnapshot(paths Paths, clientType, sessionID string) (*schema.Snapshot, error) {
+	if _, err := paths.SessionDirFor(clientType, sessionID); err != nil {
+		return nil, err
+	}
 	path := paths.SessionSnapshot(clientType, sessionID)
 	var s schema.Snapshot
 	if err := ReadJSON(path, &s); err != nil {
@@ -519,6 +588,7 @@ func quarantineSnapshot(path, reason string) {
 // only runs for genuinely unexpected corruption (truncation, mid-write crash,
 // hand-edited files).
 func SaveSnapshot(paths Paths, clientType, sessionID string, s *schema.Snapshot) error {
+	sanitizeSnapshotFailure(s)
 	if err := schema.ValidateSnapshot(s); err != nil {
 		return fmt.Errorf("validate snapshot before save: %w", err)
 	}
@@ -527,6 +597,25 @@ func SaveSnapshot(paths Paths, clientType, sessionID string, s *schema.Snapshot)
 	}
 	path := paths.SessionSnapshot(clientType, sessionID)
 	return WriteJSONAtomically(path, s)
+}
+
+func sanitizeSnapshotFailure(s *schema.Snapshot) {
+	if s == nil || s.LastFailure == nil {
+		return
+	}
+	f := s.LastFailure
+	f.Category = secure.SanitizeField(f.Category)
+	f.Source = secure.SanitizeField(f.Source)
+	f.TransportClass = secure.Redact(secure.SanitizeField(f.TransportClass))
+	f.ProviderErrorType = secure.Redact(secure.SanitizeField(f.ProviderErrorType))
+	f.ErrorOrigin = secure.Redact(secure.SanitizeField(f.ErrorOrigin))
+	f.RequestReference = secure.Redact(secure.SanitizeField(f.RequestReference))
+	if f.HTTPStatus != nil && (*f.HTTPStatus < 400 || *f.HTTPStatus > 599) {
+		f.HTTPStatus = nil
+	}
+	if f.RetryAfterSeconds != nil && (*f.RetryAfterSeconds < 0 || *f.RetryAfterSeconds > 7*24*60*60) {
+		f.RetryAfterSeconds = nil
+	}
 }
 
 // UpdateSnapshot applies a mutation to the per-session snapshot under a
@@ -600,14 +689,52 @@ func LoadGlobal(paths Paths) (*schema.GlobalState, error) {
 	if err := readJSONQuarantine(paths.GlobalHealth(), &gs.Health, "health"); err != nil {
 		loadErr = err
 	}
+	if gs.Health != nil {
+		if err := schema.ValidateHealthCache(gs.Health); err != nil {
+			quarantineGlobalFile(paths.GlobalHealth(), "health", schema.QuarantineReason(err))
+			gs.Health = nil
+			loadErr = fmt.Errorf("quarantined health: %w", err)
+		}
+	}
 	if err := readJSONQuarantine(paths.GlobalModels(), &gs.Models, "models"); err != nil {
 		loadErr = err
+	}
+	if gs.Models != nil {
+		if err := schema.ValidateModelsCache(gs.Models); err != nil {
+			quarantineGlobalFile(paths.GlobalModels(), "models", schema.QuarantineReason(err))
+			gs.Models = nil
+			loadErr = fmt.Errorf("quarantined models: %w", err)
+		}
 	}
 	if err := readJSONQuarantine(paths.GlobalAccountUsage(), &gs.AccountUsage, "account-usage"); err != nil {
 		loadErr = err
 	}
+	if gs.AccountUsage != nil {
+		if err := schema.ValidateAccountUsage(gs.AccountUsage); err != nil {
+			quarantineGlobalFile(paths.GlobalAccountUsage(), "account-usage", schema.QuarantineReason(err))
+			gs.AccountUsage = nil
+			loadErr = fmt.Errorf("quarantined account-usage: %w", err)
+		}
+	}
 	if err := readJSONQuarantine(paths.GlobalAccountUsageCapability(), &gs.AccountUsageCapability, "account-usage-capability"); err != nil {
 		loadErr = err
+	}
+	if gs.AccountUsageCapability != nil {
+		if err := schema.ValidateAccountUsageCapability(gs.AccountUsageCapability); err != nil {
+			quarantineGlobalFile(paths.GlobalAccountUsageCapability(), "account-usage-capability", schema.QuarantineReason(err))
+			gs.AccountUsageCapability = nil
+			loadErr = fmt.Errorf("quarantined account-usage-capability: %w", err)
+		}
+	}
+	if err := readJSONQuarantine(paths.GlobalPublicStatus(), &gs.PublicStatus, "public-status"); err != nil {
+		loadErr = err
+	}
+	if gs.PublicStatus != nil {
+		if err := schema.ValidatePublicStatusCache(gs.PublicStatus); err != nil {
+			quarantineGlobalFile(paths.GlobalPublicStatus(), "public-status", schema.QuarantineReason(err))
+			gs.PublicStatus = nil
+			loadErr = fmt.Errorf("quarantined public-status: %w", err)
+		}
 	}
 	if err := readJSONQuarantine(paths.GlobalCircuitBreakers(), &gs.CircuitBreakers, "circuit-breakers"); err != nil {
 		loadErr = err
@@ -643,6 +770,9 @@ func quarantineGlobalFile(path, resourceName, reason string) {
 
 // SaveHealth writes the health cache atomically.
 func SaveHealth(paths Paths, h *schema.HealthCache) error {
+	if err := schema.ValidateHealthCache(h); err != nil {
+		return fmt.Errorf("validate health cache: %w", err)
+	}
 	if err := paths.EnsureDirs(); err != nil {
 		return err
 	}
@@ -651,6 +781,9 @@ func SaveHealth(paths Paths, h *schema.HealthCache) error {
 
 // SaveModels writes the models cache atomically.
 func SaveModels(paths Paths, m *schema.ModelsCache) error {
+	if err := schema.ValidateModelsCache(m); err != nil {
+		return fmt.Errorf("validate models cache: %w", err)
+	}
 	if err := paths.EnsureDirs(); err != nil {
 		return err
 	}
@@ -659,6 +792,9 @@ func SaveModels(paths Paths, m *schema.ModelsCache) error {
 
 // SaveAccountUsage writes the account usage cache atomically.
 func SaveAccountUsage(paths Paths, a *schema.AccountUsage) error {
+	if err := schema.ValidateAccountUsage(a); err != nil {
+		return fmt.Errorf("validate account usage: %w", err)
+	}
 	if err := paths.EnsureDirs(); err != nil {
 		return err
 	}
@@ -668,10 +804,24 @@ func SaveAccountUsage(paths Paths, a *schema.AccountUsage) error {
 // SaveAccountUsageCapability writes the negotiated account-usage capability
 // cache atomically.
 func SaveAccountUsageCapability(paths Paths, c *schema.AccountUsageCapability) error {
+	if err := schema.ValidateAccountUsageCapability(c); err != nil {
+		return fmt.Errorf("validate account usage capability: %w", err)
+	}
 	if err := paths.EnsureDirs(); err != nil {
 		return err
 	}
 	return WriteJSONAtomically(paths.GlobalAccountUsageCapability(), c)
+}
+
+// SavePublicStatus writes the unauthenticated public monitor cache atomically.
+func SavePublicStatus(paths Paths, s *schema.PublicStatusCache) error {
+	if err := schema.ValidatePublicStatusCache(s); err != nil {
+		return fmt.Errorf("validate public status cache: %w", err)
+	}
+	if err := paths.EnsureDirs(); err != nil {
+		return err
+	}
+	return WriteJSONAtomically(paths.GlobalPublicStatus(), s)
 }
 
 // SaveCircuitBreakers writes the circuit breaker state atomically.
@@ -712,4 +862,64 @@ func UpdateCircuitBreakers(paths Paths, mutate func(cbs []schema.CircuitBreaker)
 		return err
 	}
 	return SaveCircuitBreakers(paths, updated)
+}
+
+// ReserveRefreshSlot atomically reserves one automatic authenticated metadata
+// request. A denied reservation is intentional: the caller should leave its
+// cache stale and retry on a later lifecycle event instead of queueing another
+// network request. This is background-worker code, so a short blocking lock is
+// preferable to racing reservations.
+func ReserveRefreshSlot(paths Paths, now time.Time, minInterval time.Duration) (bool, error) {
+	if minInterval < 0 {
+		return false, fmt.Errorf("refresh minimum interval must not be negative")
+	}
+	if err := paths.EnsureGlobalDir(); err != nil {
+		return false, err
+	}
+	fl := NewFileLock(paths.GlobalRefreshThrottleLock())
+	if err := fl.AcquireBlocking(); err != nil {
+		return false, err
+	}
+	defer fl.Release()
+
+	throttle := &schema.RefreshThrottle{}
+	if err := ReadJSON(paths.GlobalRefreshThrottle(), throttle); err != nil && !os.IsNotExist(err) {
+		return false, fmt.Errorf("load refresh throttle: %w", err)
+	}
+	if throttle.CooldownUntil != nil && now.Before(*throttle.CooldownUntil) {
+		return false, nil
+	}
+	if throttle.LastRequestAt != nil && now.Sub(*throttle.LastRequestAt) < minInterval {
+		return false, nil
+	}
+	now = now.UTC()
+	throttle.LastRequestAt = &now
+	if err := WriteJSONAtomically(paths.GlobalRefreshThrottle(), throttle); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// ExtendRefreshCooldown records a provider-wide cooldown after a rate-limit
+// response. The longest active cooldown wins, so concurrent workers cannot
+// shorten the safe retry window.
+func ExtendRefreshCooldown(paths Paths, until time.Time) error {
+	if err := paths.EnsureGlobalDir(); err != nil {
+		return err
+	}
+	fl := NewFileLock(paths.GlobalRefreshThrottleLock())
+	if err := fl.AcquireBlocking(); err != nil {
+		return err
+	}
+	defer fl.Release()
+
+	throttle := &schema.RefreshThrottle{}
+	if err := ReadJSON(paths.GlobalRefreshThrottle(), throttle); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("load refresh throttle: %w", err)
+	}
+	until = until.UTC()
+	if throttle.CooldownUntil == nil || until.After(*throttle.CooldownUntil) {
+		throttle.CooldownUntil = &until
+	}
+	return WriteJSONAtomically(paths.GlobalRefreshThrottle(), throttle)
 }

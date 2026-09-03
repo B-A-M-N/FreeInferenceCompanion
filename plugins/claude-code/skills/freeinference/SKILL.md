@@ -13,6 +13,37 @@ The `freeinference` CLI provides the following commands. Run any command with `-
 
 ## Commands
 
+### `freeinference run` and `freeinference trace`
+
+Use the explicit launcher when you want a fresh, per-process support
+correlation. It injects only the documented `X-Session-ID` header for a
+verified FreeInference route; ordinary client launches are unaffected.
+
+```bash
+freeinference run claude
+freeinference trace
+freeinference trace --json
+freeinference config set tracing.enabled false
+```
+
+Trace correlation records no prompts, responses, paths, raw headers, or
+credentials.
+
+### `freeinference fi-status`
+
+Fetch public service health without session state or credentials. In this
+plugin the namespaced slash command is `/freeinference-companion:fi-status`.
+
+```bash
+freeinference fi-status
+freeinference fi-status --json
+freeinference fi-status --problems
+freeinference fi-status --details
+```
+
+All models are shown by default. `--problems`/`--down` filters to down or
+unknown models; `--refresh` and `--all` are deprecated compatibility no-ops.
+
 ### `freeinference status`
 
 Show current session status with context usage, pressure, and cache analysis.
@@ -103,6 +134,10 @@ freeinference context --json
 ### `freeinference cache`
 
 Analyze cache efficiency and provide recommendations.
+
+Automatic context/cache warnings are emitted only on Claude Code's
+`UserPromptSubmit` hook; the status line remains a local display surface
+between prompts.
 
 ```bash
 freeinference cache --json
@@ -202,15 +237,18 @@ Many commands accept `--json` for machine-readable JSON output and `--help` for 
 ## Environment Variables
 
 - `FREEINFERENCE_API_KEY` — API credential for the OpenAI-compatible API
-- `FREEINFERENCE_BASE_URL` — API base URL (default: `https://freeinference.org/v1`)
+- `FREEINFERENCE_BASE_URL` — generic provider API URL; not Claude activation evidence
 - `ANTHROPIC_AUTH_TOKEN` — Claude Code credential for the Anthropic-compatible endpoint
 - `FI_HEALTH_URL` — Health monitoring URL (optional)
 - `FI_CACHE_DIR` — Cache directory (default: `~/.cache/freeinference-companion`)
 - `FI_SESSION_ID` — Explicit session override
 - `FI_PROVIDER` — Attribution metadata only; it does not activate the companion
-- `FI_NO_BACKGROUND` — Disable background refresh
+- `FI_PROXY_UPSTREAM_URL` — Explicit approved FreeInference upstream for an intentional local Claude compatibility proxy; loopback alone does not activate
+- `FI_AUTO_REFRESH` — Set to `1` to opt in to stale metadata refreshes from lifecycle hooks
+- `FI_NO_BACKGROUND` — Disable detached background refresh after opting in
 - `FI_DISABLED` — Set to `1` to disable all companion features
 - `FI_ALLOW_INSECURE_LOCALHOST` — Allow `http://` loopback (development only)
+- `FI_TRACING` — Enable/disable launch-time `X-Session-ID` correlation (`1` by default for `freeinference run`)
 
 ## Claude Code Runtime Setup
 
@@ -262,6 +300,13 @@ freeinference models --model minimax-m3
 **List recent sessions:**
 ```bash
 freeinference sessions --json
+```
+
+**Launch and inspect trace correlation:**
+```bash
+freeinference run claude
+freeinference trace --json
+freeinference config set tracing.enabled false
 ```
 
 **View configuration:**

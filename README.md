@@ -1,394 +1,230 @@
 # FreeInference Companion
 
-Lightweight observability layer for FreeInference-powered coding-agent sessions. Shows live Claude context metrics, rolling cache pattern classification with likely diagnoses, model health, optional account-budget projection, and context-pressure warnings — without adding latency, making network calls from hooks, or sending inference probes without explicit consent. The companion provides conversational management through Claude Code and a Codex skill package so users can query supported state naturally.
+[![CI](https://github.com/B-A-M-N/FreeInferenceCompanion/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/B-A-M-N/FreeInferenceCompanion/actions/workflows/ci.yml)
+[![Go 1.25.13](https://img.shields.io/badge/go-1.25.13-00ADD8?logo=go&logoColor=white)](go.mod)
+[![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS-4c566a)](docs/INSTALL.md)
+[![License: MIT](https://img.shields.io/badge/license-MIT-4c566a)](LICENSE)
 
-**Companion, not proxy.** No prompt interception, no transcript scraping, no automatic failover, no daemon.
+Local observability and diagnostics for [FreeInference](https://freeinference.org/)
+users of Claude Code and Codex.
 
-Community-built and unofficial. Not affiliated with or endorsed by FreeInference.
+FreeInference Companion records the lifecycle and status data the client
+already exposes, then turns that data into useful local diagnostics.
 
-## Quick start
+![FreeInference Companion terminal example](docs/images/status-example.svg)
 
-```bash
-# Install the CLI into ~/.local/bin
-make install
+*Illustrative terminal output. Values are local observations, not an
+additional provider request.*
 
-# Run diagnostics
-freeinference doctor
+> **Trust boundary — local companion only.** No prompt interception. No
+> transcript collection. No proxying. No automatic failover. No daemon.
+> Normal hooks and status rendering make no provider API calls.
 
-# Browse available models
-freeinference models --refresh
+**Provider health · Cache diagnostics · Context pressure · Account usage ·
+Sanitized support reports**
 
-# Install the Claude Code status line (composes with any existing one)
-freeinference status-line install
+## What a user sees
+
+An ordinary Claude Code or Codex session stays visually unchanged. A verified
+FreeInference session can show local Companion information such as the model,
+cache observations, context pressure, and freshness:
+
+```text
+ordinary Claude/Codex session       (no FreeInference output)
+verified FreeInference Claude       FI glm-5.1 | cache 78% | ctx 41% | healthy
+verified FreeInference Codex        native Codex footer + local diagnostics
 ```
 
-Supported platforms: Linux amd64, Linux arm64, macOS amd64, macOS arm64.
-The release binary is fully static (`CGO_ENABLED=0`, verified with `ldd`).
+Codex keeps ownership of its native footer and does not expose the same live
+context and cache fields as Claude Code. Its Companion plugin records bounded
+lifecycle state and provides diagnostic commands and skills; unavailable
+values remain unavailable instead of being guessed.
 
-## Architecture
+## Why I made it
 
-```
-freeinference CLI (Go, static binary)
-  ├── reads/writes ~/.cache/freeinference-companion/
-  │   ├── global/          # Provider health, model catalog, circuit breakers,
-  │   │                    # session index, refresh locks
-  │   └── sessions/        # Per-session snapshots and advisory locks
-  ├── commands: status, sessions, snapshot, render, models, doctor,
-  │             report, dashboard, context, refresh, status-line
-  └── hook: freeinference hook claude-code <event>
+FreeInference gave me access to inference I otherwise would not have had. I
+made this because I wanted to return something useful: a small, inspectable
+tool that helps users understand the service they rely on and gives them
+better, sanitized information when something goes wrong.
 
-Claude Code plugin → scripts/run-hook.sh → freeinference hook claude-code <event>
-Codex plugin       → skills only → user-requested CLI diagnostics
-```
+I also believe providing inference to the public is a vital and increasingly
+necessary resource. Capable models are becoming part of writing, research,
+education, software, and ordinary problem-solving, but public access is still
+too easy to overlook or dismiss. Public inference gives more people room to
+learn, experiment, build, and participate. Its value is often clearest only
+after access disappears.
 
-Plugin hooks resolve the `freeinference` binary from `PATH`, the plugin-bundled `bin/freeinference`,
-or `~/.local/bin/freeinference` — and exit 0 no matter what.
+FreeInference is one example of that public resource. This project is my small
+way of helping its users understand and care for it while keeping provider
+traffic direct and keeping optional network behavior under the user's control.
 
-### Where the data shows up
+## What it provides
 
-FreeInference Companion is **not a separate TUI**. It composes into the
-surfaces the user already has:
+- Client-observed Claude context metrics and context-pressure warnings.
+- Rolling cache-pattern classification with likely diagnoses.
+- Cached model health and public service status.
+- Validated account-budget projection when authoritative usage data exists.
+- Sanitized failure summaries and support reports.
+- Claude status-line integration and Codex's native footer configuration.
 
-- **Claude Code** — the status line command (`freeinference status --compact`) renders
-  into the client's existing statusline footer, below the prompt bar. The
-  installer (`freeinference status-line install`) preserves and replays stdin to any
-  prior statusline, so an existing footer segment keeps working alongside
-  ours. Nothing takes over the prompt or the transcript.
-- **Codex** — Codex has no arbitrary script-backed statusline in the same
-  sense; we expose the data through `freeinference status` / `freeinference snapshot --json` /
-  `freeinference render` for whoever the user wires in (their shell prompt, DevDesktop,
-  tmux status bar, etc.).
-- **External integrators** — `freeinference snapshot --json` and `freeinference render --mode line`
-  are stable contracts. DevDesktop, tmux, and similar panels can subscribe
-  without redesigning core state.
+Warnings are advisory. Unknown telemetry stays unknown rather than becoming a
+made-up zero or an overconfident conclusion.
 
-### Design principles
+## Install
 
-- **Status line reads live Claude JSON from stdin + cached health data** — zero network, p95 <10ms target
-- **Hooks do local computation only** — no network, p95 <25ms target, always fail open (exit 0)
-- **Every session mutation holds a cross-process file lock** — concurrent hooks and status lines coordinate writes; lock contention returns immediately (fail-open) and is counted in `state.DroppedMutations()`
-- **Warnings use JSON `systemMessage`** — never plain stdout, never `additionalContext`, never in model context; no warning → no output at all (zero bytes)
-- **Surface eligibility is gated by seven checks** — runtime active, client matches, session matches, session active, activation identity matches, observation fresh, provider confirmed FreeInference; any gate failing produces zero bytes
-- **Provider detection gates all warnings** — no FreeInference warning or health symbol ever appears in a non-FreeInference session
-- **Background refreshes are detached and coalesced across processes** — file-lock single-flight, per-endpoint circuit breakers (2→30min backoff), `Retry-After` honored
-- **No inference probes for monitoring** — `freeinference doctor --probe --model <name>` is manual only, marked `X-Probe: synthetic`
-- **Advisory warnings, never blocking** — context pressure, projection overflow, cache-low with pattern classification and likely diagnosis, cache TTL expiry; all labeled with confidence, all advisory
-- **Schema validation + quarantine** — corrupt or unsupported state files are renamed aside so subsequent writes start fresh; hooks never block on bad state
-- **Sanitized structured event log** — per-session `events.jsonl` records only event types and short categories; never prompt text, responses, transcripts, paths, keys, or raw error bodies
-
-## CLI reference
-
-| Command | Description |
-|---------|-------------|
-| `freeinference status [--compact\|--level summary\|standard\|detailed] [--client <type>] [--session <id>]` | Show session metrics at the requested detail (resolves the current session automatically) |
-| `freeinference sessions` | List known sessions from the local index |
-| `freeinference snapshot --json [--session <id>]` | Machine-readable normalized view model |
-| `freeinference render --mode line\|standard\|expanded [--session <id>]` | Stable summary, standard, or detailed render for panels |
-| `freeinference models [--model <name>] [--refresh]` | List FreeInference models |
-| `freeinference doctor [--probe --model <name>]` | Diagnose connectivity and configuration |
-| `freeinference report [--client <type>] [--session <id>] [--format markdown\|json]` | Generate a sanitized support report (includes budget projection when the provider capability is available) |
-| `freeinference dashboard [--status] [--print-url]` | Open FreeInference account dashboard (`--status` for service health page) |
-| `freeinference context [--session <id>]` | Show context pressure information |
-| `freeinference cache [--session <id>]` | Show cache efficiency pattern classification and likely diagnoses |
-| `freeinference refresh [--force] [--if-stale --detach] [--worker models\|health\|account-usage]` | Refresh cached provider metadata |
-| `freeinference hook <client> <event>` | Process a lifecycle hook event (internal) |
-| `freeinference status-line install\|uninstall` | Manage the Claude Code status line |
-
-## Environment
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `FREEINFERENCE_API_KEY` | — | FreeInference API credential |
-| `FREEINFERENCE_BASE_URL` | `https://freeinference.org/v1` | API base URL |
-| `ANTHROPIC_AUTH_TOKEN` | — | FreeInference key for Claude Code's Anthropic-compatible endpoint |
-| `FI_HEALTH_URL` | — | Provider health monitoring URL (optional) |
-| `FI_CACHE_DIR` | `~/.cache/freeinference-companion` | State cache directory |
-| `FI_SESSION_ID` | — | Explicit session override for status/context/report |
-| `FI_PROVIDER` | — | Set to `freeinference` for attribution metadata only. Does NOT activate the companion. Activation requires a supported endpoint and credential. |
-| `FI_NO_BACKGROUND` | — | Set to `1` to disable detached background refresh |
-
-The companion activates only when an approved FreeInference runtime endpoint
-and its matching credential are both present. It recognizes the documented
-Claude Code pair `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`, as well as
-the FreeInference and OpenAI-compatible environment-variable pairs.
-
-## Configure Claude Code and Codex
-
-FreeInference has two API shapes. Configure the client for the shape it
-actually speaks; do not point Codex at the Anthropic path or Claude Code at
-the OpenAI-compatible path.
-
-| Client | Runtime endpoint | Credential | Protocol |
-|---|---|---|---|
-| Claude Code | `https://freeinference.org/anthropic` | `ANTHROPIC_AUTH_TOKEN` | Anthropic-compatible |
-| Codex | `https://freeinference.org/v1` | `FREEINFERENCE_API_KEY` | OpenAI Responses |
+For normal use, download a release binary, verify its checksum, and follow
+[Installation](docs/INSTALL.md).
 
 ### Claude Code
 
-Add the following to `~/.claude/settings.json`, replacing only the key value:
-
-```json
-{
-  "env": {
-    "ANTHROPIC_BASE_URL": "https://freeinference.org/anthropic",
-    "ANTHROPIC_AUTH_TOKEN": "Free_Inference_API",
-    "ANTHROPIC_MODEL": "glm-5.1",
-    "ANTHROPIC_SMALL_FAST_MODEL": "glm-5-turbo",
-    "API_TIMEOUT_MS": "600000"
-  }
-}
+```bash
+# after placing the freeinference binary on PATH
+freeinference doctor
+freeinference install
+freeinference status-line install
 ```
 
-FreeInference's public Anthropic catalog does not include Claude Code's
-built-in Anthropic defaults, so set both model variables to public model IDs.
-Choose model IDs from the Anthropic route's catalog; availability can differ
-from the OpenAI-compatible route.
+Configure Claude Code for the documented FreeInference route in
+[CLI and configuration](docs/CLI.md#client-routes), then restart Claude Code.
+If a launcher uses a loopback compatibility proxy, it must also provide the
+explicit `FI_PROXY_UPSTREAM_URL` attestation; a bare local URL stays silent.
 
 ### Codex
 
-The Codex provider setup, model profiles, model-catalog rules, and companion
-plugin behavior are documented separately in [Codex with FreeInference](docs/codex.md).
-
-## State model
-
-The plugin uses three separate concepts for metrics:
-
-| Source | Authoritative | Description |
-|--------|:---:|-------------|
-| `live_context` | ✓ | Latest status-line snapshot from the coding client (session totals kept separate from latest-request usage) |
-| `usage_observations` | ✗ | Rolling window of up to 20 unique request samples (fingerprint-deduplicated); feeds the 5-sample cache analysis |
-| `account_usage` | ✓ when capability is supported | Provider quota data, omitted unless a validated account-usage capability response is available |
-
-Missing fields are `null` — never converted to zero. A zero-token field remains zero; a missing field remains null.
-
-Cache-low warnings fire under these hypothetical conditions: 3+ unique
-observations, ≥50K active context, read share <20% for 3 sequential observations, confirmed
-FreeInference provider, and a 30-minute cooldown. They resolve after 3
-sequential observations above 40%. The warning includes likely diagnosis
-(see below).
-
-Projection warnings qualify when active context is at least 60% of the
-model's window and the projected next request (active + estimated prompt +
-tool overhead + safety margin) would leave less than the configured output
-reserve (default 16,000 tokens). Confidence is labeled `low` or `medium` —
-never `high` in v0.1.0 because the companion does not see the full request
-body the client sends.
-
-Cache TTL expiry warnings may fire when a session has been idle past a
-hypothetical prompt cache lifetime (~5 minutes). The next request might
-re-read context at full price if the cached prefix has evicted. The
-warning suggests sending a short warm-up message first to refill the
-cache before the real query. Gated on ≥10K active context and a
-30-minute cooldown.
-
-### Cache miss pattern attribution
-
-`freeinference cache` classifies cache miss patterns with likely diagnosis instead of
-generic diagnostics:
-
-| Pattern | Meaning | Example cause |
-|---------|---------|---------------|
-| **Thrashing** | High cache creation, low cache read | Dynamic content at the start of the system prompt; prefix keeps being rewritten |
-| **No caching** | Almost all fresh input, negligible cache activity | Client not using `cache_control` breakpoints |
-| **Decay** | Read share was good but is declining | Conversation growing past the cached prefix |
-| **Intermittent** | Alternating good/bad observations | Tool results inserted before the cached prefix on some turns |
-
-The inline cache-low warning also includes the diagnosis so the user gets
-the likely cause at the moment it fires.
-
-### Token budget projection
-
-`freeinference status` and `freeinference report` show account quota status with a projected
-exhaustion timeline only after the provider has returned a schema-valid,
-authoritative account-usage response. The capability is recorded as
-`supported`, `unsupported`, `forbidden`, or `unknown`; known unsupported and
-forbidden endpoints are not retried automatically. When unavailable, no quota
-or budget projection is rendered.
-
-When the capability is supported, projection uses the session's observed token
-burn rate:
-
-```
-Account Usage:
-  Updated: 2026-07-29T15:30:00Z
-  Requests: 4.2K / 10K (42.0%)
-  Tokens:   1.2M / 5.0M (24.0%)
-  Budget:   🟢 healthy — At current rate (~127K tok/hr over 1.2h), quota lasts until Jul 30 09:14.
+```bash
+freeinference install
+freeinference codex-footer install
+codex plugin list --json
 ```
 
-Status tiers: healthy (>30% remaining), watch (15-30%), low (5-15%),
-critical (<5%). Falls back to request-based quota when token limits aren't
-reported.
+Configure the provider and profiles using [Codex with
+FreeInference](docs/codex.md). Review and trust the installed hooks in Codex's
+`/hooks` panel after installation.
 
-### Status line rendering
+### Manual or source installation
 
-The collapsed status line is width-aware and adapts to terminal column
-count via the `COLUMNS` environment variable (set by Claude Code):
+For a source checkout, use `make install` as described in
+[Development](docs/DEVELOPMENT.md). For a manual plugin-only install, use the
+marketplace commands in [Installation](docs/INSTALL.md).
 
-| Width | Segments shown |
-|-------|---------------|
-| **Wide (100+)** | Model, shield, cache read %, fresh tokens, context %, pressure |
-| **Medium (60-99)** | Model, shield, cache read %, fresh tokens, context %, pressure |
-| **Narrow (<60)** | Shield, cache read %, context % |
+Keep API keys in the environment or a secrets manager, never in a config file.
 
-The shield icon `🛡` color tracks context usage: white when empty, orange
-when getting high (60%+), red when critical (85%+). Unknown telemetry
-renders as `—` (em dash), never fabricated as `0%`.
+## What it does—and what it never does
 
-### Reporting levels
+The Companion is deliberately outside the inference path. It:
 
-Ask the coding agent for a quick, normal, or detailed FreeInference check, or
-use the matching CLI level directly:
+- records bounded lifecycle events and client-provided status metrics locally;
+- shows context pressure and rolling cache-pattern diagnostics where the
+  client exposes enough information;
+- keeps provider metadata and public-status results cached and timestamped;
+- produces sanitized status, failure, and support-report output.
+
+It never intercepts prompts or responses, scrapes transcripts, stores
+credentials, performs automatic inference probes, switches models, proxies
+traffic, or runs a daemon. Ordinary Claude and Codex usage stays quiet unless
+FreeInference use is explicitly verified.
+
+Normal hooks, plugin installation, and status rendering are local-only and
+cannot consume the provider's inference rate limit. `fi-status` is an explicit
+unauthenticated public-status request, `doctor --probe` is an explicit manual
+inference probe, and metadata refresh is disabled by default.
+
+If `FI_AUTO_REFRESH=1` is explicitly enabled, refreshes run detached and are
+limited by shared spacing, request coalescing, `Retry-After` handling,
+rate-limit cooldowns, and circuit breakers. Deferred work is not accumulated
+in an unbounded queue: the cache stays stale and a later safe opportunity can
+retry it.
+
+## How it fits
+
+The client continues to send inference directly to FreeInference. The
+Companion receives only the separate lifecycle/status data exposed by the
+client and writes bounded local state:
+
+```text
+                         inference traffic
+Claude Code / Codex ───────────────────────────────> FreeInference
+       │
+       │ bounded lifecycle + status data
+       ▼
+FreeInference Companion ──> local telemetry, cached diagnostics, reports
+```
+
+The Companion is not in the arrow between the client and the provider.
+
+## A short example
+
+```text
+$ freeinference doctor
+provider route       verified FreeInference
+local hooks          ready
+background refresh   disabled
+
+$ freeinference status --compact
+FI glm-5.1 | cache 78% | fresh 12.4K | ctx 41% | healthy
+
+$ freeinference cache
+pattern              intermittent
+confidence           medium
+diagnosis            cache behavior varies across observed turns
+
+$ freeinference report --format markdown
+sanitized report written to stdout
+```
+
+The output is illustrative. Missing client telemetry stays unknown or
+unavailable, and cache diagnoses are local heuristics rather than provider
+claims.
+
+## Privacy and security
+
+Local state contains bounded, sanitized telemetry. Prompts, responses,
+transcripts, credentials, raw headers, raw error bodies, and path-shaped client
+inputs are not persisted or sent by the Companion. See the full [security
+model](SECURITY.md) for filesystem permissions, response limits, redaction,
+report allowlists, and the trace-correlation tradeoff.
+
+## Independent community project
+
+> **Unofficial and independent.** FreeInference did not commission, direct,
+> fund, pay for, review, or approve this project. Nothing here implies
+> sponsorship, partnership, endorsement, or representation by FreeInference or
+> an affiliated organization.
+
+HarvardMadSys, if mentioned as part of the project's motivation, is not a
+reviewer, approver, funder, or sponsor either.
+
+If FreeInference is useful to you, please support FreeInference directly: read
+the [official documentation](https://doc.freeinference.org/), send feedback
+through its official channels, contribute where the maintainers accept
+contributions, and support its work financially if they provide that option.
+This Companion is meant to complement the service, not replace or impersonate
+it.
+
+## Documentation
+
+| Topic | Documentation |
+| --- | --- |
+| Install and update | [Installation](docs/INSTALL.md) |
+| Claude Code and CLI | [CLI and configuration](docs/CLI.md) |
+| Codex setup | [Codex with FreeInference](docs/codex.md) |
+| Compatibility | [Client capabilities](docs/COMPATIBILITY.md) |
+| Architecture | [Local state and data flow](docs/ARCHITECTURE.md) |
+| Observability | [Freshness, warnings, usage, retention](docs/OBSERVABILITY.md) |
+| Cache diagnostics | [Classifications and limits](docs/CACHE_DIAGNOSTICS.md) |
+| Security model | [Security and vulnerability reporting](SECURITY.md) |
+| Development and release | [Development](docs/DEVELOPMENT.md) · [Releasing](docs/RELEASING.md) |
+
+## Useful commands
 
 ```bash
-freeinference status --level summary   # one line for an at-a-glance check
-freeinference status --level standard  # current session essentials
-freeinference status --level detailed  # essentials plus history and account diagnostics
+freeinference status --compact
+freeinference status --level detailed
+freeinference models
+freeinference cache
+freeinference report --format markdown
+freeinference fi-status --json
 ```
-
-Set the preferred default once with `freeinference config set reporting.level
-standard`; `FI_REPORTING_LEVEL` can override it for a single shell or host.
-`--compact` remains reserved for status-line integrations, and `--json`
-remains the stable machine-readable contract.
-
-### Sanitized event log
-
-Each session has a bounded `events.jsonl` recording only lifecycle event
-types (`session_started`, `status_observed`, `prompt_submitted`,
-`turn_stopped`, `turn_failed`, `compaction_started`, `compaction_completed`,
-`session_ended`, `warning_shown`, `warning_resolved`) and short sanitized
-details. Rotation kicks in past 256 KiB or 1,000 events per session.
-Sessions older than 30 days are cleaned up opportunistically by
-`CleanupStaleSessions`.
-
-## Development
-
-```bash
-make build      # Static build into build/freeinference (ldd-verified)
-make test       # Run tests
-make test-race  # Run tests with the race detector
-make vet        # Run go vet
-make fmt-check  # Verify gofmt cleanliness
-make bench      # Run performance benchmarks (status p95<10ms, hook p95<25ms targets)
-make check      # fmt + vet + test + race + plugin validation + git diff --check
-make release    # Cross-compile all platforms + checksums
-make smoke      # Quick smoke test
-```
-
-## Project layout
-
-```
-FreeInference/
-├── cmd/fi/                    # Thin entry point (+ binary integration tests)
-├── docs/codex.md              # Codex provider, profiles, and companion guide
-├── internal/
-│   ├── cli/                   # Command implementations (exit codes, no os.Exit)
-│   ├── state/                 # Snapshots, global cache, locks, session index
-│   ├── engine/                # Pressure state machine, cache analysis, attribution,
-│   │                          # cache TTL warnings, budget projection
-│   ├── api/                   # FreeInference HTTP client (bounded, sanitized)
-│   ├── background/            # Detached refresh workers, circuit breakers
-│   ├── adapters/              # Client-specific: claude.go, codex.go, provider.go
-│   ├── install/               # Status-line installer (composing, reversible)
-│   └── render/                # Normalized view model → line/expanded/JSON,
-│                              # width-aware footer, surface eligibility
-├── pkg/schema/                # State structs, telemetry contract types
-├── plugins/
-│   ├── claude-code/           # .claude-plugin/, hooks/, scripts/, skills/
-│   └── codex/                 # .codex-plugin/, skills/ (no lifecycle hooks)
-└── Makefile
-```
-
-## What it does not do
-
-- No local API proxy
-- No automatic model failover or switching
-- No standalone web dashboard
-- No prompt or response telemetry
-- No cloud synchronization
-- No automatic compaction
-- No full benchmarking
-- No conversation storage
-- No inference probes during normal operation
-- No cron or systemd installation
-- No blocking mode in v1 (all states advisory)
-
-## Security model
-
-The companion handles API keys and (eventually) account-usage data. The
-security model is layered and intentional.
-
-**Credential handling:**
-- The FreeInference API key is read from the environment at request time and
-  lives only in the in-process `api.Client.APIKey` field for the duration of
-  a request.
-- It is **never** persisted to disk by any code path.
-- It is sent only in `Authorization: Bearer` headers to the configured
-  FreeInference endpoint.
-- It does not appear in any `Snapshot`, `Event`, `GlobalState`, report,
-  doctor output, log line, or error message.
-
-**Defense in depth (output):**
-- **Allowlist construction** — reports and account-usage renders are built
-  only from explicitly-named fields. Unknown upstream fields are silently
-  dropped, never redacted-after-the-fact. A future endpoint adding a
-  `billing_email` or `api_key_hint` field will not leak.
-- **Pattern-based redaction** (`internal/secure`) — any string leaving the
-  process through state, an event, or a report passes through a redactor
-  that recognizes key shapes (`hyi-*`, `sk-*`, `Bearer *`,
-  `*_API_KEY=...`, labeled JSON secret fields).
-- **Identifier obfuscation** — session IDs are SHA-256-hashed for the
-  on-disk directory name; `secure.ShortHash` / `MaskSessionID` utilities
-  are available for any future display context that does not need the full ID.
-
-**Defense in depth (filesystem):**
-- All state files are `0600` (owner read/write only).
-- All state directories are `0700`.
-- The session directory name is a SHA-256 of the session ID, preventing
-  path-traversal and hiding the raw ID from a casual `ls`.
-- Path-shaped client inputs (`transcript_path`, `cwd`, `current_dir`,
-  `project_dir`) are never copied into persisted state.
-
-**Response bounds:**
-- Catalog response bounded at 2 MiB, health at 1 MiB.
-- Error bodies bounded at 64 KiB and run through the redactor before
-  entering our error type.
-- The synthetic inference probe body is bounded at 1 MiB.
-
-**Why no encryption-at-rest:** Local state is already `0600` and contains no
-secrets. Encrypting it would require a key stored on the same machine (env
-var, keyfile, or OS keystore); an attacker who can read the cache directory
-can almost certainly read the key too. We treat OS-level file permissions as
-the boundary and skip encryption-at-rest as security theatre. When account
-usage lands, the same model applies: the persisted fields are numeric
-quotas and timestamps — not secrets — and the API key still never touches
-disk. An OS keystore integration (macOS Keychain / Linux secret-service)
-would be the meaningful next step if we ever needed to persist a refresh
-token, which v0.1.0 does not.
-
-**Verifying the model:**
-`TestSecretNeverPersistsOrRenders` in `cmd/fi/security_test.go` walks every
-persisted file and every output path (status, snapshot, render, report,
-events, doctor) and fails if any secret-shaped string appears. It is the
-regression guard for the security model.
-
-## Acknowledgment
-
-This project was developed independently using FreeInference for inference
-access during development. FreeInference did not commission, direct, fund, or
-pay for this work. No representative of FreeInference reviewed or approved
-this contribution, and this acknowledgment does not indicate sponsorship,
-partnership, or endorsement by FreeInference or any affiliated organization.
-
-I am acknowledging the service because access to capable inference
-infrastructure can make meaningful open-source development more accessible
-to developers and researchers who do not have the hardware or budget to run
-these models themselves.
-
-Organizations able to provide GPU capacity, hardware, cloud credits,
-research funding, or other infrastructure resources should consider
-supporting FreeInference so that it can continue making this capability
-available for open-source development, research, and education.
 
 ## License
 

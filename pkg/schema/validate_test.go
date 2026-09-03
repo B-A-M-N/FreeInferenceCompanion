@@ -4,6 +4,7 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestValidateSnapshotValid(t *testing.T) {
@@ -97,6 +98,44 @@ func TestMigrateSnapshotFromV1(t *testing.T) {
 	}
 }
 
+func TestMigrateSnapshotPreservesValidLikelihoodAndDiscardsInvalid(t *testing.T) {
+	valid := 0.75
+	invalid := 2.0
+	s := &Snapshot{
+		SchemaVersion: 2,
+		Client:        ClientInfo{Type: ClientClaudeCode},
+		Session:       SessionInfo{ID: "s1"},
+		CacheDiagnosis: &CacheDiagnosis{CandidateCauses: []RankedCause{
+			{Likelihood: &valid},
+			{Likelihood: &invalid},
+		}},
+	}
+	if err := MigrateSnapshot(s); err != nil {
+		t.Fatalf("migrate v2: %v", err)
+	}
+	if got := s.CacheDiagnosis.CandidateCauses[0].HeuristicScore; got != valid {
+		t.Fatalf("valid likelihood = %v, want %v", got, valid)
+	}
+	if got := s.CacheDiagnosis.CandidateCauses[1].HeuristicScore; got != 0 {
+		t.Fatalf("invalid likelihood copied as %v", got)
+	}
+	if err := ValidateSnapshot(s); err != nil {
+		t.Fatalf("migrated snapshot rejected: %v", err)
+	}
+}
+
+func TestValidateSnapshotRejectsInvalidDiagnosisScore(t *testing.T) {
+	s := &Snapshot{
+		SchemaVersion:  StateVersion,
+		Client:         ClientInfo{Type: ClientClaudeCode},
+		Session:        SessionInfo{ID: "s1"},
+		CacheDiagnosis: &CacheDiagnosis{CandidateCauses: []RankedCause{{HeuristicScore: 1.1}}},
+	}
+	if err := ValidateSnapshot(s); err == nil {
+		t.Fatal("out-of-range heuristic score must be rejected")
+	}
+}
+
 func TestMigrateSnapshotRejectsFutureVersion(t *testing.T) {
 	s := &Snapshot{SchemaVersion: CurrentSchemaVersion + 1}
 	if err := MigrateSnapshot(s); err == nil {
@@ -166,6 +205,88 @@ func TestValidateSnapshotRejectsBadCacheShares(t *testing.T) {
 	if err := ValidateSnapshot(s); err == nil {
 		t.Fatal("cache_read_share > 1 must be rejected")
 	}
+}
+
+func TestValidatePublicStatusCacheBoundsAndFiniteMetrics(t *testing.T) {
+	ok := true
+	badUptime := math.NaN()
+	cache := &PublicStatusCache{
+		Source: "https://status.freeinference.org",
+		Models: []PublicStatusModelCache{{
+			ModelID:     "glm-5.2",
+			UptimeRatio: &badUptime,
+			Latest:      &PublicStatusSampleCache{OK: &ok, CheckedAt: nowForSchemaTest()},
+		}},
+	}
+	if err := ValidatePublicStatusCache(cache); err == nil {
+		t.Fatal("NaN public monitor uptime must be rejected")
+	}
+
+	cache.Models[0].UptimeRatio = nil
+	cache.Models[0].History = make([]PublicStatusSampleCache, MaxPublicStatusSamplesPerModel+1)
+	if err := ValidatePublicStatusCache(cache); err == nil {
+		t.Fatal("oversized public monitor history must be rejected")
+	}
+}
+
+func TestValidatePublicStatusCacheRejectsDuplicateModels(t *testing.T) {
+	ok := true
+	now := nowForSchemaTest()
+	cache := &PublicStatusCache{
+		Source: "https://status.freeinference.org",
+		Models: []PublicStatusModelCache{
+			{ModelID: "same", Latest: &PublicStatusSampleCache{OK: &ok, CheckedAt: now}},
+			{ModelID: "same", Latest: &PublicStatusSampleCache{OK: &ok, CheckedAt: now}},
+		},
+	}
+	if err := ValidatePublicStatusCache(cache); err == nil {
+		t.Fatal("duplicate public monitor models must be rejected")
+	}
+}
+
+func TestValidateAccountUsageRejectsNonsensicalQuota(t *testing.T) {
+	used, limit := int64(11), int64(10)
+	usage := &AccountUsage{
+		Authoritative: true,
+		FetchedAt:     nowForSchemaTest(),
+		RequestsUsed:  &used,
+		RequestsLimit: &limit,
+	}
+	if err := ValidateAccountUsage(usage); err == nil {
+		t.Fatal("usage above limit must be rejected")
+	}
+}
+
+func TestHasUsableAccountUsageRequiresFreshSupportedData(t *testing.T) {
+	used, limit := int64(1), int64(10)
+	now := nowForSchemaTest()
+	gs := &GlobalState{
+		AccountUsage:           &AccountUsage{Authoritative: true, FetchedAt: now, RequestsUsed: &used, RequestsLimit: &limit},
+		AccountUsageCapability: &AccountUsageCapability{State: CapabilitySupported, CheckedAt: now},
+	}
+	if !gs.HasUsableAccountUsage(now, DefaultAccountUsageMaxAge) {
+		t.Fatal("fresh supported usage should be usable")
+	}
+	if gs.HasUsableAccountUsage(now.Add(DefaultAccountUsageMaxAge+time.Second), DefaultAccountUsageMaxAge) {
+		t.Fatal("stale usage must not be usable")
+	}
+}
+
+func TestValidateModelsCacheRejectsUnsafeDuplicateCatalog(t *testing.T) {
+	cache := &ModelsCache{
+		FetchedAt: nowForSchemaTest(),
+		Models: []CatalogModel{
+			{ID: "same", AccessState: AccessUnknown},
+			{ID: "same", AccessState: AccessUnknown},
+		},
+	}
+	if err := ValidateModelsCache(cache); err == nil {
+		t.Fatal("duplicate model ids must be rejected")
+	}
+}
+
+func nowForSchemaTest() time.Time {
+	return time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
 }
 
 func TestMigrateV1ClearsLiveContext(t *testing.T) {

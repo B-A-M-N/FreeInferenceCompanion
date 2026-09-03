@@ -1,0 +1,7 @@
+{
+  "session_id": "codex-fixture-session",
+  "hook_event_name": "SessionEnd",
+  "model": "glm-5.1",
+  "permission_mode": "default",
+  "reason": "other"
+}

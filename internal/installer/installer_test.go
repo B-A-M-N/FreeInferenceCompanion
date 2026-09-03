@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -90,11 +92,25 @@ func createTestZIP(t *testing.T, version string) ([]byte, string) {
 	f.Write([]byte("mock-binary-" + version))
 
 	// Mock plugin directories.
+	f, _ = w.Create("plugins/claude-code/.claude-plugin/plugin.json")
+	f.Write([]byte(`{"name":"freeinference-companion"}`))
+	f, _ = w.Create("plugins/claude-code/hooks/hooks.json")
+	f.Write([]byte(`{"hooks":{}}`))
+	claudeHook := &zip.FileHeader{Name: "plugins/claude-code/scripts/run-hook.sh", Method: zip.Deflate}
+	claudeHook.SetMode(0755)
+	f, _ = w.CreateHeader(claudeHook)
+	f.Write([]byte("#!/usr/bin/env bash\nexit 0\n"))
 	f, _ = w.Create("plugins/claude-code/package.json")
 	f.Write([]byte(`{"name":"freeinference-companion"}`))
 
-	f, _ = w.Create("plugins/codex/config.json")
+	f, _ = w.Create("plugins/codex/.codex-plugin/plugin.json")
 	f.Write([]byte(`{"name":"freeinference-companion"}`))
+	f, _ = w.Create("plugins/codex/hooks/hooks.json")
+	f.Write([]byte(`{"hooks":{}}`))
+	codexHook := &zip.FileHeader{Name: "plugins/codex/scripts/run-hook.sh", Method: zip.Deflate}
+	codexHook.SetMode(0755)
+	f, _ = w.CreateHeader(codexHook)
+	f.Write([]byte("#!/usr/bin/env bash\nexit 0\n"))
 
 	w.Close()
 
@@ -132,7 +148,6 @@ func TestInstallFresh(t *testing.T) {
 		Platform:        "linux-amd64",
 		ExistingVersion: "",
 		DryRun:          false,
-		NoBrowser:       true,
 	}, stdout, stderr)
 	if err != nil {
 		t.Fatalf("install: %v", err)
@@ -153,10 +168,319 @@ func TestInstallFresh(t *testing.T) {
 			t.Errorf("plugin not extracted to %s: %v", pluginPath, err)
 		}
 	}
+	codexPlugin := filepath.Join(paths.CodexPluginDir, "freeinference-companion")
+	for _, rel := range []string{".codex-plugin/plugin.json", "hooks/hooks.json", "scripts/run-hook.sh"} {
+		if _, err := os.Stat(filepath.Join(codexPlugin, rel)); err != nil {
+			t.Errorf("Codex plugin artifact %s not extracted: %v", rel, err)
+		}
+	}
+	marketplace := filepath.Join(paths.CodexMarketplaceDir, ".agents", "plugins", "marketplace.json")
+	if _, err := os.Stat(marketplace); err != nil {
+		t.Errorf("Codex marketplace manifest not created: %v", err)
+	}
+	marketplacePlugin := filepath.Join(paths.CodexMarketplaceDir, "plugins", "freeinference-companion", ".codex-plugin", "plugin.json")
+	if _, err := os.Stat(marketplacePlugin); err != nil {
+		t.Errorf("Codex marketplace plugin not created: %v", err)
+	}
 
 	// Verify version output.
 	if !strings.Contains(stdout.String(), "v0.2.0") {
 		t.Errorf("expected version v0.2.0 in output:\n%s", stdout.String())
+	}
+}
+
+func TestUpdateForceReinstallsSameVersion(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "/usr/bin:/bin")
+	manifestURL, _, server := testServer(t, "v0.2.0", "linux-amd64")
+	defer server.Close()
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Install(Options{ManifestURL: manifestURL, Platform: "linux-amd64"}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("initial install: %v", err)
+	}
+	result, err := Update(Options{ManifestURL: manifestURL, Platform: "linux-amd64", Force: true}, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("forced update: %v", err)
+	}
+	if result.AlreadyLatest || !result.Installed || !result.Updated {
+		t.Fatalf("forced update result = %+v", result)
+	}
+	metadata, found, err := LoadInstallationMetadata(paths.MetadataPath())
+	if err != nil || !found || metadata.InstalledVersion != "v0.2.0" {
+		t.Fatalf("forced update metadata = %+v, found=%v, err=%v", metadata, found, err)
+	}
+}
+
+func TestPartialUpdatePreservesSkippedOwnership(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "/usr/bin:/bin")
+	manifestURL, _, server := testServer(t, "v0.2.0", "linux-amd64")
+	defer server.Close()
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Install(Options{ManifestURL: manifestURL, Platform: "linux-amd64"}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("initial install: %v", err)
+	}
+	newManifest, _, newServer := testServer(t, "v0.3.0", "linux-amd64")
+	defer newServer.Close()
+	if _, err := Update(Options{ManifestURL: newManifest, Platform: "linux-amd64", NoPlugin: true}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("binary-only update: %v", err)
+	}
+	latestManifest, _, latestServer := testServer(t, "v0.4.0", "linux-amd64")
+	defer latestServer.Close()
+	if _, err := Update(Options{ManifestURL: latestManifest, Platform: "linux-amd64", NoBin: true}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("plugin-only update: %v", err)
+	}
+	if err := Uninstall(paths, io.Discard, io.Discard); err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	for _, path := range []string{paths.BinaryPath, paths.shimPath(), paths.claudePluginPath(), paths.codexPluginPath(), paths.CodexMarketplaceDir} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Errorf("installer-owned target survived uninstall: %s (%v)", path, err)
+		}
+	}
+}
+
+func TestSameVersionPartialInstallCompletesMissingPlugins(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "/usr/bin:/bin")
+	manifestURL, _, server := testServer(t, "v0.2.0", "linux-amd64")
+	defer server.Close()
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Install(Options{ManifestURL: manifestURL, Platform: "linux-amd64", NoPlugin: true}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("binary-only install: %v", err)
+	}
+	result, err := Update(Options{ManifestURL: manifestURL, Platform: "linux-amd64"}, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("same-version completion: %v", err)
+	}
+	if result.AlreadyLatest || !result.ClaudePluginReady || !result.CodexFilesReady {
+		t.Fatalf("same-version completion result = %+v", result)
+	}
+	metadata, found, err := LoadInstallationMetadata(paths.MetadataPath())
+	if err != nil || !found {
+		t.Fatalf("load metadata: found=%v err=%v", found, err)
+	}
+	for name, got := range map[string]string{
+		"binary": metadata.BinaryVersion, "Claude": metadata.ClaudePluginVersion,
+		"Codex": metadata.CodexPluginVersion, "marketplace": metadata.CodexMarketplaceVersion,
+	} {
+		if got != "v0.2.0" {
+			t.Errorf("%s version = %q, want v0.2.0", name, got)
+		}
+	}
+}
+
+func TestBinaryOnlyUpgradeDoesNotHideOldPluginVersions(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "/usr/bin:/bin")
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstManifest, _, firstServer := testServer(t, "v0.2.0", "linux-amd64")
+	defer firstServer.Close()
+	if _, err := Install(Options{ManifestURL: firstManifest, Platform: "linux-amd64"}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("initial install: %v", err)
+	}
+	binaryManifest, _, binaryServer := testServer(t, "v0.3.0", "linux-amd64")
+	defer binaryServer.Close()
+	if _, err := Update(Options{ManifestURL: binaryManifest, Platform: "linux-amd64", NoPlugin: true}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("binary-only upgrade: %v", err)
+	}
+	pluginResult, err := Update(Options{ManifestURL: firstManifest, Platform: "linux-amd64", NoBin: true}, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("lower plugin-only update: %v", err)
+	}
+	if !pluginResult.AlreadyLatest || pluginResult.Version != "v0.2.0" {
+		t.Fatalf("lower plugin-only update should preserve current plugins: %+v", pluginResult)
+	}
+	result, err := Update(Options{ManifestURL: firstManifest, Platform: "linux-amd64"}, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("lower full update: %v", err)
+	}
+	if !result.AlreadyLatest || result.Version != "v0.3.0" {
+		t.Fatalf("lower full update should preserve newer binary: %+v", result)
+	}
+	metadata, found, err := LoadInstallationMetadata(paths.MetadataPath())
+	if err != nil || !found {
+		t.Fatalf("load metadata after lower updates: found=%v err=%v", found, err)
+	}
+	if metadata.InstalledVersion != "v0.3.0" || metadata.BinaryVersion != "v0.3.0" {
+		t.Fatalf("lower updates regressed installed version: %+v", metadata)
+	}
+}
+
+func TestInstallationMetadataRejectsLegacyDigestFormat(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := metadataForPaths(paths, "v0.2.0", "https://example.test", strings.Repeat("a", 64), "v0.2.0")
+	metadata.DigestFormat = ""
+	data, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.MetadataPath()), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.MetadataPath(), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := LoadInstallationMetadata(paths.MetadataPath()); err == nil || found || !strings.Contains(err.Error(), "digest format") {
+		t.Fatalf("legacy digest metadata was accepted: found=%v err=%v", found, err)
+	}
+}
+
+func TestForceRepairRejectsExistingTargetWithoutOwnership(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "/usr/bin:/bin")
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.BinaryPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.BinaryPath, []byte("foreign"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.MetadataPath()), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.MetadataPath(), []byte("{"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	manifestURL, _, server := testServer(t, "v0.2.0", "linux-amd64")
+	defer server.Close()
+	if _, err := Install(Options{ManifestURL: manifestURL, Platform: "linux-amd64", Force: true}, io.Discard, io.Discard); err == nil {
+		t.Fatal("force repair must not adopt an existing target without ownership proof")
+	}
+	data, err := os.ReadFile(paths.BinaryPath)
+	if err != nil || string(data) != "foreign" {
+		t.Fatalf("foreign binary changed: %q, %v", data, err)
+	}
+}
+
+func TestInstallTransactionRollsBackAfterReplacementFailure(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "/usr/bin:/bin")
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldManifest, _, oldServer := testServer(t, "v0.2.0", "linux-amd64")
+	defer oldServer.Close()
+	if _, err := Install(Options{ManifestURL: oldManifest, Platform: "linux-amd64"}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("initial install: %v", err)
+	}
+	oldBinary, err := os.ReadFile(paths.BinaryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldClaude, err := os.ReadFile(filepath.Join(paths.claudePluginPath(), ".claude-plugin", "plugin.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	transactionFailureHook = func(target string) error {
+		if target == paths.codexPluginPath() {
+			return errors.New("injected commit failure")
+		}
+		return nil
+	}
+	defer func() { transactionFailureHook = nil }()
+	newManifest, _, newServer := testServer(t, "v0.3.0", "linux-amd64")
+	defer newServer.Close()
+	if _, err := Update(Options{ManifestURL: newManifest, Platform: "linux-amd64"}, io.Discard, io.Discard); err == nil {
+		t.Fatal("injected commit failure must be returned")
+	}
+	gotBinary, _ := os.ReadFile(paths.BinaryPath)
+	gotClaude, _ := os.ReadFile(filepath.Join(paths.claudePluginPath(), ".claude-plugin", "plugin.json"))
+	if string(gotBinary) != string(oldBinary) || string(gotClaude) != string(oldClaude) {
+		t.Fatalf("transaction rollback lost prior installation: binary=%q claude=%q", gotBinary, gotClaude)
+	}
+}
+
+func TestExtractZIPPreservesExecutableMode(t *testing.T) {
+	archivePath := filepath.Join(t.TempDir(), "mode.zip")
+	f, err := os.Create(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := zip.NewWriter(f)
+	h := &zip.FileHeader{Name: "scripts/run-hook.sh", Method: zip.Store}
+	h.SetMode(0755)
+	entry, err := w.CreateHeader(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := entry.Write([]byte("#!/bin/sh\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dest := t.TempDir()
+	if err := extractZIP(archivePath, dest); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(dest, "scripts", "run-hook.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0755 {
+		t.Fatalf("extracted mode = %o, want 0755", info.Mode().Perm())
+	}
+}
+
+func TestValidateReleaseLayoutRequiresExecutableHook(t *testing.T) {
+	root := t.TempDir()
+	for _, plugin := range []struct {
+		name string
+		base string
+		meta string
+	}{
+		{name: "Claude", base: filepath.Join(root, "plugins", "claude-code"), meta: ".claude-plugin/plugin.json"},
+		{name: "Codex", base: filepath.Join(root, "plugins", "codex"), meta: ".codex-plugin/plugin.json"},
+	} {
+		for _, rel := range []string{plugin.meta, "hooks/hooks.json", "scripts/run-hook.sh"} {
+			path := filepath.Join(plugin.base, rel)
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("{}\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Chmod(filepath.Join(plugin.base, "scripts/run-hook.sh"), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(filepath.Join(root, "plugins", "codex", "scripts", "run-hook.sh"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateReleaseLayout(root, false, true); err == nil {
+		t.Fatal("non-executable plugin runner passed release validation")
 	}
 }
 
@@ -169,7 +493,111 @@ func TestInstallChecksumMismatch(t *testing.T) {
 	}
 }
 
+func TestInstallRefusesToOverwriteUnownedBinary(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.BinaryPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.BinaryPath, []byte("user-owned-binary"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	manifestURL, _, server := testServer(t, "v0.2.0", "linux-amd64")
+	defer server.Close()
+	if _, err := Install(Options{ManifestURL: manifestURL, Platform: "linux-amd64"}, io.Discard, io.Discard); err == nil {
+		t.Fatal("installer must refuse to overwrite a binary without ownership metadata")
+	}
+	data, err := os.ReadFile(paths.BinaryPath)
+	if err != nil || string(data) != "user-owned-binary" {
+		t.Fatalf("unowned binary changed: %q, %v", data, err)
+	}
+}
+
+func TestUninstallPreservesTargetsNotOwnedByPartialInstall(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.BinaryPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.BinaryPath, []byte("user-owned-binary"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	manifestURL, _, server := testServer(t, "v0.2.0", "linux-amd64")
+	defer server.Close()
+	if _, err := Install(Options{ManifestURL: manifestURL, Platform: "linux-amd64", NoBin: true}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("partial install: %v", err)
+	}
+	if err := Uninstall(paths, io.Discard, io.Discard); err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	data, err := os.ReadFile(paths.BinaryPath)
+	if err != nil || string(data) != "user-owned-binary" {
+		t.Fatalf("unowned binary removed or changed: %q, %v", data, err)
+	}
+	if _, err := os.Stat(paths.ClaudePluginPath); !os.IsNotExist(err) {
+		t.Fatalf("owned Claude plugin survived uninstall: %v", err)
+	}
+}
+
+func TestRegisterCodexMarketplaceUsesNativePluginManager(t *testing.T) {
+	home := t.TempDir()
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0700); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(home, "codex-args.log")
+	fakeCodex := filepath.Join(fakeBin, "codex")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"" + logPath + "\"\n"
+	if err := os.WriteFile(fakeCodex, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin)
+
+	pluginSrc := filepath.Join(home, "plugin-source")
+	if err := os.MkdirAll(filepath.Join(pluginSrc, ".codex-plugin"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginSrc, ".codex-plugin", "plugin.json"), []byte(`{"name":"freeinference-companion"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	paths := Paths{CodexMarketplaceDir: filepath.Join(home, "marketplace")}
+	if err := registerCodexMarketplace(paths, pluginSrc, io.Discard); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	args, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(args), "plugin marketplace add") || !strings.Contains(string(args), "plugin add freeinference-companion@freeinference-companion-local") {
+		t.Fatalf("Codex native manager was not invoked as expected: %s", args)
+	}
+}
+
 func TestUpdateSkipsWhenLatest(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.BinaryPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.BinaryPath, []byte("existing"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	metadata := metadataForPaths(paths, "v0.1.0", "https://example.test", strings.Repeat("a", 64), "v0.1.0")
+	if err := SaveInstallationMetadata(paths.MetadataPath(), metadata); err != nil {
+		t.Fatal(err)
+	}
 	manifestURL, _, server := testServer(t, "v0.1.0", "linux-amd64")
 	defer server.Close()
 
@@ -177,10 +605,9 @@ func TestUpdateSkipsWhenLatest(t *testing.T) {
 	stderr := &strings.Builder{}
 
 	result, err := Update(Options{
-		ManifestURL:     manifestURL,
-		Platform:        "linux-amd64",
-		ExistingVersion: "v0.1.0",
-		NoBrowser:       true,
+		ManifestURL: manifestURL,
+		Platform:    "linux-amd64",
+		NoPlugin:    true,
 	}, stdout, stderr)
 	if err != nil {
 		t.Fatalf("update: %v", err)
@@ -193,17 +620,29 @@ func TestUpdateSkipsWhenLatest(t *testing.T) {
 func TestUpdateDownloadsNewVersion(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.BinaryPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.BinaryPath, []byte("existing"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	metadata := metadataForPaths(paths, "v0.1.0", "https://example.test", strings.Repeat("a", 64), "v0.1.0")
+	if err := SaveInstallationMetadata(paths.MetadataPath(), metadata); err != nil {
+		t.Fatal(err)
+	}
 	manifestURL, _, server := testServer(t, "v0.3.0", "linux-amd64")
 	defer server.Close()
 
 	stdout := &strings.Builder{}
 	stderr := &strings.Builder{}
 
-	_, err := Update(Options{
-		ManifestURL:     manifestURL,
-		Platform:        "linux-amd64",
-		ExistingVersion: "v0.1.0",
-		NoBrowser:       true,
+	_, err = Update(Options{
+		ManifestURL: manifestURL,
+		Platform:    "linux-amd64",
 	}, stdout, stderr)
 	if err != nil {
 		t.Fatalf("update: %v", err)
@@ -217,12 +656,11 @@ func TestUninstallRemovesBinaryAndPlugins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DefaultPaths: %v", err)
 	}
-
-	// Create the files that Uninstall would remove.
-	os.MkdirAll(filepath.Dir(paths.BinaryPath), 0755)
-	os.WriteFile(paths.BinaryPath, []byte("test"), 0755)
-	os.MkdirAll(filepath.Join(paths.ClaudePluginDir, "freeinference-companion"), 0755)
-	os.MkdirAll(filepath.Join(paths.CodexPluginDir, "freeinference-companion"), 0755)
+	manifestURL, _, server := testServer(t, "v0.2.0", "linux-amd64")
+	defer server.Close()
+	if _, err := Install(Options{ManifestURL: manifestURL, Platform: "linux-amd64"}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("install fixture: %v", err)
+	}
 
 	stdout := &strings.Builder{}
 	stderr := &strings.Builder{}
@@ -262,8 +700,8 @@ func TestExtractZIPPathTraversal(t *testing.T) {
 
 	destDir := t.TempDir()
 	err := extractZIP(tmpZip, destDir)
-	if err != nil {
-		t.Fatalf("extractZIP: %v", err)
+	if err == nil {
+		t.Fatal("expected path traversal archive to be rejected")
 	}
 
 	// The traversal file should not have been extracted outside destDir.
@@ -367,7 +805,6 @@ func TestInstallDryRun(t *testing.T) {
 		Platform:        "linux-amd64",
 		ExistingVersion: "",
 		DryRun:          true,
-		NoBrowser:       true,
 	}, stdout, stderr)
 	if err != nil {
 		t.Fatalf("dry-run install: %v", err)
@@ -416,7 +853,6 @@ func TestUpdateDryRunDoesNotMutate(t *testing.T) {
 		Platform:        "linux-amd64",
 		ExistingVersion: "v0.1.0",
 		DryRun:          true,
-		NoBrowser:       true,
 	}, stdout, &strings.Builder{})
 	if err != nil {
 		t.Fatalf("dry-run update: %v", err)

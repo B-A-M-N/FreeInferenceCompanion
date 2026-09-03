@@ -7,39 +7,54 @@ import (
 	"testing"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/api"
+	"github.com/b-a-m-n/freeinference-companion/internal/runtime"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
 
 // BenchmarkStatusLineUpdate measures the cost of one status-line observation.
-// p95 target: under 10 ms on the supported Linux reference system.
+// Average-latency target: under 10 ms on the supported Linux reference system.
 func BenchmarkStatusLineUpdate(b *testing.B) {
 	paths := state.NewPathsWithDir(b.TempDir())
 	a := NewClaudeAdapter(paths)
+	activation := benchmarkClaudeActivation()
 	input := statusInput("bench", "glm-5.1", 160000, 2000, 200000, 80, 5000, 150000, 5000, 2000)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if err := a.HandleStatusLineUpdate(input, "bench"); err != nil {
+		if err := a.HandleStatusLineUpdateWith(input, "bench", activation); err != nil {
 			b.Fatal(err)
 		}
 	}
 }
 
 // BenchmarkUserPromptSubmitNoWarning measures a hook invocation in the
-// common (no-warning) path. p95 target: under 25 ms on the supported Linux
-// reference system.
+// common (no-warning) path. Average-latency target: under 10 ms on the
+// supported Linux reference system.
 func BenchmarkUserPromptSubmitNoWarning(b *testing.B) {
 	paths := state.NewPathsWithDir(b.TempDir())
 	a := NewClaudeAdapter(paths)
-	if err := a.HandleSessionStart(&schema.ClaudeHookInput{SessionID: "bench", Model: "glm-5.1"}); err != nil {
+	activation := benchmarkClaudeActivation()
+	if err := a.HandleSessionStartWith(&schema.ClaudeHookInput{SessionID: "bench", Model: "glm-5.1"}, activation); err != nil {
 		b.Fatal(err)
 	}
 	prompt := &schema.ClaudeHookInput{SessionID: "bench", Prompt: "hi"}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := a.HandleUserPromptSubmit(prompt, "bench"); err != nil {
+		if _, err := a.HandleUserPromptSubmitWith(prompt, "bench", activation); err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+func benchmarkClaudeActivation() runtime.Activation {
+	return runtime.Activation{
+		Active:           true,
+		Client:           runtime.ClientClaudeCode,
+		RuntimeKind:      runtime.RuntimeAnthropic,
+		Origin:           "https://freeinference.org",
+		EndpointURL:      "https://freeinference.org/anthropic",
+		EndpointSource:   "ANTHROPIC_BASE_URL",
+		CredentialSource: runtime.CredAnthropicAuthToken,
 	}
 }
 

@@ -241,6 +241,16 @@ func TestBuildCacheDiagnosisCandidateCauses(t *testing.T) {
 	if diag.ReasonCode == schema.ReasonUnknown && len(diag.CandidateCauses) > 0 {
 		t.Error("reason code should be set from top candidate cause")
 	}
+	seen := map[schema.CacheReasonCode]bool{}
+	for i, cause := range diag.CandidateCauses {
+		if seen[cause.Reason] {
+			t.Errorf("duplicate candidate cause %q", cause.Reason)
+		}
+		seen[cause.Reason] = true
+		if i > 0 && diag.CandidateCauses[i-1].HeuristicScore < cause.HeuristicScore {
+			t.Errorf("candidate causes are not sorted by heuristic score: %#v", diag.CandidateCauses)
+		}
+	}
 }
 
 func TestBuildCacheDiagnosisEvidence(t *testing.T) {

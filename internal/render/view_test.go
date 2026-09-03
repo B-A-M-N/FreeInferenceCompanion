@@ -118,6 +118,51 @@ func TestExpandedRender(t *testing.T) {
 	}
 }
 
+func TestExpandedRenderIncludesCachedModelMonitorOnly(t *testing.T) {
+	ok := true
+	uptime := 0.997
+	latency := int64(412)
+	checked := time.Now().UTC().Add(-time.Minute)
+	vm := BuildViewModel("0.1.0", fixtureSnapshot(true), &schema.GlobalState{
+		PublicStatus: &schema.PublicStatusCache{Models: []schema.PublicStatusModelCache{{
+			ModelID: "glm-5.1", UptimeRatio: &uptime,
+			Latest: &schema.PublicStatusSampleCache{OK: &ok, CheckedAt: checked, LatencyMs: &latency},
+		}}},
+	}, "", time.Now(), true, "", "")
+	rc := RenderConfig{ColorMode: ColorNever, Width: 120}
+	if line := vm.Line(rc); strings.Contains(line, "monitor") || strings.Contains(line, "412ms") {
+		t.Fatalf("compact line included model monitor: %q", line)
+	}
+	if expanded := vm.Expanded(rc); !strings.Contains(expanded, "Model monitor") || !strings.Contains(expanded, "412ms") || !strings.Contains(expanded, "up 99.7%") {
+		t.Fatalf("expanded view missing cached model monitor: %q", expanded)
+	}
+}
+
+func TestTraceMetadataAppearsOnlyInExpandedDetails(t *testing.T) {
+	snap := fixtureSnapshot(true)
+	snap.Trace = &schema.TraceInfo{
+		Enabled:   true,
+		Verified:  true,
+		SessionID: "fic-v1-aaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Source:    schema.TraceSourceCompanionGenerated,
+		Provider:  schema.ProviderFreeInference,
+		Client:    schema.ClientClaudeCode,
+		Header:    schema.TraceHeaderSessionID,
+		StartedAt: time.Now().UTC(),
+	}
+	vm := BuildViewModel("0.1.0", snap, nil, "", time.Now(), true, "", "")
+	rc := RenderConfig{ColorMode: ColorNever, Width: 120}
+	if vm.Line(rc) == "" || strings.Contains(vm.Line(rc), "Trace") {
+		t.Fatalf("compact line exposed trace metadata: %q", vm.Line(rc))
+	}
+	if !strings.Contains(vm.Expanded(rc), "Trace Correlation") || !strings.Contains(vm.Expanded(rc), "X-Session-ID") {
+		t.Fatalf("expanded view missing trace metadata: %q", vm.Expanded(rc))
+	}
+	if strings.Contains(vm.Expanded(rc), snap.Trace.SessionID) {
+		t.Fatal("expanded view exposed the raw trace ID")
+	}
+}
+
 func TestStandardRenderOmitsHistoricalDiagnosticSections(t *testing.T) {
 	before, after := int64(180000), int64(120000)
 	snap := fixtureSnapshot(true)
