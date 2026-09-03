@@ -17,6 +17,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	appversion "github.com/b-a-m-n/freeinference-companion/pkg/version"
 )
 
 func main() {
@@ -76,10 +78,10 @@ func main() {
 		"subject":       subjects,
 		"predicateType": "https://slsa.dev/provenance/v0.2",
 		"predicate": map[string]any{
-			"buildType": "https://github.com/b-a-m-n/freeinference-companion/Makefile@v1",
+			"buildType": appversion.RepositoryURL + "/Makefile@v1",
 			"invocation": map[string]any{
 				"configSource": map[string]any{
-					"uri": "git+https://github.com/b-a-m-n/freeinference-companion@" + version,
+					"uri": "git+" + appversion.RepositoryURL + "@" + version,
 					"digest": map[string]string{
 						"gitCommit": commit,
 					},
@@ -105,7 +107,7 @@ func main() {
 				"reproducible": false, // Build environment (Go version, OS, compiler flags) not fully captured in materials; full reproducibility requires recording all build-tool versions and environment variables.
 			},
 			"materials": []map[string]any{{
-				"uri": "git+https://github.com/b-a-m-n/freeinference-companion@" + commit,
+				"uri": "git+" + appversion.RepositoryURL + "@" + commit,
 				"digest": map[string]string{
 					"gitCommit": commit,
 				},

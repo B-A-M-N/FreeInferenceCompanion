@@ -160,7 +160,7 @@ func legacyInstall(opts Options, stdout, stderr io.Writer) (*Result, error) {
 		if !opts.NoBrowser {
 			releaseURL := strings.TrimSuffix(opts.ManifestURL, "/marketplace.json")
 			if releaseURL == "" {
-				releaseURL = "https://github.com/b-a-m-n/freeinference-companion/releases"
+				releaseURL = "https://github.com/B-A-M-N/FreeInferenceCompanion/releases"
 			}
 			_ = releaseURL
 			// Intentionally not opening a browser in non-interactive installs.

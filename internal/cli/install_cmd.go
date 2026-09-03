@@ -7,10 +7,11 @@ import (
 
 	"github.com/b-a-m-n/freeinference-companion/internal/installer"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
+	"github.com/b-a-m-n/freeinference-companion/pkg/version"
 )
 
 const (
-	defaultManifestURL = "https://github.com/b-a-m-n/freeinference-companion/releases/latest/download/marketplace.json"
+	defaultManifestURL = version.RepositoryURL + "/releases/latest/download/marketplace.json"
 )
 
 // cmdInstall implements `freeinference install`.

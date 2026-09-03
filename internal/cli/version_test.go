@@ -10,6 +10,13 @@ import (
 	"github.com/b-a-m-n/freeinference-companion/pkg/version"
 )
 
+func TestDefaultManifestURLUsesCanonicalRepository(t *testing.T) {
+	const want = "https://github.com/B-A-M-N/FreeInferenceCompanion/releases/latest/download/marketplace.json"
+	if defaultManifestURL != want {
+		t.Fatalf("defaultManifestURL = %q, want %q", defaultManifestURL, want)
+	}
+}
+
 // TestVersionConsistency verifies that the CLI version, adapter plugin
 // version, and both plugin manifest versions all agree. This is the
 // single-source-of-truth guard.

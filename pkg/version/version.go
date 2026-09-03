@@ -14,3 +14,8 @@ package version
 // overrides this via -ldflags for release builds; the fallback keeps
 // development builds self-consistent.
 var Version = "0.1.0"
+
+// RepositoryURL is the canonical public repository URL. Keep this separate
+// from the Go module path: the repository name is intentionally CamelCase on
+// GitHub, while Go import paths remain lowercase.
+const RepositoryURL = "https://github.com/B-A-M-N/FreeInferenceCompanion"
