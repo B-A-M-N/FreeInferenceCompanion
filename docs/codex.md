@@ -193,7 +193,11 @@ Accordingly, unavailable values are reported as `unavailable` rather than
 invented. Use `freeinference models`,
 `freeinference doctor`, or `freeinference status --client codex` when you
 explicitly want the available local/provider state. Codex-unavailable values
-are reported as `unavailable`, not `unknown` or zero.
+are reported as `unavailable`, not `unknown` or zero. `$freeinference-status`
+also presents the verified provider configuration and this explicit
+availability boundary by running the local `status`, `context`, and `cache`
+commands together. It does not create a session record or make a provider
+request.
 
 For interactive reports, choose the amount of detail explicitly:
 

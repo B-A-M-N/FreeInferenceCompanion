@@ -414,6 +414,79 @@ func TestCodexStatusJSONReportsTelemetryUnavailable(t *testing.T) {
 	}
 }
 
+func TestCodexStatusWithoutSessionShowsVerifiedConfiguration(t *testing.T) {
+	codexHome := t.TempDir()
+	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(`model_provider = "freeinference"
+
+[model_providers.freeinference]
+name = "FreeInference"
+base_url = "https://freeinference.org/v1"
+env_key = "FREEINFERENCE_API_KEY"
+wire_api = "responses"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Setenv("FREEINFERENCE_API_KEY", "codex-status-test-key")
+	t.Setenv("FI_CACHE_DIR", t.TempDir())
+	t.Setenv("FI_DISABLED", "")
+
+	var out, errOut strings.Builder
+	code := cmdStatus(testPaths(t), []string{"--client", "codex", "--level", "standard"}, nil, &out, &errOut)
+	if code != 0 {
+		t.Fatalf("status exit = %d, stderr=%q", code, errOut.String())
+	}
+	for _, want := range []string{
+		"Client:   codex",
+		"Provider: freeinference (verified from Codex configuration)",
+		"Session:  no local Codex session (plugin is skill-only)",
+		"Live Context: unavailable",
+		"Cache Analysis: unavailable",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("status output missing %q:\n%s", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), "FI: no session") {
+		t.Fatalf("Codex configuration-only status regressed to generic no-session output: %q", out.String())
+	}
+}
+
+func TestCodexStatusWithoutSessionJSONPreservesAvailabilityBoundary(t *testing.T) {
+	codexHome := t.TempDir()
+	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(`model_provider = "freeinference"
+
+[model_providers.freeinference]
+base_url = "https://freeinference.org/v1"
+env_key = "FREEINFERENCE_API_KEY"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Setenv("FREEINFERENCE_API_KEY", "codex-status-test-key")
+	t.Setenv("FI_CACHE_DIR", t.TempDir())
+	t.Setenv("FI_DISABLED", "")
+
+	var out, errOut strings.Builder
+	code := cmdStatus(testPaths(t), []string{"--client", "codex", "--json"}, nil, &out, &errOut)
+	if code != 0 {
+		t.Fatalf("status --json exit = %d, stderr=%q", code, errOut.String())
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(out.String()), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded["provider"] != string(schema.ProviderFreeInference) || decoded["selection_verified"] != true {
+		t.Fatalf("configuration evidence = %#v", decoded)
+	}
+	for _, field := range []string{"context", "cache"} {
+		section, ok := decoded[field].(map[string]any)
+		if !ok || section["availability"] != "unavailable" || section["reason"] != "client_telemetry_unavailable" {
+			t.Errorf("%s = %#v, want explicit unavailable telemetry", field, decoded[field])
+		}
+	}
+}
+
 // TestDoctorProbeWithInvalidEndpoint is the P0-1 regression test: an invalid
 // API URL combined with `freeinference doctor --probe` must NOT panic. It must skip the
 // inference probe, report the configuration failure, and exit 1 (not a runtime
