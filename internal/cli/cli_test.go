@@ -21,6 +21,19 @@ func testPaths(t *testing.T) state.Paths {
 	return state.NewPathsWithDir(t.TempDir())
 }
 
+func exposeRunningBinaryOnPath(t *testing.T) {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	fiDir := t.TempDir()
+	fiPath := filepath.Join(fiDir, "freeinference")
+	if err := os.Symlink(exe, fiPath); err == nil {
+		t.Setenv("PATH", fiDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	}
+}
+
 func TestRenderConfigHonorsSpacedColorFlag(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	if got := renderConfigWith([]string{"--color", "always"}).ColorMode; got != render.ColorAlways {
@@ -49,13 +62,7 @@ func TestDoctorRunsAllChecksWithoutEarlyExit(t *testing.T) {
 	t.Setenv("FI_ALLOW_INSECURE_LOCALHOST", "1")
 
 	// Put the running binary on PATH so `freeinference` resolves correctly.
-	if exe, err := os.Executable(); err == nil {
-		fiDir := t.TempDir()
-		fiPath := filepath.Join(fiDir, "freeinference")
-		if err := os.Symlink(exe, fiPath); err == nil {
-			t.Setenv("PATH", fiDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-		}
-	}
+	exposeRunningBinaryOnPath(t)
 
 	var out, errOut strings.Builder
 	code := cmdDoctor(testPaths(t), nil, &out, &errOut)
@@ -119,6 +126,7 @@ func TestDoctorDoesNotProbeUnverifiedEndpoint(t *testing.T) {
 	t.Setenv("FREEINFERENCE_API_KEY", "")
 	t.Setenv("FI_ALLOW_INSECURE_LOCALHOST", "1")
 	t.Setenv("FI_HEALTH_URL", "")
+	exposeRunningBinaryOnPath(t)
 
 	var out, errOut strings.Builder
 	code := cmdDoctor(testPaths(t), []string{"--probe", "--model", "glm-5.1"}, &out, &errOut)
@@ -528,6 +536,7 @@ func TestDoctorProbeWithInvalidEndpoint(t *testing.T) {
 	t.Setenv("FREEINFERENCE_BASE_URL", "https://user:pass@freeinference.org/v1")
 	t.Setenv("FREEINFERENCE_API_KEY", "hyi-test-key-12345")
 	t.Setenv("FI_HEALTH_URL", "")
+	exposeRunningBinaryOnPath(t)
 
 	var out, errOut strings.Builder
 	code := cmdDoctor(testPaths(t), []string{"--probe", "--model", "test-model"}, &out, &errOut)
