@@ -173,7 +173,7 @@ func cmdStatus(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 		// Show that configuration boundary explicitly instead of reducing it to
 		// the unhelpful generic "no session" response. This is configuration
 		// evidence, not a fabricated session or telemetry record.
-		if clientType == schema.ClientCodex && activation.Active {
+		if clientType == schema.ClientCodex && activation.Active && !historical {
 			if jsonOut {
 				codexConfiguredStatusJSON(stdout, activation)
 				return 0

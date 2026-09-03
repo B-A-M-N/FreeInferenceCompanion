@@ -201,7 +201,7 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 	// network-dependent checks. In particular, never let an unconfigured or
 	// generic `doctor` invocation fall back to the default FreeInference URL.
 	disabled := os.Getenv("FI_DISABLED") == "1" || activation.Disabled
-	networkAllowed := activation.Active
+	networkAllowed := activation.Active && !activation.UnsafeForced
 	if !networkAllowed {
 		// A custom endpoint is an explicit opt-in and carries its own validated
 		// credential pair. It may be diagnosed even when no Claude/Codex runtime

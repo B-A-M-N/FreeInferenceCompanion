@@ -432,7 +432,7 @@ func (r *Refresher) refreshModels(result *RefreshResult, now time.Time) {
 	catalog := make([]schema.CatalogModel, 0, len(models))
 	for _, m := range models {
 		catalog = append(catalog, schema.CatalogModel{
-			ID:              secure.SafeField(m.ID),
+			ID:              secure.SafeIdentifier(m.ID),
 			Name:            secure.SafeField(m.Name),
 			ContextLength:   m.ContextLength,
 			MaxOutputLength: m.MaxOutputLength,
@@ -565,7 +565,7 @@ func publicStatusCache(status *api.PublicStatusResponse, now time.Time) (*schema
 			continue
 		}
 		entry := schema.PublicStatusModelCache{
-			ModelID:     secure.SafeField(model.ModelID),
+			ModelID:     secure.SafeIdentifier(model.ModelID),
 			UptimeRatio: model.UptimeRatio,
 		}
 		if model.Latest != nil {

@@ -210,3 +210,18 @@ func SanitizeField(s string) string {
 func SafeField(s string) string {
 	return Redact(SanitizeField(s))
 }
+
+// SafeIdentifier sanitizes an identifier for persistence while preserving the
+// distinction between different secret-shaped values. Identifiers such as
+// model IDs are not credentials, but an upstream value can still resemble a
+// credential; replacing every such value with the same placeholder would
+// collapse distinct records and make validation reject an otherwise valid
+// response.
+func SafeIdentifier(s string) string {
+	clean := SanitizeField(s)
+	if !LooksLikeSecret(clean) {
+		return clean
+	}
+	h := sha256.Sum256([]byte(clean))
+	return RedactedPlaceholder + "-" + hex.EncodeToString(h[:])[:16]
+}

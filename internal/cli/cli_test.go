@@ -141,6 +141,34 @@ func TestDoctorDoesNotProbeUnverifiedEndpoint(t *testing.T) {
 	}
 }
 
+func TestDoctorUnsafeForceDoesNotAuthorizeNetwork(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	t.Setenv("FI_UNSAFE_FORCE_ACTIVATION", "1")
+	t.Setenv("FREEINFERENCE_BASE_URL", server.URL)
+	t.Setenv("FREEINFERENCE_API_KEY", "")
+	t.Setenv("FI_ALLOW_INSECURE_LOCALHOST", "1")
+	t.Setenv("FI_HEALTH_URL", "")
+	exposeRunningBinaryOnPath(t)
+
+	var out, errOut strings.Builder
+	code := cmdDoctor(testPaths(t), []string{"--probe", "--model", "glm-5.1"}, &out, &errOut)
+	if code != 0 {
+		t.Fatalf("unsafe-forced doctor exit = %d, want 0 with skipped network checks:\n%s", code, out.String())
+	}
+	if calls != 0 {
+		t.Fatalf("unsafe-forced doctor made %d network request(s)", calls)
+	}
+	if !strings.Contains(out.String(), "FreeInference route not verified; no request sent") {
+		t.Fatalf("doctor did not disclose skipped forced probe:\n%s", out.String())
+	}
+}
+
 func TestNewAPIClientUsesActiveRuntimeEndpointAndCredential(t *testing.T) {
 	t.Setenv("FREEINFERENCE_BASE_URL", "")
 	t.Setenv("FREEINFERENCE_API_KEY", "")
@@ -525,6 +553,34 @@ env_key = "FREEINFERENCE_API_KEY"
 		if !ok || section["availability"] != "unavailable" || section["reason"] != "client_telemetry_unavailable" {
 			t.Errorf("%s = %#v, want explicit unavailable telemetry", field, decoded[field])
 		}
+	}
+}
+
+func TestCodexStatusExplicitMissingSessionDoesNotUseConfigurationFallback(t *testing.T) {
+	codexHome := t.TempDir()
+	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(`model_provider = "freeinference"
+
+[model_providers.freeinference]
+base_url = "https://freeinference.org/v1"
+env_key = "FREEINFERENCE_API_KEY"
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Setenv("FREEINFERENCE_API_KEY", "codex-status-test-key")
+	t.Setenv("FI_CACHE_DIR", t.TempDir())
+	t.Setenv("FI_DISABLED", "")
+
+	var out, errOut strings.Builder
+	code := cmdStatus(testPaths(t), []string{"--client", "codex", "--session", "missing", "--compact"}, strings.NewReader(""), &out, &errOut)
+	if code != 0 {
+		t.Fatalf("explicit missing Codex session exit = %d, stderr=%q", code, errOut.String())
+	}
+	if strings.Contains(out.String(), "FreeInference Companion") {
+		t.Fatalf("explicit missing session used configuration fallback: %q", out.String())
+	}
+	if strings.Count(strings.TrimSpace(out.String()), "\n") != 0 {
+		t.Fatalf("compact missing-session output must stay one line: %q", out.String())
 	}
 }
 
