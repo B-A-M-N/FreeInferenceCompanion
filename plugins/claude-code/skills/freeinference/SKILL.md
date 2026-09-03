@@ -1,6 +1,7 @@
 ---
 name: freeinference
 description: FreeInference Companion — session monitoring, cache analysis, diagnostics, and provider management
+disable-model-invocation: true
 ---
 
 # FreeInference Companion

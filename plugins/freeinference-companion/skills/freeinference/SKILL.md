@@ -1,6 +1,7 @@
 ---
 name: freeinference
 description: FreeInference Companion — local Codex provider diagnostics, model discovery, and configuration guidance. Codex context and cache metrics are reported as unavailable.
+disable-model-invocation: true
 ---
 
 # FreeInference Companion (Codex)
@@ -21,7 +22,8 @@ codex plugin list --json
 ```
 
 Metadata refresh is disabled by default. `FI_AUTO_REFRESH=1` is an explicit
-opt-in for throttled, detached refresh work.
+opt-in for throttled, detached refresh work from supported CLI lifecycle
+integrations; this marketplace plugin installs no Codex lifecycle hooks.
 
 ## Overview
 
@@ -69,8 +71,8 @@ freeinference status --client codex
 freeinference status --level standard --client codex
 ```
 
-Note: the plugin records lifecycle events locally, but Codex does not expose
-live context metrics; those values report as `unavailable`.
+Note: this plugin installs no lifecycle hooks. Codex does not expose live
+context metrics; those values report as `unavailable`.
 
 Flags: `--client <type>`, `--compact`, `--level summary|standard|detailed`, `--session <id>`, `--json`
 
@@ -247,7 +249,7 @@ Many commands accept `--json` for machine-readable JSON output and `--help` for 
 - `FI_SESSION_ID` — Explicit session override
 - `FI_PROVIDER` — Attribution metadata only; it does not activate the companion
 - `FI_NO_BACKGROUND` — Disable detached background refresh after opting in
-- `FI_AUTO_REFRESH` — Set to `1` to opt in to stale metadata refreshes from lifecycle hooks
+- `FI_AUTO_REFRESH` — Set to `1` to opt in to stale metadata refreshes from supported CLI lifecycle integrations
 - `FI_DISABLED` — Set to `1` to disable all companion features
 - `FI_ALLOW_INSECURE_LOCALHOST` — Allow `http://` loopback (development only)
 - `FI_TRACING` — Enable/disable launch-time `X-Session-ID` correlation (`1` by default for `freeinference run`)
@@ -294,9 +296,11 @@ models are endpoint-exclusive and belong in Claude Code's Anthropic setup.
 1. **Native footer ownership** — Codex renders its own `tui.status_line`; use `freeinference codex-footer` to configure native model/context items. This is separate from Claude's script-backed `status-line` wrapper and is not scraped plugin telemetry.
 2. **Context metrics** — Codex does not expose live context window usage to plugins. Context values report as `unavailable`.
 3. **Cache metrics** — Codex does not expose cache metrics. Cache analysis reports `unavailable`.
-4. **Lifecycle telemetry** — the plugin records session, prompt, compaction,
-   stop, and session-end events locally. Codex does not expose live context or
-   cache counters to this integration, so those values remain `unavailable`.
+4. **Lifecycle telemetry** — this marketplace plugin installs no Codex
+   lifecycle hooks. An explicit `freeinference hook codex ...` call remains a
+   legacy CLI contract for integrations that provide their own wiring; Codex
+   does not expose live context or cache counters to this integration, so those
+   values remain `unavailable`.
 
 ## Example Workflows
 

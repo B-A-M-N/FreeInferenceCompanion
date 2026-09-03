@@ -2,6 +2,7 @@
 name: fi-status
 description: Fetch the public FreeInference service status without using session state or credentials.
 allowed-tools: Bash
+disable-model-invocation: true
 ---
 
 # FreeInference service status

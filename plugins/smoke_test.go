@@ -676,7 +676,7 @@ func TestClaudeCodeHookCreatesSessionState(t *testing.T) {
 
 func TestCodexPluginIsSkillOnly(t *testing.T) {
 	plug := pluginDir("freeinference-companion")
-	for _, name := range []string{"hooks", "scripts"} {
+	for _, name := range []string{"hooks", "scripts", "bin"} {
 		if _, err := os.Stat(filepath.Join(plug, name)); !os.IsNotExist(err) {
 			t.Errorf("Codex skill-only plugin unexpectedly contains %s: %v", name, err)
 		}
@@ -715,15 +715,27 @@ func TestClaudeCodeSkillsInventory(t *testing.T) {
 			skillNames = append(skillNames, e.Name())
 		}
 	}
-	// Verify the router skill exists.
-	hasRouter := false
+	// Verify the router and high-value diagnostic surfaces are directly
+	// discoverable from the native Claude Code skill picker.
+	required := map[string]bool{
+		"freeinference":          false,
+		"freeinference-status":   false,
+		"freeinference-models":   false,
+		"freeinference-doctor":   false,
+		"freeinference-report":   false,
+		"freeinference-cache":    false,
+		"freeinference-sessions": false,
+		"freeinference-refresh":  false,
+	}
 	for _, name := range skillNames {
-		if name == "freeinference" {
-			hasRouter = true
+		if _, ok := required[name]; ok {
+			required[name] = true
 		}
 	}
-	if !hasRouter {
-		t.Errorf("expected router skill 'freeinference' in Claude skills, got: %v", skillNames)
+	for name, found := range required {
+		if !found {
+			t.Errorf("expected native Claude skill %q, got: %v", name, skillNames)
+		}
 	}
 	// The public fi-status skill is intentionally namespaced by Claude Code;
 	// older unnamespaced aliases are not part of the plugin.
@@ -746,14 +758,25 @@ func TestCodexSkillsInventory(t *testing.T) {
 			skillNames = append(skillNames, e.Name())
 		}
 	}
-	hasRouter := false
+	required := map[string]bool{
+		"freeinference":          false,
+		"freeinference-status":   false,
+		"freeinference-models":   false,
+		"freeinference-doctor":   false,
+		"freeinference-report":   false,
+		"freeinference-cache":    false,
+		"freeinference-sessions": false,
+		"freeinference-refresh":  false,
+	}
 	for _, name := range skillNames {
-		if name == "freeinference" {
-			hasRouter = true
+		if _, ok := required[name]; ok {
+			required[name] = true
 		}
 	}
-	if !hasRouter {
-		t.Errorf("expected router skill 'freeinference' in Codex skills, got: %v", skillNames)
+	for name, found := range required {
+		if !found {
+			t.Errorf("expected native Codex skill %q, got: %v", name, skillNames)
+		}
 	}
 	for _, name := range skillNames {
 		if strings.HasPrefix(name, "fi-") && name != "fi-status" {
