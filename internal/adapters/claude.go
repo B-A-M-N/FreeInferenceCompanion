@@ -72,7 +72,7 @@ func newClaudeSnapshot(sessionID, modelID string, now time.Time) *schema.Snapsho
 		// new snapshot unresolved until that evidence is threaded through.
 		Provider: schema.ProviderInfo{Name: schema.ProviderUnknown, Source: "unresolved"},
 		Model: schema.ModelInfo{
-			ID:             secure.SafeField(modelID),
+			ID:             secure.SafeIdentifier(modelID),
 			MetadataSource: "client_hook",
 			AccessState:    schema.AccessUnknown,
 		},
@@ -141,7 +141,7 @@ func (a *ClaudeAdapter) HandleSessionStartWithTrace(input *schema.ClaudeHookInpu
 			}
 			// Only fill in the model if we don't already know a better one.
 			if input.Model != "" && (snap.Model.ID == "" || snap.Model.ID == "unknown") {
-				snap.Model.ID = secure.SafeField(input.Model)
+				snap.Model.ID = secure.SafeIdentifier(input.Model)
 				snap.Model.MetadataSource = "client_hook"
 			}
 			return nil
@@ -200,7 +200,7 @@ func (a *ClaudeAdapter) HandleStatusLineUpdateWithTrace(input *schema.ClaudeStat
 			// client-controlled and sanitized to prevent terminal injection
 			// when the value is later rendered.
 			if input.Model.ID != "" {
-				snap.Model.ID = secure.SafeField(input.Model.ID)
+				snap.Model.ID = secure.SafeIdentifier(input.Model.ID)
 				snap.Model.MetadataSource = "client_statusline"
 			}
 			if input.Version != "" {
@@ -229,7 +229,7 @@ func (a *ClaudeAdapter) HandleStatusLineUpdateWithTrace(input *schema.ClaudeStat
 			}
 			if snap.CacheEpochID == "" {
 				beginCacheEpoch(snap, "session_start", now)
-			} else if previousModel != "" && previousModel != "unknown" && input.Model.ID != "" && previousModel != secure.SafeField(input.Model.ID) {
+			} else if previousModel != "" && previousModel != "unknown" && input.Model.ID != "" && previousModel != secure.SafeIdentifier(input.Model.ID) {
 				beginCacheEpoch(snap, "model_switch", now)
 			}
 
@@ -921,7 +921,7 @@ func (a *ClaudeAdapter) HandlePostModelSwitch(input *schema.ClaudeHookInput, ses
 	err := state.UpdateSnapshot(a.Paths, schema.ClientClaudeCode, sessionID, nil,
 		func(snap *schema.Snapshot) error {
 			if input != nil && input.Model != "" {
-				snap.Model.ID = secure.SafeField(input.Model)
+				snap.Model.ID = secure.SafeIdentifier(input.Model)
 				snap.Model.MetadataSource = "client_hook"
 			}
 			beginCacheEpoch(snap, "model_switch", now)
@@ -939,7 +939,7 @@ func inputModel(input *schema.ClaudeHookInput) string {
 	if input == nil {
 		return ""
 	}
-	return secure.SafeField(input.Model)
+	return secure.SafeIdentifier(input.Model)
 }
 
 // HandleSessionEnd marks a session as completed.

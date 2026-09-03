@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/api"
+	"github.com/b-a-m-n/freeinference-companion/internal/secure"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
@@ -110,6 +111,58 @@ func TestCollectCorrelatesNearestPublicMonitorSampleAndStatus(t *testing.T) {
 	}
 	if report.Recent[0].PublicMonitor == nil || report.Recent[0].PublicMonitor.Status != "up" || report.Recent[0].PublicMonitor.LatencyMs == nil {
 		t.Fatalf("monitor correlation = %+v", report.Recent[0].PublicMonitor)
+	}
+}
+
+func TestCollectCorrelatesSecretShapedModelAfterSanitization(t *testing.T) {
+	paths := state.NewPathsWithDir(t.TempDir())
+	if err := paths.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	sessionID := "session-secret-shaped-model"
+	rawModel := "hyi-model-alpha-abcdef0123456789"
+	safeModel := secure.SafeIdentifier(rawModel)
+	snap := &schema.Snapshot{
+		SchemaVersion: schema.StateVersion,
+		Client:        schema.ClientInfo{Type: schema.ClientClaudeCode},
+		Session:       schema.SessionInfo{ID: sessionID, StartedAt: now, LastEventAt: now, Status: schema.SessionActive},
+		Model:         schema.ModelInfo{ID: rawModel},
+		Provider:      schema.ProviderInfo{Name: schema.ProviderFreeInference, Confirmed: true},
+	}
+	if err := state.UpdateSessionIndex(paths, snap); err != nil {
+		t.Fatal(err)
+	}
+	if err := paths.EnsureSessionDir(schema.ClientClaudeCode, sessionID); err != nil {
+		t.Fatal(err)
+	}
+	status := 429
+	if err := state.AppendEvent(paths, schema.ClientClaudeCode, sessionID, state.Event{
+		Type:       state.EventTurnFailed,
+		Model:      rawModel,
+		Provider:   schema.ProviderFreeInference,
+		Detail:     "rate_limit",
+		HTTPStatus: &status,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ok := true
+	if err := state.SavePublicStatus(paths, &schema.PublicStatusCache{
+		Source: api.PublicStatusSource,
+		Models: []schema.PublicStatusModelCache{{
+			ModelID: safeModel,
+			Latest:  &schema.PublicStatusSampleCache{OK: &ok, CheckedAt: now},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := Collect(paths, Filter{Since: now.Add(-time.Minute)}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Recent) != 1 || report.Recent[0].Model != safeModel || report.Recent[0].PublicMonitor == nil {
+		t.Fatalf("secret-shaped model correlation = %+v", report.Recent)
 	}
 }
 

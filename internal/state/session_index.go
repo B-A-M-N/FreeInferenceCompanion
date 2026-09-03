@@ -96,7 +96,7 @@ func UpdateSessionIndex(paths Paths, snap *schema.Snapshot) error {
 		Client:       secure.SafeField(snap.Client.Type),
 		SessionID:    snap.Session.ID,
 		SessionKey:   sessionKey(snap.Session.ID),
-		ModelID:      secure.SafeField(snap.Model.ID),
+		ModelID:      secure.SafeIdentifier(snap.Model.ID),
 		Status:       snap.Session.Status,
 		StartedAt:    snap.Session.StartedAt,
 		LastEventAt:  snap.Session.LastEventAt,

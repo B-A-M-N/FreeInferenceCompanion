@@ -34,7 +34,7 @@ func (a *CodexAdapter) ParseHookInput(r io.Reader) (*schema.CodexHookInput, erro
 
 // newCodexSnapshot builds a fresh snapshot for a newly seen Codex session.
 func newCodexSnapshot(sessionID, modelID, source string, now time.Time) *schema.Snapshot {
-	modelID = secure.SafeField(modelID)
+	modelID = secure.SafeIdentifier(modelID)
 	if modelID == "" {
 		modelID = "unknown"
 	}
@@ -96,7 +96,7 @@ func (a *CodexAdapter) HandleSessionStartWithTrace(input *schema.CodexHookInput,
 	}
 	now := time.Now().UTC()
 	provider := activation.ProviderInfo()
-	modelID := secure.SafeField(input.Model)
+	modelID := secure.SafeIdentifier(input.Model)
 	source := normalizeCodexStartSource(input.Source)
 	created := false
 	wasActive := false
@@ -364,7 +364,7 @@ func normalizeCodexStartSource(source string) string {
 }
 
 func observeCodexModel(snap *schema.Snapshot, rawModel, _ string, now time.Time) bool {
-	model := secure.SafeField(rawModel)
+	model := secure.SafeIdentifier(rawModel)
 	if snap == nil || model == "" {
 		return false
 	}
@@ -382,7 +382,7 @@ func codexInputModel(input *schema.CodexHookInput) string {
 	if input == nil {
 		return ""
 	}
-	return secure.SafeField(input.Model)
+	return secure.SafeIdentifier(input.Model)
 }
 
 func firstCodexInput(inputs []*schema.CodexHookInput) *schema.CodexHookInput {

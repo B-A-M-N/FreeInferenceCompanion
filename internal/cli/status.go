@@ -392,7 +392,7 @@ func statusJSON(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalState,
 
 	var modelID string
 	if model != "" {
-		modelID = secure.SafeField(model)
+		modelID = secure.SafeIdentifier(model)
 	}
 	var provName string
 	if providerName != "" {
@@ -431,7 +431,7 @@ func statusJSON(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalState,
 					continue
 				}
 				monitor := map[string]any{
-					"model":        secure.SafeField(metric.ModelID),
+					"model":        secure.SafeIdentifier(metric.ModelID),
 					"uptime_ratio": metric.UptimeRatio,
 				}
 				if metric.Latest != nil {

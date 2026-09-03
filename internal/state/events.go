@@ -120,7 +120,7 @@ func AppendEvent(paths Paths, clientType, sessionID string, ev Event) error {
 	// break terminal output when the log is later tailed.
 	ev.Client = secure.SafeField(ev.Client)
 	ev.SessionID = sessionKey(sessionID)
-	ev.Model = secure.SafeField(ev.Model)
+	ev.Model = secure.SafeIdentifier(ev.Model)
 	ev.Provider = secure.SafeField(ev.Provider)
 	ev.TransportClass = sanitizeEventField(ev.TransportClass)
 	ev.ProviderErrorType = sanitizeEventField(ev.ProviderErrorType)

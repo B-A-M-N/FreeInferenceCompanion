@@ -49,7 +49,7 @@ func cmdFailures(paths state.Paths, args []string, stdout, stderr io.Writer) int
 				return 2
 			}
 			i++
-			filter.Model = args[i]
+			filter.Model = secure.SafeIdentifier(args[i])
 		case "--since":
 			if i+1 >= len(args) {
 				fmt.Fprintln(stderr, "usage error: --since requires a value")

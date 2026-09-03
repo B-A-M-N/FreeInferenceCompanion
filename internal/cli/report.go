@@ -231,7 +231,7 @@ func buildReportSession(snap *schema.Snapshot, reveal bool) *reportSession {
 		ID:                displaySessionID(snap.Session.ID, reveal),
 		Status:            snap.Session.Status,
 		StartedAt:         snap.Session.StartedAt.UTC().Format(time.RFC3339),
-		Model:             secure.SafeField(snap.Model.ID),
+		Model:             secure.SafeIdentifier(snap.Model.ID),
 		Provider:          secure.SafeField(snap.Provider.Name),
 		ProviderConfirmed: snap.Provider.Confirmed,
 		PressureState:     snap.Pressure.State,
@@ -288,7 +288,7 @@ func buildReportModelMonitor(gs *schema.GlobalState, modelID string, now time.Ti
 		if metric.ModelID != modelID {
 			continue
 		}
-		monitor := &reportModelMonitor{Model: secure.SafeField(metric.ModelID), UptimeRatio: metric.UptimeRatio}
+		monitor := &reportModelMonitor{Model: secure.SafeIdentifier(metric.ModelID), UptimeRatio: metric.UptimeRatio}
 		if metric.Latest != nil {
 			monitor.OK = metric.Latest.OK
 			monitor.LatencyMs = metric.Latest.LatencyMs

@@ -121,7 +121,7 @@ func Collect(paths state.Paths, filter Filter, now time.Time) (*Report, error) {
 				if eventModel == "" {
 					eventModel = entry.ModelID
 				}
-				if eventModel != filter.Model {
+				if secure.SafeIdentifier(eventModel) != secure.SafeIdentifier(filter.Model) {
 					continue
 				}
 			}
@@ -129,7 +129,7 @@ func Collect(paths state.Paths, filter Filter, now time.Time) (*Report, error) {
 				At:                event.At.UTC(),
 				Client:            secure.SafeField(entry.Client),
 				SessionID:         secure.MaskSessionID(entry.SessionID),
-				Model:             secure.SafeField(event.Model),
+				Model:             secure.SafeIdentifier(event.Model),
 				Provider:          secure.SafeField(event.Provider),
 				Category:          secure.SafeField(event.Detail),
 				HTTPStatus:        event.HTTPStatus,
@@ -141,7 +141,7 @@ func Collect(paths state.Paths, filter Filter, now time.Time) (*Report, error) {
 				RequestReference:  secure.SafeField(event.RequestReference),
 			}
 			if incident.Model == "" {
-				incident.Model = secure.SafeField(entry.ModelID)
+				incident.Model = secure.SafeIdentifier(entry.ModelID)
 			}
 			if incident.Category == "" {
 				incident.Category = "unknown"
