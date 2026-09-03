@@ -34,7 +34,7 @@ can be changed with `freeinference config set reporting.level <level>`.
 ### Example output
 
 ```
-FreeInference Companion 0.1.0
+FreeInference Companion 0.1.1
 Session:  sess_abc123 (active)
 Client:   claude-code
 Provider: freeinference (source: FREEINFERENCE_API_KEY)

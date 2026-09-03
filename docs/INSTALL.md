@@ -11,7 +11,7 @@ along with `checksums.txt`. Set `VERSION` to the release you are installing
 and verify the exact archive before extracting it:
 
 ```bash
-VERSION=0.1.0
+VERSION=0.1.1
 PLATFORM=linux-amd64       # linux-arm64, darwin-amd64, or darwin-arm64
 ARCHIVE="freeinference-companion-${VERSION}-${PLATFORM}.tar.gz"
 

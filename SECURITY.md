@@ -36,11 +36,11 @@ Session identifiers are masked in normal output and hashed in event logs.
 - Catalog responses are bounded at 2 MiB, health responses at 1 MiB, error
   bodies at 64 KiB, and synthetic probe bodies at 1 MiB.
 
-There is no encryption at rest in v0.1.0 because the local state contains no
-credentials and an encryption key stored on the same machine would generally
-be available to an attacker who can read the cache directory. File ownership
-is the boundary; an OS keystore would be the appropriate next step if the
-companion ever needed to persist refresh tokens.
+There is no encryption at rest because the local state contains no credentials
+and an encryption key stored on the same machine would generally be available
+to an attacker who can read the cache directory. File ownership is the
+boundary; an OS keystore would be the appropriate next step if the companion
+ever needed to persist refresh tokens.
 
 `TestSecretNeverPersistsOrRenders` in `cmd/fi/security_test.go` walks persisted
 files and output paths as a regression guard against secret-shaped data

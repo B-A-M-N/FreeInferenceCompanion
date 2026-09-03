@@ -1,6 +1,6 @@
 {
   "name": "freeinference-companion",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "FreeInference observability for Claude Code: model health, session metrics, context pressure monitoring. Community-built and unofficial. Not affiliated with or endorsed by FreeInference.",
   "author": {
     "name": "b-a-m-n",
