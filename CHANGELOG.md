@@ -2,6 +2,19 @@
 
 All notable changes to FreeInference Companion are recorded here.
 
+## 0.1.1 — 2026-09-03
+
+Patch release following the first public release.
+
+### Fixed
+
+- Corrected the canonical GitHub repository URL in the installer default,
+  generated marketplace manifest, release documentation, SBOM, and provenance
+  metadata. The Go module import path remains unchanged.
+- Made the hosted-runner benchmark gate tolerant of transient filesystem
+  contention while retaining a conservative 20 ms CI ceiling for the local
+  hook and status-line paths.
+
 ## 0.1.0 — 2026-09-03
 
 First public stable release.

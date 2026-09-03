@@ -12,7 +12,7 @@ import (
 //
 // MVP rule: never claim medium or high confidence. The companion does not see the
 // full request body that the client sends, so authoritative accounting is not
-// possible in v0.1.0.
+// possible in the current release.
 type Projection struct {
 	// CurrentActiveTokens is the best local estimate of the active context.
 	CurrentActiveTokens int64

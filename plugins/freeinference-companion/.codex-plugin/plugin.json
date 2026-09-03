@@ -1,6 +1,6 @@
 {
   "name": "freeinference-companion",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "FreeInference Companion plugin for Codex: user-requested provider diagnostics, model discovery, and setup guidance. It is skill-only, never proxies inference traffic, and reports Codex context/cache measurements as unavailable. Community-built and unofficial. Not affiliated with or endorsed by FreeInference.",
   "author": {
     "name": "b-a-m-n",

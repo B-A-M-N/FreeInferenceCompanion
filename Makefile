@@ -3,7 +3,7 @@
 BINARY=freeinference
 BUILD_DIR=build
 # Development builds must not expose a commit hash as the product version.
-# Release jobs pass an explicit semver value (for example VERSION=v0.1.0).
+# Release jobs pass an explicit semver value (for example VERSION=v0.1.1).
 VERSION?=0.1.0-dev
 COMMIT?=$(shell git rev-parse HEAD 2>/dev/null || echo "dev")
 # Release tags conventionally include a leading "v", while the CLI and

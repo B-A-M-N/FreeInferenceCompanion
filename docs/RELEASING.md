@@ -41,7 +41,7 @@ the release-attestation process before publication), and confirm that the compat
 and security documents match the release. Never package a dirty tree or put
 credentials in a config fixture.
 
-## v0.1.0 publication sequence
+## v0.1.1 publication sequence
 
 The following is the exact operator sequence for a release from `master`.
 It is intentionally not run by repository automation or by this audit:
@@ -53,19 +53,19 @@ git pull --ff-only origin master
 git status --short --branch
 
 # Run the complete gate and produce the exact release artifacts locally.
-VERSION=v0.1.0 make release
+VERSION=v0.1.1 make release
 git diff --check
 (cd release && sha256sum -c checksums.txt)  # use shasum -a 256 on macOS
 
 # Review release/, CHANGELOG.md, and the unsigned provenance file.
-git tag -a v0.1.0 -m "Release FreeInference Companion v0.1.0"
-git push origin v0.1.0
+git tag -a v0.1.1 -m "Release FreeInference Companion v0.1.1"
+git push origin v0.1.1
 
 # The tag workflow creates a draft release and uploads release/*.
 gh run list --workflow ci.yml --limit 5
 gh run watch <release-build-run-id>
-gh release view v0.1.0
-gh release edit v0.1.0 --title "FreeInference Companion v0.1.0" \
+gh release view v0.1.1
+gh release edit v0.1.1 --title "FreeInference Companion v0.1.1" \
   --notes-file CHANGELOG.md --draft=false
 ```
 
