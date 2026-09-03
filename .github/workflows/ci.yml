@@ -279,7 +279,7 @@ jobs:
           set -euo pipefail
           for f in release/*.tar.gz; do
             echo "Checking $f"
-            tar tzf "$f" | head -5
+            tar tzf "$f" >/dev/null
           done
           # SBOM and provenance must be generated
           test -f release/sbom.spdx.json
