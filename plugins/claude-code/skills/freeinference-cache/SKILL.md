@@ -13,4 +13,3 @@ client-observed or heuristic. Missing cache fields are unknown, never zero.
 
 Cache classifications are evidence-based possibilities, not provider claims;
 the command cannot prove a server-side TTL or exact miss cause.
-

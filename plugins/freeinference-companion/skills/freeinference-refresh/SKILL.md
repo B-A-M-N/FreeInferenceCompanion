@@ -14,4 +14,3 @@ Run one only when the user explicitly requests it.
 Use `freeinference refresh --if-stale --json` to avoid unnecessary requests.
 `--force` intentionally bypasses freshness checks. Refreshes make bounded
 metadata/status requests but never send inference requests.
-

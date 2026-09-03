@@ -20,4 +20,3 @@ In Claude Code the slash command is:
 ```text
 /freeinference-companion:freeinference-status
 ```
-

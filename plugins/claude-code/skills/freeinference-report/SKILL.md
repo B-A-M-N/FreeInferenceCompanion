@@ -14,4 +14,3 @@ credentials, auth headers, repository contents, or raw error bodies.
 
 Review the output before sharing it. Session identifiers are masked by
 default; use `--session <id>` when the user explicitly selects a session.
-

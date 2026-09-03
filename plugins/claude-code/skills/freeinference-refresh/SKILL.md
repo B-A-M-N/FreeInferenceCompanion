@@ -15,4 +15,3 @@ Use `freeinference refresh --if-stale --json` to avoid unnecessary requests.
 `--force` intentionally bypasses freshness checks. Metadata refresh is bounded
 and coalesced, but still makes network requests; it does not send inference
 requests. `--worker public-status` is an unauthenticated status request.
-

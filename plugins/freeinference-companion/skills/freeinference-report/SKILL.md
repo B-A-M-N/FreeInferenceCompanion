@@ -15,4 +15,3 @@ reported as `unavailable`, not guessed.
 
 Review the output before sharing it. Session identifiers are masked by
 default.
-
