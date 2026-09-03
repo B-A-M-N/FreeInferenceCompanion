@@ -494,11 +494,11 @@ bench:
 	go test ./... -bench=. -benchmem -run=^$$
 
 # bench-ci enforces conservative average-latency ceilings for the hot paths.
-# Runs the real benchmarks with enough iterations to get reliable averages and
-# fails if either benchmark exceeds its ceiling. Go benchmarks report average
-# ns/op; this target intentionally makes no p95 claim.
+# Runs the real benchmarks for three seconds to get stable averages and fails
+# if either benchmark exceeds its ceiling. Go benchmarks report average ns/op;
+# this target intentionally makes no p95 claim.
 bench-ci:
-	@output=$$(go test ./internal/adapters/ -bench='BenchmarkStatusLineUpdate|BenchmarkUserPromptSubmitNoWarning' -benchtime=1s -count=1 -timeout 120s 2>&1); \
+	@output=$$(go test ./internal/adapters/ -bench='BenchmarkStatusLineUpdate|BenchmarkUserPromptSubmitNoWarning' -benchtime=3s -count=1 -timeout 120s 2>&1); \
 	echo "$$output"; \
 	if ! echo "$$output" | grep -q '^Benchmark'; then \
 		echo "error: bench-ci ran zero benchmarks — expected BenchmarkStatusLineUpdate and BenchmarkUserPromptSubmitNoWarning"; \
