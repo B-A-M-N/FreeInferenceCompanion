@@ -56,7 +56,7 @@ jobs:
         run: make security-scan
 
   plugin-validity:
-    name: Plugin manifests (schema + compatibility)
+    name: Plugin manifest compatibility (Claude ${{ matrix.claude_version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -304,7 +304,7 @@ jobs:
     name: Clean checkout release command (PR)
     needs:
       - lint-and-test
-      - plugin-validity
+      - plugin-validity-required
       - codex-runtime
     runs-on: ubuntu-latest
     steps:
@@ -331,7 +331,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - lint-and-test
-      - plugin-validity
+      - plugin-validity-required
       - codex-runtime
       - macos-runtime
       - build-static
@@ -395,7 +395,7 @@ jobs:
     name: Release (on tag)
     needs:
       - lint-and-test
-      - plugin-validity
+      - plugin-validity-required
       - build-static
       - cross-build
       - bench
