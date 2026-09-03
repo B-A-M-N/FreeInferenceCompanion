@@ -2,7 +2,9 @@
 
 BINARY=freeinference
 BUILD_DIR=build
-VERSION?=$(shell git describe --tags --always --dirty 2>/dev/null || echo "0.1.0-dev")
+# Development builds must not expose a commit hash as the product version.
+# Release jobs pass an explicit semver value (for example VERSION=v0.1.0).
+VERSION?=0.1.0-dev
 COMMIT?=$(shell git rev-parse HEAD 2>/dev/null || echo "dev")
 # Release tags conventionally include a leading "v", while the CLI and
 # manifests expose canonical semantic versions without it.
@@ -88,7 +90,7 @@ checksums:
 #
 # Plugin bundles (zip) preserve the vendor's expected layout:
 #   .claude-plugin/plugin.json, hooks/, scripts/, skills/, bin/<plat>/freeinference
-#   .codex-plugin/plugin.json, skills/
+#   .codex-plugin/plugin.json, skills/ (skill-only; no bundled executable)
 # The version is patched only on the staged copy; source manifests are
 # never mutated.
 package: build-all
@@ -166,8 +168,6 @@ package: build-all
 		> "$$stage_codex/.codex-plugin/plugin.json"; \
 	cp -R plugins/freeinference-companion/skills \
 		"$$stage_codex/"; \
-	mkdir -p "$$stage_codex/bin"; \
-	for p in $(PLATFORMS); do mkdir -p "$$stage_codex/bin/$$p"; install -m 0755 "$(BUILD_DIR)/$(BINARY)-$$p" "$$stage_codex/bin/$$p/$(BINARY)"; done; \
 	find "$$stage_codex" -exec touch -h -d "@$$epoch" {} +; \
 	(cd "$$stage_codex" && find . -type f -print | LC_ALL=C sort | zip -q -X -@ "$(CURDIR)/$(RELEASE_DIR)/freeinference-companion-codex_$$REL_VERSION.zip") && \
 	echo "packaged Codex plugin bundle"; \
@@ -310,6 +310,7 @@ package-smoke: package
 		test -f "$$edir/.codex-plugin/plugin.json" || { echo "FAIL: $$(basename $$z) missing .codex-plugin/plugin.json"; exit 1; }; \
 		python3 -c "import json,sys; assert json.load(open(sys.argv[1]))['version'] == sys.argv[2], 'Codex plugin version mismatch'" "$$edir/.codex-plugin/plugin.json" "$$REL_VERSION"; \
 		test -d "$$edir/skills" || { echo "FAIL: $$(basename $$z) missing skills/"; exit 1; }; \
+		test ! -d "$$edir/bin" || { echo "FAIL: $$(basename $$z) unexpectedly contains a binary directory"; exit 1; }; \
 		test ! -d "$$edir/hooks" || { echo "FAIL: $$(basename $$z) unexpectedly contains Codex hooks"; exit 1; }; \
 		test ! -d "$$edir/scripts" || { echo "FAIL: $$(basename $$z) unexpectedly contains Codex scripts"; exit 1; }; \
 		echo "archive OK: $$(basename $$z)"; \
@@ -381,8 +382,8 @@ vet:
 lint: vet staticcheck
 
 # staticcheck is pinned so the release gate is reproducible across runners.
-# The Go module uses semantic tags (v0.7.0), while the binary reports the
-# calendar release as 2026.1.
+# The release version is injected explicitly by release jobs; development
+# builds use the stable `0.1.0-dev` fallback above.
 staticcheck:
 	@STATICCHECK_VERSION=v0.7.0; \
 	bin="$$(go env GOBIN)"; \

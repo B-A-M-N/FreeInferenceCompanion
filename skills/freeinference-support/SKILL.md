@@ -80,7 +80,8 @@ Pressure:   <healthy / watch / warn / critical>
 - Model name and provider name
 - Context usage percentages (not raw prompt data)
 - Pressure state
-- Error messages and stack traces
+- Sanitized diagnostic categories and bounded error details where the command
+  exposes them
 - File path existence checks (not file contents)
 - Cache directory size and writability
 

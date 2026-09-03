@@ -23,7 +23,7 @@ and plugin setup, see [Codex with FreeInference](codex.md).
 | `freeinference context [--session <id>]` | Show context pressure |
 | `freeinference cache [--session <id>]` | Show cache pattern classification and diagnoses |
 | `freeinference refresh [--force] [--if-stale --detach] [--worker <name>]` | Refresh provider metadata and public status |
-| `freeinference hook <client> <event>` | Process a lifecycle hook event; used by plugins |
+| `freeinference hook <client> <event>` | Process a lifecycle hook event; used by the Claude integration (Codex marketplace plugin is skill-only) |
 | `freeinference status-line install\|uninstall` | Manage the composing Claude status line |
 | `freeinference codex-footer install\|uninstall\|status` | Manage Codex's native footer settings |
 

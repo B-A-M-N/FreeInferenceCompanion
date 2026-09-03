@@ -55,6 +55,12 @@ codex plugin add freeinference-companion@freeinference-companion
 codex plugin list --json
 ```
 
+That installs the Companion skills, not a second Codex runtime. To configure
+Codex itself to use FreeInference, follow [Codex with
+FreeInference](codex.md), which covers the OpenAI-compatible `/v1` endpoint,
+the environment credential, `wire_api = "responses"`, model profiles, and the
+optional trace-header mapping.
+
 The plugin contributes diagnostic skills only. It does not install lifecycle
 hooks, proxy inference traffic, or make background API requests by default.
 Use `FI_AUTO_REFRESH=1` only when you explicitly want stale metadata refresh;

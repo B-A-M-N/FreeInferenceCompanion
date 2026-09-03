@@ -8,13 +8,18 @@
 Local observability and diagnostics for [FreeInference](https://freeinference.org/)
 users of Claude Code and Codex.
 
-FreeInference Companion records the lifecycle and status data the client
-already exposes, then turns that data into useful local diagnostics.
+FreeInference Companion turns the lifecycle and status data exposed by Claude
+Code, plus explicit local diagnostics requested from Codex, into useful local
+diagnostics. Claude uses local lifecycle hooks; the Codex plugin is skill-only.
 
-![FreeInference Companion terminal example](docs/images/status-example.svg)
+<p align="center">
+  <img src="docs/images/claude-code-companion.svg" alt="Claude Code showing FreeInference Companion local context and cache diagnostics" width="49%">
+  <img src="docs/images/codex-companion.svg" alt="Codex showing the enabled FreeInference Companion plugin and honest unavailable telemetry" width="49%">
+</p>
 
-*Illustrative terminal output. Values are local observations, not an
-additional provider request.*
+*Real output captured from isolated tmux runs of the shipped binary and native
+plugin flow. The displayed telemetry uses a local test payload; no inference
+request was made.*
 
 > **Trust boundary — local companion only.** No prompt interception. No
 > transcript collection. No proxying. No automatic failover. No daemon.
@@ -36,9 +41,24 @@ verified FreeInference Codex        native Codex footer + local diagnostics
 ```
 
 Codex keeps ownership of its native footer and does not expose the same live
-context and cache fields as Claude Code. Its Companion plugin records bounded
-lifecycle state and provides diagnostic commands and skills; unavailable
-values remain unavailable instead of being guessed.
+context and cache fields as Claude Code. Its Companion plugin is skill-only:
+it provides user-requested diagnostic commands and setup guidance; it does not
+install lifecycle hooks. Unavailable values remain unavailable instead of
+being guessed.
+
+The important diagnostics are surfaced inside the native clients as skills:
+
+- Claude Code: `/freeinference-companion:freeinference-status`,
+  `/freeinference-companion:freeinference-models`,
+  `/freeinference-companion:freeinference-doctor`,
+  `/freeinference-companion:freeinference-report`, and
+  `/freeinference-companion:freeinference-cache`.
+- Codex: `$freeinference-status`, `$freeinference-models`,
+  `$freeinference-doctor`, `$freeinference-report`, and
+  `$freeinference-cache`.
+
+These native skills are command guidance and discovery surfaces; the
+underlying CLI remains available for scripts and terminal use.
 
 ## Why I made it
 
@@ -114,7 +134,8 @@ Keep API keys in the environment or a secrets manager, never in a config file.
 
 The Companion is deliberately outside the inference path. It:
 
-- records bounded lifecycle events and client-provided status metrics locally;
+- records bounded Claude lifecycle events and client-provided status metrics
+  locally; Codex state is available only through explicit CLI/skill commands;
 - shows context pressure and rolling cache-pattern diagnostics where the
   client exposes enough information;
 - keeps provider metadata and public-status results cached and timestamped;
@@ -215,6 +236,7 @@ it.
 | Cache diagnostics | [Classifications and limits](docs/CACHE_DIAGNOSTICS.md) |
 | Security model | [Security and vulnerability reporting](SECURITY.md) |
 | Development and release | [Development](docs/DEVELOPMENT.md) · [Releasing](docs/RELEASING.md) |
+| Release history | [CHANGELOG](CHANGELOG.md) |
 
 ## Useful commands
 

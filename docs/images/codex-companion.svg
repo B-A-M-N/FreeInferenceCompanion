@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="570" viewBox="0 0 1200 570" role="img" aria-labelledby="title desc">
+  <title id="title">Codex with FreeInference Companion</title>
+  <desc id="desc">Actual Codex marketplace installation and FreeInference Companion diagnostics showing the plugin enabled, provider confirmed, and unsupported context telemetry reported as unavailable.</desc>
+  <rect width="1200" height="570" rx="14" fill="#10151c"/>
+  <rect width="1200" height="46" rx="14" fill="#1b232d"/>
+  <rect y="32" width="1200" height="14" fill="#1b232d"/>
+  <circle cx="28" cy="23" r="7" fill="#d06b6b"/>
+  <circle cx="53" cy="23" r="7" fill="#d2a85a"/>
+  <circle cx="78" cy="23" r="7" fill="#6eaa7a"/>
+  <text x="108" y="29" fill="#a6b2c0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16">Codex · FreeInference Companion marketplace plugin</text>
+  <text x="36" y="88" fill="#83b8ff" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17">$ codex plugin list --json</text>
+  <text x="36" y="124" fill="#d8dee7" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17">pluginId:  freeinference-companion@freeinference-companion</text>
+  <text x="36" y="151" fill="#d8dee7" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17">version:   0.1.0     enabled: true</text>
+  <text x="36" y="196" fill="#83b8ff" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17">$ freeinference status --client codex --level standard</text>
+  <text x="36" y="232" fill="#f1f4f8" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="21">FREEINFERENCE glm-5.1</text>
+  <text x="36" y="265" fill="#d8dee7" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17">• Provider       confirmed</text>
+  <text x="36" y="292" fill="#d8dee7" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17">• Context        unknown</text>
+  <text x="36" y="319" fill="#d8dee7" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17">• Cache read     unknown</text>
+  <text x="36" y="346" fill="#d8dee7" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17">• Last failure   none</text>
+  <text x="36" y="391" fill="#83b8ff" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17">$ freeinference context --client codex --json</text>
+  <text x="36" y="427" fill="#d8dee7" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17">Context:    unavailable</text>
+  <text x="36" y="454" fill="#d8dee7" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17">Suggestion: Codex does not expose live token or context telemetry.</text>
+  <text x="36" y="522" fill="#7f8b99" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14">Captured from the actual Codex CLI/plugin install and local diagnostics in isolated tmux sessions; no inference request was made.</text>
+</svg>

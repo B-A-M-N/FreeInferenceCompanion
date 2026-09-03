@@ -105,10 +105,11 @@ Claude Code configuration, not a Codex profile.
 
 The companion plugin is separate from the model-provider configuration above.
 It is intentionally skill-only: it provides user-requested provider
-diagnostics and model-discovery guidance without installing lifecycle hooks,
-proxying prompts, rewriting requests, or adding inference calls. Metadata
-refresh is disabled by default; `FI_AUTO_REFRESH=1` is an explicit opt-in for
-throttled, detached refresh work.
+diagnostics, model-discovery guidance, and setup help without installing
+lifecycle hooks, proxying prompts, rewriting requests, or adding inference
+calls. Metadata refresh is disabled by default; `FI_AUTO_REFRESH=1` is an
+explicit opt-in for throttled, detached refresh work from the CLI's supported
+lifecycle paths (Codex itself does not install those hooks).
 
 Install it through Codex's supported marketplace flow:
 
@@ -146,7 +147,7 @@ It makes only an unauthenticated GET to `https://status.freeinference.org/api/st
 
 Codex provider/session boundaries are intentional:
 
-- Supported: local lifecycle/session recording, provider configuration
+- Supported: explicit local session inspection, provider configuration
   diagnostics, model discovery, native Codex footer configuration, `doctor`,
   `dashboard`, and public `fi-status`.
 - Unsupported: live context percentage, cache read/write counts, and
@@ -175,14 +176,16 @@ already has a different `X-Session-ID` mapping, the launcher starts Codex
 normally and does not replace that mapping.
 
 
-After installation, these skills are available:
+After installation, these skills are available in the Codex TUI:
 
+- `$freeinference` (router and full reference)
 - `$freeinference-status`
 - `$freeinference-models`
 - `$freeinference-doctor`
 - `$freeinference-report`
-- `$freeinference-dashboard`
 - `$freeinference-cache`
+- `$freeinference-sessions`
+- `$freeinference-refresh`
 
 Codex does not expose an arbitrary script-backed FreeInference status line,
 live context-window counts, or cache-token metrics through this package.
