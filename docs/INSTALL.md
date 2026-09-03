@@ -31,9 +31,12 @@ install -m 755 "freeinference-companion-${VERSION}-${PLATFORM}/freeinference" "$
 Ensure `$HOME/.local/bin` is on `PATH`, then run:
 
 ```bash
-freeinference doctor
 freeinference status
 ```
+
+`freeinference doctor` is optional. It performs bounded local checks and may
+contact configured metadata/health endpoints, but it does not send an
+inference request unless `--probe --model <name>` is explicitly supplied.
 
 The combined platform ZIP contains the Claude Code plugin tree. Codex is
 installed separately through its native marketplace manager. The CLI installer

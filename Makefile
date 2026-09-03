@@ -10,6 +10,12 @@ COMMIT?=$(shell git rev-parse HEAD 2>/dev/null || echo "dev")
 # manifests expose canonical semantic versions without it.
 BUILD_VERSION=$(patsubst v%,%,$(VERSION))
 
+# The binary embeds its release commit through LDFLAGS. Disable automatic VCS
+# stamping so tests and helper builds also work from linked worktrees and other
+# source distributions where Go cannot query repository metadata reliably.
+GOFLAGS+=-buildvcs=false
+export GOFLAGS
+
 # Reproducible builds: set SOURCE_DATE_EPOCH from the latest commit
 # so archive timestamps are deterministic. Override via environment.
 SOURCE_DATE_EPOCH ?= $(shell git log -1 --format=%ct 2>/dev/null || echo "")
@@ -116,9 +122,8 @@ package: build-all
 		stage_dir="$$staging/$$archive_name"; \
 		mkdir -p "$$stage_dir"; \
 		install -m 0755 $(BUILD_DIR)/$(BINARY)-$$p "$$stage_dir/$(BINARY)"; \
-		cp LICENSE README.md "$$stage_dir/"; \
-		mkdir -p "$$stage_dir/docs/images"; \
-		cp docs/images/*.svg "$$stage_dir/docs/images/"; \
+		cp LICENSE SECURITY.md CHANGELOG.md README.md "$$stage_dir/"; \
+		cp -R docs "$$stage_dir/"; \
 		archive="$(CURDIR)/$(RELEASE_DIR)/$$archive_name.tar.gz"; \
 		if tar --version 2>/dev/null | grep -q 'GNU tar'; then \
 			tar --sort=name --mtime="@$$epoch" --owner=0 --group=0 --numeric-owner --use-compress-program='gzip -n' -cf "$$archive" -C "$$staging" "$$archive_name"; \
@@ -174,7 +179,7 @@ package: build-all
 	(cd "$$stage_codex" && find . -type f -print | LC_ALL=C sort | zip -q -X -@ "$(CURDIR)/$(RELEASE_DIR)/freeinference-companion-codex_$$REL_VERSION.zip") && \
 	echo "packaged Codex plugin bundle"; \
 	\
-	cp LICENSE README.md $(RELEASE_DIR)/; \
+	cp LICENSE SECURITY.md CHANGELOG.md README.md $(RELEASE_DIR)/; \
 	$(MAKE) sbom RELEASE_DIR=$(RELEASE_DIR) VERSION=$(VERSION) STAGE_DIR="$$staging" && \
 	$(MAKE) marketplace RELEASE_DIR=$(RELEASE_DIR) VERSION=$(VERSION) && \
 	$(MAKE) provenance RELEASE_DIR=$(RELEASE_DIR) VERSION=$(VERSION) COMMIT=$(COMMIT) STAGE_DIR="$$staging" && \
@@ -262,11 +267,12 @@ package-smoke: package
 		if [ ! -x "$$extract/$$archive_name/$(BINARY)" ]; then \
 			echo "FAIL: $$p archive $(BINARY) not executable"; exit 1; \
 		fi; \
-		if [ ! -f "$$extract/$$archive_name/README.md" ] || [ ! -f "$$extract/$$archive_name/LICENSE" ]; then \
-			echo "FAIL: $$p archive missing README.md or LICENSE"; exit 1; \
+		if [ ! -f "$$extract/$$archive_name/README.md" ] || [ ! -f "$$extract/$$archive_name/LICENSE" ] || [ ! -f "$$extract/$$archive_name/SECURITY.md" ] || [ ! -f "$$extract/$$archive_name/CHANGELOG.md" ]; then \
+			echo "FAIL: $$p archive missing release documentation"; exit 1; \
 		fi; \
-		test -f "$$extract/$$archive_name/docs/images/claude-code-companion.svg" || { echo "FAIL: $$p archive missing Claude screenshot"; exit 1; }; \
-		test -f "$$extract/$$archive_name/docs/images/codex-companion.svg" || { echo "FAIL: $$p archive missing Codex screenshot"; exit 1; }; \
+		test -f "$$extract/$$archive_name/docs/INSTALL.md" || { echo "FAIL: $$p archive missing installation documentation"; exit 1; }; \
+		test -f "$$extract/$$archive_name/docs/images/claude-code-native.png" || { echo "FAIL: $$p archive missing Claude native screenshot"; exit 1; }; \
+		test -f "$$extract/$$archive_name/docs/images/codex-native.png" || { echo "FAIL: $$p archive missing Codex native screenshot"; exit 1; }; \
 		echo "archive OK: $$p"; \
 		installer="$(RELEASE_DIR)/$$archive_name.zip"; \
 		test -f "$$installer" || { echo "FAIL: $$p installer archive missing: $$installer"; exit 1; }; \
