@@ -60,6 +60,30 @@ func TestRedactLeavesBenignTextAlone(t *testing.T) {
 	}
 }
 
+func TestSafeFieldRedactsAfterSanitizing(t *testing.T) {
+	in := "model\x1b[31m\r\n\t=hyi-secret-key-abcdef0123456789"
+	out := SafeField(in)
+	if strings.Contains(out, "hyi-secret-key-abcdef0123456789") {
+		t.Fatalf("secret-shaped field leaked: %q", out)
+	}
+	if strings.ContainsAny(out, "\x1b\n\r\t") {
+		t.Fatalf("control character leaked: %q", out)
+	}
+}
+
+func TestSafeIdentifierPreservesSecretShapedIdentity(t *testing.T) {
+	first := SafeIdentifier("hyi-model-alpha-abcdef0123456789")
+	second := SafeIdentifier("hyi-model-beta-abcdef0123456789")
+	if first == second {
+		t.Fatalf("distinct secret-shaped identifiers collapsed to %q", first)
+	}
+	for _, got := range []string{first, second} {
+		if strings.Contains(got, "hyi-model-") || !strings.HasPrefix(got, RedactedPlaceholder+"-") {
+			t.Fatalf("unsafe identifier representation = %q", got)
+		}
+	}
+}
+
 func TestLooksLikeSecret(t *testing.T) {
 	cases := map[string]bool{
 		"":                     false,

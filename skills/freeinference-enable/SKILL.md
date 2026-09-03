@@ -25,7 +25,7 @@ Look for a `disabled` field or similar indicator in the output. If the companion
 To temporarily stop the companion:
 
 1. Confirm with the user that they want to disable it.
-2. Run the disable command (e.g., `freeinference disable` or `freeinference config set companion.disabled true`).
+2. Run `freeinference companion disable`.
 3. Verify the change took effect by running `freeinference status --json` — it should show disabled or return minimal output.
 
 ### Enable the companion
@@ -33,7 +33,7 @@ To temporarily stop the companion:
 To resume the companion:
 
 1. Confirm with the user that they want to enable it.
-2. Run the enable command (e.g., `freeinference enable` or `freeinference config set companion.disabled false`).
+2. Run `freeinference companion enable`.
 3. Verify integration health after the change:
 
 ```bash
@@ -63,7 +63,7 @@ freeinference status --json
 
 User: "Resume FreeInference"
 Agent: "Enabling the companion..."
-freeinference enable
+freeinference companion enable
 freeinference doctor --json
 "Companion is running. All checks passed."
 ```
@@ -87,5 +87,7 @@ When enabled:
 ### Notes
 
 - Disabling the companion does not affect the underlying FreeInference API usage. Model calls continue normally.
-- If `freeinference disable` / `freeinference enable` commands are not yet implemented, the setting can be toggled via `freeinference config set companion.disabled true/false`.
+- `companion disable` writes a persistent local marker; `companion enable`
+  removes it. `FI_DISABLED=1` remains a process-level opt-out and takes
+  precedence over the persistent marker.
 - After enabling, the first few minutes may show cold cache — this is normal.

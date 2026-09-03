@@ -551,7 +551,7 @@ func buildTestBinary(t *testing.T) string {
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "freeinference")
 	modRoot := filepath.Dir(pluginRoot())
-	cmd := exec.Command("go", "build", "-o", bin, filepath.Join(modRoot, "cmd", "fi"))
+	cmd := exec.Command("go", "build", "-buildvcs=false", "-o", bin, filepath.Join(modRoot, "cmd", "fi"))
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("build freeinference: %v", err)
@@ -676,7 +676,7 @@ func TestClaudeCodeHookCreatesSessionState(t *testing.T) {
 
 func TestCodexPluginIsSkillOnly(t *testing.T) {
 	plug := pluginDir("freeinference-companion")
-	for _, name := range []string{"hooks", "scripts"} {
+	for _, name := range []string{"hooks", "scripts", "bin"} {
 		if _, err := os.Stat(filepath.Join(plug, name)); !os.IsNotExist(err) {
 			t.Errorf("Codex skill-only plugin unexpectedly contains %s: %v", name, err)
 		}
@@ -703,6 +703,35 @@ func runFI(t *testing.T, binary, home, cacheDir string, args ...string) (stdout,
 	return "", "", -1
 }
 
+func requiredSkillNames() []string {
+	return []string{
+		"freeinference",
+		"freeinference-status",
+		"freeinference-models",
+		"freeinference-doctor",
+		"freeinference-report",
+		"freeinference-cache",
+		"freeinference-sessions",
+		"freeinference-refresh",
+	}
+}
+
+func assertRequiredSkills(t *testing.T, client string, skillNames []string) {
+	t.Helper()
+	for _, required := range requiredSkillNames() {
+		found := false
+		for _, name := range skillNames {
+			if name == required {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected native %s skill %q, got: %v", client, required, skillNames)
+		}
+	}
+}
+
 func TestClaudeCodeSkillsInventory(t *testing.T) {
 	skillsDir := filepath.Join(pluginDir("claude-code"), "skills")
 	entries, err := os.ReadDir(skillsDir)
@@ -715,16 +744,9 @@ func TestClaudeCodeSkillsInventory(t *testing.T) {
 			skillNames = append(skillNames, e.Name())
 		}
 	}
-	// Verify the router skill exists.
-	hasRouter := false
-	for _, name := range skillNames {
-		if name == "freeinference" {
-			hasRouter = true
-		}
-	}
-	if !hasRouter {
-		t.Errorf("expected router skill 'freeinference' in Claude skills, got: %v", skillNames)
-	}
+	// Verify the router and high-value diagnostic surfaces are directly
+	// discoverable from the native Claude Code skill picker.
+	assertRequiredSkills(t, "Claude", skillNames)
 	// The public fi-status skill is intentionally namespaced by Claude Code;
 	// older unnamespaced aliases are not part of the plugin.
 	for _, name := range skillNames {
@@ -746,15 +768,7 @@ func TestCodexSkillsInventory(t *testing.T) {
 			skillNames = append(skillNames, e.Name())
 		}
 	}
-	hasRouter := false
-	for _, name := range skillNames {
-		if name == "freeinference" {
-			hasRouter = true
-		}
-	}
-	if !hasRouter {
-		t.Errorf("expected router skill 'freeinference' in Codex skills, got: %v", skillNames)
-	}
+	assertRequiredSkills(t, "Codex", skillNames)
 	for _, name := range skillNames {
 		if strings.HasPrefix(name, "fi-") && name != "fi-status" {
 			t.Errorf("old fi-* skill still present: %s — should be removed", name)

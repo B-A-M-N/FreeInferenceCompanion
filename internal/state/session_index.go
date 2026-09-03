@@ -93,10 +93,10 @@ func UpdateSessionIndex(paths Paths, snap *schema.Snapshot) error {
 	}
 
 	entry := SessionIndexEntry{
-		Client:       secure.SanitizeField(snap.Client.Type),
+		Client:       secure.SafeField(snap.Client.Type),
 		SessionID:    snap.Session.ID,
 		SessionKey:   sessionKey(snap.Session.ID),
-		ModelID:      secure.SanitizeField(snap.Model.ID),
+		ModelID:      secure.SafeIdentifier(snap.Model.ID),
 		Status:       snap.Session.Status,
 		StartedAt:    snap.Session.StartedAt,
 		LastEventAt:  snap.Session.LastEventAt,

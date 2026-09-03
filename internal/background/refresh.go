@@ -432,8 +432,8 @@ func (r *Refresher) refreshModels(result *RefreshResult, now time.Time) {
 	catalog := make([]schema.CatalogModel, 0, len(models))
 	for _, m := range models {
 		catalog = append(catalog, schema.CatalogModel{
-			ID:              secure.SanitizeField(m.ID),
-			Name:            secure.SanitizeField(m.Name),
+			ID:              secure.SafeIdentifier(m.ID),
+			Name:            secure.SafeField(m.Name),
 			ContextLength:   m.ContextLength,
 			MaxOutputLength: m.MaxOutputLength,
 			AccessState:     schema.AccessUnknown,
@@ -565,7 +565,7 @@ func publicStatusCache(status *api.PublicStatusResponse, now time.Time) (*schema
 			continue
 		}
 		entry := schema.PublicStatusModelCache{
-			ModelID:     secure.SanitizeField(model.ModelID),
+			ModelID:     secure.SafeIdentifier(model.ModelID),
 			UptimeRatio: model.UptimeRatio,
 		}
 		if model.Latest != nil {
@@ -881,7 +881,7 @@ func sanitizeCatalogStrings(values []string, max int) []string {
 	}
 	result := make([]string, 0, len(values))
 	for _, value := range values {
-		clean := secure.SanitizeField(value)
+		clean := secure.SafeField(value)
 		if clean != "" {
 			result = append(result, clean)
 		}
@@ -899,8 +899,8 @@ func sanitizeCatalogPricing(values map[string]string) map[string]string {
 		if count == schema.MaxCatalogPricing {
 			break
 		}
-		key = secure.SanitizeField(key)
-		value = secure.Redact(secure.SanitizeField(value))
+		key = secure.SafeField(key)
+		value = secure.SafeField(value)
 		if key == "" {
 			continue
 		}

@@ -42,8 +42,11 @@ func TestSecretNeverPersistsOrRenders(t *testing.T) {
 	statusPayload := map[string]any{
 		"session_id":      "secret-test",
 		"transcript_path": "/home/user/" + bearerKey + "/file.txt",
-		"model":           map[string]any{"id": "glm-5.1", "display_name": "Display " + bearerKey},
-		"context_window":  map[string]any{"total_input_tokens": 168000, "total_output_tokens": 2000, "context_window_size": 200000, "used_percentage": 84.0},
+		// Model and display-name fields are client-controlled. Even though these
+		// are not expected to contain credentials, the persistence boundary must
+		// redact secret-shaped values if a malformed client sends them.
+		"model":          map[string]any{"id": apiKey, "display_name": "Display " + bearerKey},
+		"context_window": map[string]any{"total_input_tokens": 168000, "total_output_tokens": 2000, "context_window_size": 200000, "used_percentage": 84.0},
 	}
 	statusJSON, _ := json.Marshal(statusPayload)
 	var stdout bytes.Buffer

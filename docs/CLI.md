@@ -8,24 +8,35 @@ and plugin setup, see [Codex with FreeInference](codex.md).
 
 | Command | Description |
 | --- | --- |
-| `freeinference status [--compact\|--level summary\|standard\|detailed] [--client <type>] [--session <id>]` | Show session metrics at the requested detail |
-| `freeinference sessions` | List known sessions from the local index |
-| `freeinference snapshot --json [--session <id>]` | Print a machine-readable normalized view |
-| `freeinference render --mode line\|standard\|expanded [--session <id>]` | Render a stable panel or footer view |
-| `freeinference models [--model <name>] [--refresh]` | List the cached model catalog; `--refresh` updates only models |
-| `freeinference doctor [--probe --model <name>]` | Diagnose configuration and connectivity; probes are manual |
-| `freeinference report [--client <type>] [--session <id>] [--format markdown\|json]` | Generate a sanitized support report |
-| `freeinference failures [--client <type>] [--session <id>] [--model <name>] [--since <duration>] [--json]` | Aggregate retained local failure incidents |
-| `freeinference dashboard [--status] [--print-url]` | Open the account dashboard or public status page |
-| `freeinference fi-status [--json] [--problems\|--down] [--details]` | Fetch unauthenticated public service status |
-| `freeinference run claude\|codex [args...]` | Launch a verified client with optional per-process trace correlation |
-| `freeinference trace [setup\|uninstall] [codex] [--json]` | Inspect or manage reversible trace setup |
-| `freeinference context [--session <id>]` | Show context pressure |
-| `freeinference cache [--session <id>]` | Show cache pattern classification and diagnoses |
-| `freeinference refresh [--force] [--if-stale --detach] [--worker <name>]` | Refresh provider metadata and public status |
-| `freeinference hook <client> <event>` | Process a lifecycle hook event; used by plugins |
-| `freeinference status-line install\|uninstall` | Manage the composing Claude status line |
-| `freeinference codex-footer install\|uninstall\|status` | Manage Codex's native footer settings |
+| `freeinference status [--compact\|--level summary\|standard\|detailed] [--client <type>] [--session <id>] [--json]` | Show local session metrics at the requested detail; no network request |
+| `freeinference sessions [--include-identifiers] [--json]` | List locally retained sessions |
+| `freeinference snapshot --json [--client <type>] [--session <id>]` | Print a machine-readable local session view |
+| `freeinference render --mode line\|standard\|expanded [--client <type>] [--session <id>]` | Render a local panel or footer view |
+| `freeinference context [--client <type>] [--session <id>]` | Show local context pressure; Codex reports unavailable |
+| `freeinference cache [--client <type>] [--session <id>] [--json]` | Show local cache classification; Codex reports unavailable |
+| `freeinference report [--client <type>] [--session <id>] [--format markdown\|json]` | Generate a sanitized local support report |
+| `freeinference failures [--client <type>] [--session <id>] [--model <name>] [--since <duration\|timestamp>] [--json]` | Aggregate retained local failure incidents |
+| `freeinference models [--model <name>] [--refresh]` | List the cached model catalog; `--refresh` makes one catalog request |
+| `freeinference doctor [--json] [--probe --model <name>]` | Run local checks and, when active, one bounded catalog request; `--probe` adds one explicit synthetic inference request |
+| `freeinference refresh [--force\|--if-stale] [--detach] [--worker <name>] [--json]` | Explicitly refresh selected metadata/status caches; never inference |
+| `freeinference fi-status [--json] [--problems\|--down] [--details] [--fail-degraded]` | Make one unauthenticated public-status request |
+| `freeinference dashboard [--account\|--status] [--print-url]` | Open or print a dashboard URL; the browser makes any resulting request |
+| `freeinference run claude\|codex [args...]` | Explicitly launch a client with optional per-process trace correlation |
+| `freeinference trace [status\|setup\|uninstall] [--client claude-code\|codex] [--json]` | Inspect or manage reversible trace setup |
+| `freeinference status-line install\|uninstall\|status` | Manage Claude's local status-line wrapper |
+| `freeinference codex-footer install\|uninstall\|status` | Manage Codex's local native footer settings |
+| `freeinference install [options]` / `update [options]` | Download and install or update a release bundle |
+| `freeinference uninstall` | Remove installer-owned files while preserving local history |
+| `freeinference config show\|set\|reset\|path` | Manage local Companion configuration |
+| `freeinference companion status\|enable\|disable` | Inspect or change the local Companion kill switch |
+| `freeinference hook <client> <event>` | Process a Claude Code or Codex lifecycle event; hooks are fail-open and local-only |
+| `freeinference version [--json]` | Show binary and state-schema version information |
+
+The `--refresh` options and `refresh` command are explicit network operations.
+They are not part of ordinary hooks, status rendering, plugin installation, or
+Codex skill installation. `doctor --probe --model <name>` is the only normal
+command path that intentionally sends a synthetic inference request, and it
+must be requested explicitly.
 
 ## Environment
 

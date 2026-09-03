@@ -167,8 +167,22 @@ func cmdStatus(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 		return 1
 	}
 	if resolved == nil {
+		// Codex's marketplace integration is intentionally skill-only: it does
+		// not receive lifecycle events from Codex, so a fresh Codex process can
+		// have verified provider configuration without a Companion snapshot.
+		// Show that configuration boundary explicitly instead of reducing it to
+		// the unhelpful generic "no session" response. This is configuration
+		// evidence, not a fabricated session or telemetry record.
+		if clientType == schema.ClientCodex && activation.Active && !historical {
+			if jsonOut {
+				codexConfiguredStatusJSON(stdout, activation)
+				return 0
+			}
+			printCodexConfiguredStatus(stdout, activation, level)
+			return 0
+		}
 		if jsonOut {
-			statusJSON(stdout, nil, loadGlobal(paths), reveal, "", nil, "", "", "", "")
+			statusJSON(stdout, nil, loadGlobal(paths), reveal, "", nil, clientType, "", "", "")
 			return 0
 		}
 		fmt.Fprintln(stdout, "FI: no session")
@@ -225,6 +239,68 @@ func cmdStatus(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 		fmt.Fprintln(stdout, rendered)
 	}
 	return 0
+}
+
+// printCodexConfiguredStatus reports the useful Codex state that can be
+// established before a lifecycle snapshot exists. Codex owns its TUI footer
+// and does not expose Claude-equivalent context/cache telemetry to this
+// companion, so unsupported fields remain explicitly unavailable.
+func printCodexConfiguredStatus(stdout io.Writer, activation runtime.Activation, level string) {
+	provider := activation.ProviderInfo()
+	selection := secure.SafeField(activation.Evidence.ProviderID)
+	if selection == "" {
+		selection = "unknown"
+	}
+	selectionSource := secure.SafeField(activation.Evidence.ProviderSelectionSource)
+	if selectionSource == "" {
+		selectionSource = "unknown"
+	}
+
+	if level == "summary" {
+		fmt.Fprintf(stdout, "FI codex | provider %s | context unavailable | cache unavailable\n", secure.SafeField(provider.Name))
+		return
+	}
+
+	fmt.Fprintf(stdout, "FreeInference Companion %s\n", Version)
+	fmt.Fprintln(stdout, "Client:   codex")
+	fmt.Fprintf(stdout, "Provider: %s (verified from Codex configuration)\n", secure.SafeField(provider.Name))
+	fmt.Fprintf(stdout, "Selection: %s (%s)\n", selection, selectionSource)
+	fmt.Fprintln(stdout, "Session:  no local Codex session (plugin is skill-only)")
+	fmt.Fprintln(stdout, "Model:    unavailable (Codex does not expose the active model to the Companion)")
+	fmt.Fprintln(stdout)
+	fmt.Fprintln(stdout, "Live Context: unavailable (Codex does not expose live token telemetry)")
+	fmt.Fprintln(stdout, "Pressure: unavailable (no Codex lifecycle telemetry)")
+	fmt.Fprintln(stdout, "Cache Analysis: unavailable (Codex does not expose cache telemetry)")
+	if level == "detailed" {
+		fmt.Fprintln(stdout)
+		fmt.Fprintln(stdout, "Use the native Codex footer for model, remaining context, and current directory.")
+		fmt.Fprintln(stdout, "Use `freeinference context --client codex` and `freeinference cache --client codex` for the explicit availability boundary.")
+	}
+}
+
+func codexConfiguredStatusJSON(stdout io.Writer, activation runtime.Activation) {
+	provider := activation.ProviderInfo()
+	obj := map[string]any{
+		"client":             string(schema.ClientCodex),
+		"session_id":         "",
+		"session_state":      "unavailable",
+		"provider":           secure.SafeField(provider.Name),
+		"provider_confirmed": provider.Confirmed,
+		"provider_source":    secure.SafeField(provider.Source),
+		"provider_id":        secure.SafeField(activation.Evidence.ProviderID),
+		"selection_verified": activation.Evidence.ProviderSelectionVerified,
+		"selection_source":   secure.SafeField(activation.Evidence.ProviderSelectionSource),
+		"model":              "",
+		"context":            map[string]any{"availability": "unavailable", "reason": "client_telemetry_unavailable"},
+		"cache":              map[string]any{"availability": "unavailable", "reason": "client_telemetry_unavailable"},
+		"pressure":           "unavailable",
+		"active":             true,
+		"codex_plugin_mode":  "skill-only",
+		"native_footer_owns": []string{"model-with-reasoning", "context-remaining", "current-dir"},
+	}
+	enc := json.NewEncoder(stdout)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(obj)
 }
 
 // configuredReportingLevel returns the saved default. A malformed external
@@ -316,11 +392,11 @@ func statusJSON(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalState,
 
 	var modelID string
 	if model != "" {
-		modelID = secure.SanitizeField(model)
+		modelID = secure.SafeIdentifier(model)
 	}
 	var provName string
 	if providerName != "" {
-		provName = secure.SanitizeField(providerName)
+		provName = secure.SafeField(providerName)
 	}
 	if snap != nil && !snap.Provider.Confirmed {
 		provName = "unknown (unconfirmed)"
@@ -355,7 +431,7 @@ func statusJSON(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalState,
 					continue
 				}
 				monitor := map[string]any{
-					"model":        secure.SanitizeField(metric.ModelID),
+					"model":        secure.SafeIdentifier(metric.ModelID),
 					"uptime_ratio": metric.UptimeRatio,
 				}
 				if metric.Latest != nil {
@@ -368,7 +444,7 @@ func statusJSON(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalState,
 					monitor["ttft_ms"] = metric.Latest.TTFTMs
 					monitor["throughput_tps"] = metric.Latest.ThroughputTps
 					if metric.Latest.Error != "" {
-						monitor["error"] = secure.SanitizeField(metric.Latest.Error)
+						monitor["error"] = secure.SafeField(metric.Latest.Error)
 					}
 				}
 				obj["model_monitor"] = monitor
@@ -378,7 +454,7 @@ func statusJSON(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalState,
 		if gs.Health != nil {
 			age := now.Sub(gs.Health.FetchedAt)
 			obj["provider_health"] = map[string]any{
-				"status":      secure.SanitizeField(gs.Health.Status),
+				"status":      secure.SafeField(gs.Health.Status),
 				"checked_at":  gs.Health.FetchedAt.UTC().Format(time.RFC3339),
 				"age_seconds": max(0, int64(age.Seconds())),
 				"stale":       age < 0 || age > schema.DefaultHealthMaxAge,
@@ -437,12 +513,12 @@ func statusJSON(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalState,
 func printFullStatus(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalState, reveal bool, showTrace ...bool) {
 	fmt.Fprintf(stdout, "FreeInference Companion %s\n", Version)
 	fmt.Fprintf(stdout, "Session:  %s (%s)\n", displaySessionID(snap.Session.ID, reveal), snap.Session.Status)
-	fmt.Fprintf(stdout, "Client:   %s\n", snap.Client.Type)
-	provider := snap.Provider.Name
+	fmt.Fprintf(stdout, "Client:   %s\n", secure.SafeField(snap.Client.Type))
+	provider := secure.SafeField(snap.Provider.Name)
 	if !snap.Provider.Confirmed {
 		provider = "unknown (unconfirmed)"
 	}
-	fmt.Fprintf(stdout, "Provider: %s (source: %s)\n", provider, snap.Provider.Source)
+	fmt.Fprintf(stdout, "Provider: %s (source: %s)\n", provider, secure.SafeField(snap.Provider.Source))
 	traceVisible := len(showTrace) == 0 || showTrace[0]
 	if traceVisible && snap.Trace != nil && snap.Trace.Enabled && snap.Trace.Verified && snap.Provider.Confirmed && snap.Provider.Name == schema.ProviderFreeInference &&
 		snap.Trace.Provider == schema.ProviderFreeInference && (snap.Trace.Client == "" || snap.Trace.Client == snap.Client.Type) &&
@@ -450,9 +526,9 @@ func printFullStatus(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalS
 		fmt.Fprintln(stdout, "Tracing:  active (X-Session-ID)")
 	}
 	if snap.Model.ContextLength != nil {
-		fmt.Fprintf(stdout, "Model:    %s (%s context)\n", snap.Model.ID, formatTokenCount(*snap.Model.ContextLength))
+		fmt.Fprintf(stdout, "Model:    %s (%s context)\n", secure.SafeField(snap.Model.ID), formatTokenCount(*snap.Model.ContextLength))
 	} else {
-		fmt.Fprintf(stdout, "Model:    %s (context unknown)\n", snap.Model.ID)
+		fmt.Fprintf(stdout, "Model:    %s (context unknown)\n", secure.SafeField(snap.Model.ID))
 	}
 	fmt.Fprintln(stdout)
 

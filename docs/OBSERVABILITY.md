@@ -1,12 +1,16 @@
 # Observability and network behavior
 
-FreeInference Companion records the client’s existing lifecycle/status data
-locally. It does not observe by sending extra inference requests, proxying
-traffic, scraping prompts/transcripts, or running a daemon.
+FreeInference Companion records Claude Code’s existing lifecycle/status data
+locally. Codex has no lifecycle hooks in this release; its skill-only plugin
+runs explicit local diagnostics. Neither path observes by sending extra
+inference requests, proxying traffic, scraping prompts/transcripts, or running
+a daemon.
 
-Normal hook and status-line operation is local-only. In particular, installing
-the Claude or Codex plugin does not make an API call and cannot consume the
-provider’s inference rate limit.
+Normal Claude hook/status-line operation and Codex plugin installation are
+local-only. In particular, installing or using either plugin does not make an
+API call and cannot consume the provider’s inference rate limit. Explicit
+commands such as `fi-status`, `models --refresh`, `refresh`, and
+`doctor --probe` are the exceptions described by their command help.
 
 Metadata refresh is opt-in. Set `FI_AUTO_REFRESH=1` to allow lifecycle hooks
 to request detached refresh workers for stale model/health/account metadata.

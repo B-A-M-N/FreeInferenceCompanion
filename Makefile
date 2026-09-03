@@ -2,11 +2,19 @@
 
 BINARY=freeinference
 BUILD_DIR=build
-VERSION?=$(shell git describe --tags --always --dirty 2>/dev/null || echo "0.1.0-dev")
+# Development builds must not expose a commit hash as the product version.
+# Release jobs pass an explicit semver value (for example VERSION=v0.1.0).
+VERSION?=0.1.0-dev
 COMMIT?=$(shell git rev-parse HEAD 2>/dev/null || echo "dev")
 # Release tags conventionally include a leading "v", while the CLI and
 # manifests expose canonical semantic versions without it.
 BUILD_VERSION=$(patsubst v%,%,$(VERSION))
+
+# The binary embeds its release commit through LDFLAGS. Disable automatic VCS
+# stamping so tests and helper builds also work from linked worktrees and other
+# source distributions where Go cannot query repository metadata reliably.
+GOFLAGS+=-buildvcs=false
+export GOFLAGS
 
 # Reproducible builds: set SOURCE_DATE_EPOCH from the latest commit
 # so archive timestamps are deterministic. Override via environment.
@@ -88,7 +96,7 @@ checksums:
 #
 # Plugin bundles (zip) preserve the vendor's expected layout:
 #   .claude-plugin/plugin.json, hooks/, scripts/, skills/, bin/<plat>/freeinference
-#   .codex-plugin/plugin.json, skills/
+#   .codex-plugin/plugin.json, skills/ (skill-only; no bundled executable)
 # The version is patched only on the staged copy; source manifests are
 # never mutated.
 package: build-all
@@ -114,7 +122,9 @@ package: build-all
 		stage_dir="$$staging/$$archive_name"; \
 		mkdir -p "$$stage_dir"; \
 		install -m 0755 $(BUILD_DIR)/$(BINARY)-$$p "$$stage_dir/$(BINARY)"; \
-		cp LICENSE README.md "$$stage_dir/"; \
+		cp LICENSE SECURITY.md CHANGELOG.md README.md "$$stage_dir/"; \
+		cp -R docs "$$stage_dir/"; \
+		rm -f "$$stage_dir"/docs/audit-*.md; \
 		archive="$(CURDIR)/$(RELEASE_DIR)/$$archive_name.tar.gz"; \
 		if tar --version 2>/dev/null | grep -q 'GNU tar'; then \
 			tar --sort=name --mtime="@$$epoch" --owner=0 --group=0 --numeric-owner --use-compress-program='gzip -n' -cf "$$archive" -C "$$staging" "$$archive_name"; \
@@ -166,13 +176,11 @@ package: build-all
 		> "$$stage_codex/.codex-plugin/plugin.json"; \
 	cp -R plugins/freeinference-companion/skills \
 		"$$stage_codex/"; \
-	mkdir -p "$$stage_codex/bin"; \
-	for p in $(PLATFORMS); do mkdir -p "$$stage_codex/bin/$$p"; install -m 0755 "$(BUILD_DIR)/$(BINARY)-$$p" "$$stage_codex/bin/$$p/$(BINARY)"; done; \
 	find "$$stage_codex" -exec touch -h -d "@$$epoch" {} +; \
 	(cd "$$stage_codex" && find . -type f -print | LC_ALL=C sort | zip -q -X -@ "$(CURDIR)/$(RELEASE_DIR)/freeinference-companion-codex_$$REL_VERSION.zip") && \
 	echo "packaged Codex plugin bundle"; \
 	\
-	cp LICENSE README.md $(RELEASE_DIR)/; \
+	cp LICENSE SECURITY.md CHANGELOG.md README.md $(RELEASE_DIR)/; \
 	$(MAKE) sbom RELEASE_DIR=$(RELEASE_DIR) VERSION=$(VERSION) STAGE_DIR="$$staging" && \
 	$(MAKE) marketplace RELEASE_DIR=$(RELEASE_DIR) VERSION=$(VERSION) && \
 	$(MAKE) provenance RELEASE_DIR=$(RELEASE_DIR) VERSION=$(VERSION) COMMIT=$(COMMIT) STAGE_DIR="$$staging" && \
@@ -260,9 +268,13 @@ package-smoke: package
 		if [ ! -x "$$extract/$$archive_name/$(BINARY)" ]; then \
 			echo "FAIL: $$p archive $(BINARY) not executable"; exit 1; \
 		fi; \
-		if [ ! -f "$$extract/$$archive_name/README.md" ] || [ ! -f "$$extract/$$archive_name/LICENSE" ]; then \
-			echo "FAIL: $$p archive missing README.md or LICENSE"; exit 1; \
+		if [ ! -f "$$extract/$$archive_name/README.md" ] || [ ! -f "$$extract/$$archive_name/LICENSE" ] || [ ! -f "$$extract/$$archive_name/SECURITY.md" ] || [ ! -f "$$extract/$$archive_name/CHANGELOG.md" ]; then \
+			echo "FAIL: $$p archive missing release documentation"; exit 1; \
 		fi; \
+		test -f "$$extract/$$archive_name/docs/INSTALL.md" || { echo "FAIL: $$p archive missing installation documentation"; exit 1; }; \
+		test -z "$$(find "$$extract/$$archive_name/docs" -maxdepth 1 -type f -name 'audit-*.md' -print -quit)" || { echo "FAIL: $$p archive contains internal audit documentation"; exit 1; }; \
+		test -f "$$extract/$$archive_name/docs/images/claude-code-native.png" || { echo "FAIL: $$p archive missing Claude native screenshot"; exit 1; }; \
+		test -f "$$extract/$$archive_name/docs/images/codex-native.png" || { echo "FAIL: $$p archive missing Codex native screenshot"; exit 1; }; \
 		echo "archive OK: $$p"; \
 		installer="$(RELEASE_DIR)/$$archive_name.zip"; \
 		test -f "$$installer" || { echo "FAIL: $$p installer archive missing: $$installer"; exit 1; }; \
@@ -310,6 +322,7 @@ package-smoke: package
 		test -f "$$edir/.codex-plugin/plugin.json" || { echo "FAIL: $$(basename $$z) missing .codex-plugin/plugin.json"; exit 1; }; \
 		python3 -c "import json,sys; assert json.load(open(sys.argv[1]))['version'] == sys.argv[2], 'Codex plugin version mismatch'" "$$edir/.codex-plugin/plugin.json" "$$REL_VERSION"; \
 		test -d "$$edir/skills" || { echo "FAIL: $$(basename $$z) missing skills/"; exit 1; }; \
+		test ! -d "$$edir/bin" || { echo "FAIL: $$(basename $$z) unexpectedly contains a binary directory"; exit 1; }; \
 		test ! -d "$$edir/hooks" || { echo "FAIL: $$(basename $$z) unexpectedly contains Codex hooks"; exit 1; }; \
 		test ! -d "$$edir/scripts" || { echo "FAIL: $$(basename $$z) unexpectedly contains Codex scripts"; exit 1; }; \
 		echo "archive OK: $$(basename $$z)"; \
@@ -381,8 +394,8 @@ vet:
 lint: vet staticcheck
 
 # staticcheck is pinned so the release gate is reproducible across runners.
-# The Go module uses semantic tags (v0.7.0), while the binary reports the
-# calendar release as 2026.1.
+# The release version is injected explicitly by release jobs; development
+# builds use the stable `0.1.0-dev` fallback above.
 staticcheck:
 	@STATICCHECK_VERSION=v0.7.0; \
 	bin="$$(go env GOBIN)"; \
@@ -483,11 +496,11 @@ bench:
 	go test ./... -bench=. -benchmem -run=^$$
 
 # bench-ci enforces conservative average-latency ceilings for the hot paths.
-# Runs the real benchmarks with enough iterations to get reliable averages and
-# fails if either benchmark exceeds its ceiling. Go benchmarks report average
-# ns/op; this target intentionally makes no p95 claim.
+# Runs the real benchmarks for three seconds to get stable averages and fails
+# if either benchmark exceeds its ceiling. Go benchmarks report average ns/op;
+# this target intentionally makes no p95 claim.
 bench-ci:
-	@output=$$(go test ./internal/adapters/ -bench='BenchmarkStatusLineUpdate|BenchmarkUserPromptSubmitNoWarning' -benchtime=1s -count=1 -timeout 120s 2>&1); \
+	@output=$$(go test ./internal/adapters/ -bench='BenchmarkStatusLineUpdate|BenchmarkUserPromptSubmitNoWarning' -benchtime=3s -count=1 -timeout 120s 2>&1); \
 	echo "$$output"; \
 	if ! echo "$$output" | grep -q '^Benchmark'; then \
 		echo "error: bench-ci ran zero benchmarks — expected BenchmarkStatusLineUpdate and BenchmarkUserPromptSubmitNoWarning"; \

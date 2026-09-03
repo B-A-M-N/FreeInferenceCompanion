@@ -231,8 +231,8 @@ func buildReportSession(snap *schema.Snapshot, reveal bool) *reportSession {
 		ID:                displaySessionID(snap.Session.ID, reveal),
 		Status:            snap.Session.Status,
 		StartedAt:         snap.Session.StartedAt.UTC().Format(time.RFC3339),
-		Model:             secure.SanitizeField(snap.Model.ID),
-		Provider:          secure.SanitizeField(snap.Provider.Name),
+		Model:             secure.SafeIdentifier(snap.Model.ID),
+		Provider:          secure.SafeField(snap.Provider.Name),
 		ProviderConfirmed: snap.Provider.Confirmed,
 		PressureState:     snap.Pressure.State,
 		ContextLimit:      snap.Model.ContextLength,
@@ -288,7 +288,7 @@ func buildReportModelMonitor(gs *schema.GlobalState, modelID string, now time.Ti
 		if metric.ModelID != modelID {
 			continue
 		}
-		monitor := &reportModelMonitor{Model: secure.SanitizeField(metric.ModelID), UptimeRatio: metric.UptimeRatio}
+		monitor := &reportModelMonitor{Model: secure.SafeIdentifier(metric.ModelID), UptimeRatio: metric.UptimeRatio}
 		if metric.Latest != nil {
 			monitor.OK = metric.Latest.OK
 			monitor.LatencyMs = metric.Latest.LatencyMs
@@ -341,11 +341,11 @@ func buildReportTraceInfo(trace *schema.TraceInfo) *reportTrace {
 	result := &reportTrace{
 		Enabled:        true,
 		TraceID:        trace.SessionID,
-		Client:         secure.SanitizeField(trace.Client),
-		Provider:       secure.SanitizeField(trace.Provider),
-		Source:         secure.SanitizeField(trace.Source),
-		Header:         secure.SanitizeField(trace.Header),
-		EndpointOrigin: secure.SanitizeField(trace.EndpointOrigin),
+		Client:         secure.SafeField(trace.Client),
+		Provider:       secure.SafeField(trace.Provider),
+		Source:         secure.SafeField(trace.Source),
+		Header:         secure.SafeField(trace.Header),
+		EndpointOrigin: secure.SafeField(trace.EndpointOrigin),
 	}
 	if !trace.StartedAt.IsZero() {
 		result.StartedAt = trace.StartedAt.UTC().Format(time.RFC3339)

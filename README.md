@@ -8,13 +8,19 @@
 Local observability and diagnostics for [FreeInference](https://freeinference.org/)
 users of Claude Code and Codex.
 
-FreeInference Companion records the lifecycle and status data the client
-already exposes, then turns that data into useful local diagnostics.
+FreeInference Companion turns the lifecycle and status data exposed by Claude
+Code, plus explicit local diagnostics requested from Codex, into useful local
+diagnostics. Claude uses local lifecycle hooks; the Codex plugin is skill-only.
 
-![FreeInference Companion terminal example](docs/images/status-example.svg)
+<div align="center">
+  <img src="docs/images/claude-code-native.png" alt="Native Claude Code session using FreeInference with the Companion status line showing model, cache, context, and health" width="49%">
+  <img src="docs/images/codex-native.png" alt="Native Codex session using FreeInference with the Companion diagnostics and native Codex footer" width="49%">
+</div>
+<p align="center"><em>Claude Code: real FreeInference-backed turn with the Companion status line · Codex: real FreeInference-backed turn with the native footer and explicit Companion diagnostics.</em></p>
 
-*Illustrative terminal output. Values are local observations, not an
-additional provider request.*
+*The screenshots are native client windows captured from isolated runs of the
+shipped binary and plugin flow. Each shows a real deterministic proof turn;
+credentials and unrelated host state were kept outside the repository.*
 
 > **Trust boundary — local companion only.** No prompt interception. No
 > transcript collection. No proxying. No automatic failover. No daemon.
@@ -31,14 +37,32 @@ cache observations, context pressure, and freshness:
 
 ```text
 ordinary Claude/Codex session       (no FreeInference output)
-verified FreeInference Claude       FI glm-5.1 | cache 78% | ctx 41% | healthy
+verified FreeInference Claude       FI qwen3.6-35b | cache 0% | fresh 23K | ctx 12% | OK
 verified FreeInference Codex        native Codex footer + local diagnostics
 ```
 
 Codex keeps ownership of its native footer and does not expose the same live
-context and cache fields as Claude Code. Its Companion plugin records bounded
-lifecycle state and provides diagnostic commands and skills; unavailable
-values remain unavailable instead of being guessed.
+context and cache fields as Claude Code. Its Companion plugin is skill-only:
+it provides user-requested diagnostic commands and setup guidance; it does not
+install lifecycle hooks. Unavailable values remain unavailable instead of
+being guessed.
+
+The important diagnostics are surfaced inside the native clients as skills:
+
+- Claude Code: `/freeinference-companion:freeinference-status`,
+  `/freeinference-companion:freeinference-models`,
+  `/freeinference-companion:freeinference-doctor`,
+  `/freeinference-companion:freeinference-report`, and
+  `/freeinference-companion:freeinference-cache`.
+- Codex: `$freeinference-status`, `$freeinference-fi-status`,
+  `$freeinference-models`, `$freeinference-doctor`, `$freeinference-report`,
+  and `$freeinference-cache`.
+
+These native skills are command guidance and discovery surfaces; the
+underlying CLI remains available for scripts and terminal use. The remaining
+useful surfaces include `$freeinference-sessions`, `$freeinference-refresh`,
+`fi-status`, `failures`, `trace`, and `codex-footer` as documented in the CLI
+reference.
 
 ## Why I made it
 
@@ -79,6 +103,7 @@ For normal use, download a release binary, verify its checksum, and follow
 
 ```bash
 # after placing the freeinference binary on PATH
+# optional: bounded metadata checks; never an inference probe without --probe
 freeinference doctor
 freeinference install
 freeinference status-line install
@@ -114,7 +139,8 @@ Keep API keys in the environment or a secrets manager, never in a config file.
 
 The Companion is deliberately outside the inference path. It:
 
-- records bounded lifecycle events and client-provided status metrics locally;
+- records bounded Claude lifecycle events and client-provided status metrics
+  locally; Codex state is available only through explicit CLI/skill commands;
 - shows context pressure and rolling cache-pattern diagnostics where the
   client exposes enough information;
 - keeps provider metadata and public-status results cached and timestamped;
@@ -215,6 +241,8 @@ it.
 | Cache diagnostics | [Classifications and limits](docs/CACHE_DIAGNOSTICS.md) |
 | Security model | [Security and vulnerability reporting](SECURITY.md) |
 | Development and release | [Development](docs/DEVELOPMENT.md) · [Releasing](docs/RELEASING.md) |
+| Release proof | [Native client evidence](docs/EVIDENCE.md) |
+| Release history | [CHANGELOG](CHANGELOG.md) |
 
 ## Useful commands
 

@@ -3,6 +3,7 @@ name: freeinference-doctor
 description: This skill is used when diagnosing FreeInference connection problems, configuration issues, authentication failures, or when the user needs to verify their setup is working correctly. Trigger when the user reports errors, connection issues, or wants to verify their API configuration. Community-built and unofficial. Not affiliated with or endorsed by FreeInference.
 argument-hint: "[--probe --model <name>]"
 allowed-tools: Bash
+disable-model-invocation: true
 ---
 
 # FreeInference Doctor

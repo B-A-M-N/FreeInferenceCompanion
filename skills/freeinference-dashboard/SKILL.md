@@ -17,12 +17,9 @@ Run `freeinference dashboard` to open:
 https://status.freeinference.org/
 ```
 
-The dashboard shows:
-- Per-model status (UP/DOWN)
-- Latency and TTFT (time to first token)
-- Throughput (tokens/second)
-- Uptime percentages
-- Trend charts (30-100 data points)
+The dashboard may show per-model status and the monitor's available latency,
+throughput, uptime, and trend information. The Companion does not copy that
+page's upstream content into local telemetry.
 
 ### Options
 
@@ -32,4 +29,4 @@ No arguments. The dashboard always opens the same URL.
 
 - Requires a desktop environment with `xdg-open` (Linux) or `open` (macOS)
 - In terminal-only environments, the URL is printed to stdout
-- The status page auto-refreshes every 20 minutes
+- The page's own refresh behavior is controlled by the FreeInference monitor.

@@ -31,9 +31,13 @@ install -m 755 "freeinference-companion-${VERSION}-${PLATFORM}/freeinference" "$
 Ensure `$HOME/.local/bin` is on `PATH`, then run:
 
 ```bash
-freeinference doctor
 freeinference status
 ```
+
+`freeinference doctor` is optional. When FreeInference is active, it performs
+one bounded authenticated model-catalog check in addition to local checks. It
+does not query health/account/public-status endpoints or send an inference
+request unless `--probe --model <name>` is explicitly supplied.
 
 The combined platform ZIP contains the Claude Code plugin tree. Codex is
 installed separately through its native marketplace manager. The CLI installer
@@ -54,6 +58,12 @@ codex plugin marketplace add B-A-M-N/FreeInferenceCompanion --ref master
 codex plugin add freeinference-companion@freeinference-companion
 codex plugin list --json
 ```
+
+That installs the Companion skills, not a second Codex runtime. To configure
+Codex itself to use FreeInference, follow [Codex with
+FreeInference](codex.md), which covers the OpenAI-compatible `/v1` endpoint,
+the environment credential, `wire_api = "responses"`, model profiles, and the
+optional trace-header mapping.
 
 The plugin contributes diagnostic skills only. It does not install lifecycle
 hooks, proxy inference traffic, or make background API requests by default.

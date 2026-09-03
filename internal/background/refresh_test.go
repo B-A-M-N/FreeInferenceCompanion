@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -63,6 +64,40 @@ func TestStaleCacheRefreshesOnce(t *testing.T) {
 	}
 	if calls.Load() != 1 {
 		t.Errorf("fresh cache must not trigger a request: %d calls", calls.Load())
+	}
+}
+
+func TestModelsRefreshPreservesSecretShapedModelIdentity(t *testing.T) {
+	server := modelsServer(t, nil, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(api.ModelsResponse{
+			Object: "list",
+			Data: []api.Model{
+				{ID: "hyi-model-alpha-abcdef0123456789"},
+				{ID: "hyi-model-beta-abcdef0123456789"},
+			},
+		})
+	})
+	defer server.Close()
+
+	r := testRefresher(t, server, "")
+	if result := r.WorkerRefresh(WorkerModels); !result.ModelsRefreshed {
+		t.Fatalf("models refresh = %+v", result)
+	}
+	cache := &schema.ModelsCache{}
+	if err := state.ReadJSON(r.Paths.GlobalModels(), cache); err != nil {
+		t.Fatal(err)
+	}
+	if len(cache.Models) != 2 {
+		t.Fatalf("cached models = %#v, want two distinct models", cache.Models)
+	}
+	if cache.Models[0].ID == cache.Models[1].ID {
+		t.Fatalf("distinct model IDs collapsed to %q", cache.Models[0].ID)
+	}
+	for _, model := range cache.Models {
+		if strings.Contains(model.ID, "hyi-model-") {
+			t.Fatalf("secret-shaped model ID leaked into cache: %q", model.ID)
+		}
 	}
 }
 
@@ -286,6 +321,33 @@ func TestPublicStatusCacheRetainsBoundedHistoryForCorrelation(t *testing.T) {
 	}
 	if model.History[0].CheckedAt.Equal(model.Latest.CheckedAt) {
 		t.Fatal("latest sample was duplicated into history")
+	}
+}
+
+func TestPublicStatusCachePreservesSecretShapedModelIdentity(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	ok := true
+	cache, err := publicStatusCache(&api.PublicStatusResponse{
+		Total: 2, Healthy: 2,
+		Cycle: api.PublicStatusCycle{OK: &ok, CheckedAt: now.Format(time.RFC3339)},
+		Models: []api.PublicStatusModel{
+			{ModelID: "hyi-status-alpha-abcdef0123456789", Latest: &api.PublicStatusSample{OK: &ok, CheckedAt: now.Format(time.RFC3339)}},
+			{ModelID: "hyi-status-beta-abcdef0123456789", Latest: &api.PublicStatusSample{OK: &ok, CheckedAt: now.Format(time.RFC3339)}},
+		},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cache.Models) != 2 || cache.Models[0].ModelID == cache.Models[1].ModelID {
+		t.Fatalf("public status model IDs collapsed: %#v", cache.Models)
+	}
+	if err := schema.ValidatePublicStatusCache(cache); err != nil {
+		t.Fatalf("sanitized public status cache rejected: %v", err)
+	}
+	for _, model := range cache.Models {
+		if strings.Contains(model.ModelID, "hyi-status-") {
+			t.Fatalf("secret-shaped public status ID leaked: %q", model.ModelID)
+		}
 	}
 }
 

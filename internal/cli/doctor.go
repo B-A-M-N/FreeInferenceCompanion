@@ -197,8 +197,18 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 	}
 
 	// 9. Model catalog reachable.
-	// In disabled mode, skip all network-dependent checks.
+	// In disabled mode, or when no verified client route is active, skip all
+	// network-dependent checks. In particular, never let an unconfigured or
+	// generic `doctor` invocation fall back to the default FreeInference URL.
 	disabled := os.Getenv("FI_DISABLED") == "1" || activation.Disabled
+	networkAllowed := activation.Active && !activation.UnsafeForced
+	if !networkAllowed {
+		// A custom endpoint is an explicit opt-in and carries its own validated
+		// credential pair. It may be diagnosed even when no Claude/Codex runtime
+		// route is active; partial custom configuration remains non-networking.
+		custom, customErr := api.LoadCustomEndpointConfig()
+		networkAllowed = customErr == nil && custom != nil
+	}
 	if disabled {
 		// Installation-convenience checks (binary on PATH, hook config,
 		// status-line wrapper) are downgraded to warnings while disabled:
@@ -216,6 +226,12 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 		add("API key format", api.CheckResult{State: api.CheckUnknown, Detail: "skipped - disabled"})
 		add("Authentication", api.CheckResult{State: api.CheckUnknown, Detail: "skipped - disabled"})
 		add("Model access", api.CheckResult{State: api.CheckUnknown, Detail: "skipped - disabled"})
+	} else if !networkAllowed {
+		add("API endpoint", api.CheckResult{State: api.CheckUnknown, Detail: "skipped - FreeInference route not verified"})
+		add("Model catalog", api.CheckResult{State: api.CheckUnknown, Detail: "skipped - FreeInference route not verified"})
+		add("API key format", api.CheckResult{State: api.CheckUnknown, Detail: "skipped - FreeInference route not verified"})
+		add("Authentication", api.CheckResult{State: api.CheckUnknown, Detail: "skipped - FreeInference route not verified"})
+		add("Model access", api.CheckResult{State: api.CheckUnknown, Detail: "skipped - FreeInference route not verified"})
 	} else {
 		client, clientErr := newAPIClient()
 		if clientErr != nil {
@@ -242,12 +258,22 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 			add("Model access", probeResult.ModelAccess)
 		}
 
-		// 9. Optional synthetic inference probe (explicit consent + model required).
-		if probe {
-			model := probeModel
-			if model == "" {
-				add("Inference probe", api.CheckResult{State: api.CheckUnknown, Detail: "no model given -- pass --model to specify a model for the synthetic probe"})
-			} else if client == nil {
+	}
+
+	// 10. Optional synthetic inference probe (explicit consent + model
+	// required). Never probe an unverified runtime, even if --probe is present.
+	if probe {
+		model := probeModel
+		switch {
+		case model == "":
+			add("Inference probe", api.CheckResult{State: api.CheckUnknown, Detail: "no model given -- pass --model to specify a model for the synthetic probe"})
+		case disabled:
+			add("Inference probe", api.CheckResult{State: api.CheckUnknown, Detail: "skipped - disabled"})
+		case !networkAllowed:
+			add("Inference probe", api.CheckResult{State: api.CheckUnknown, Detail: "skipped - FreeInference route not verified; no request sent"})
+		default:
+			client, clientErr := newAPIClient()
+			if clientErr != nil {
 				add("Inference probe", api.CheckResult{State: api.CheckUnknown, Detail: "skipped due to invalid endpoint"})
 			} else {
 				pr := client.ProbeInference(model)
@@ -258,7 +284,7 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 		}
 	}
 
-	// 10. Circuit breaker status.
+	// 11. Circuit breaker status.
 	gs := loadGlobal(paths)
 	if len(gs.CircuitBreakers) > 0 {
 		for _, cb := range gs.CircuitBreakers {

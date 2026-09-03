@@ -3,6 +3,7 @@ name: freeinference-models
 description: This skill is automatically triggered when the user asks about available FreeInference models, model details, pricing, model health, or which models are available. Use when the user wants to browse the model catalog, check model capabilities, or see provider model status. Community-built and unofficial. Not affiliated with or endorsed by FreeInference.
 argument-hint: "[--model <name>] [--refresh]"
 allowed-tools: Bash
+disable-model-invocation: true
 ---
 
 # FreeInference Models
@@ -20,7 +21,7 @@ Run `freeinference models` to show all available models with:
 ### Options
 
 - `--model <name>` — Show detailed information for a specific model
-- `--refresh` — Force refresh the model catalog from the API
+- `--refresh` — Explicitly fetch the model catalog from the API
 
 ### Model details
 
@@ -41,6 +42,8 @@ Pricing (per MTok):
 ### Notes
 
 - Model catalog is cached from the authenticated `/v1/models` endpoint
-- Stale cache is refreshed on session start by a detached background process (coalesced across terminals)
+- Stale cache is refreshed on lifecycle start only when `FI_AUTO_REFRESH=1` is
+  explicitly enabled; otherwise the cache remains local and stale until an
+  explicit refresh
 - Access is only confirmed by an explicit probe (`freeinference doctor --probe --model <name>`)
 - Pricing is in micro-dollars (e.g., 2.8 = $2.80 per million tokens)
