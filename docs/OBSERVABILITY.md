@@ -56,8 +56,8 @@ three sequential observations above 40%.
 Projection warnings require active context of at least 60% of the model window
 and a projected request that would leave less than the configured output
 reserve (16,000 tokens by default). Confidence is `low` or `medium`; it is
-never `high` in the current release because the companion cannot see the client's full
-request body.
+never `high` in the current release because the companion cannot see the
+client's full request body.
 
 Cache-TTL warnings require provider-confirmed TTL telemetry. Idle time alone is
 not treated as proof of expiry. When confirmed, the warning says the next
