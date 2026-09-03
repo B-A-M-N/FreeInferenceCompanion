@@ -41,6 +41,10 @@ func ResolveCodexProviderConfigurationForProfile(profile string) (ClientEvidence
 }
 
 func resolveCodexProviderConfiguration(profile string) (ClientEvidence, error) {
+	return resolveCodexProviderConfigurationWith(profile, os.ReadDir)
+}
+
+func resolveCodexProviderConfigurationWith(profile string, readDir func(string) ([]os.DirEntry, error)) (ClientEvidence, error) {
 	home, err := codexHome()
 	if err != nil {
 		return ClientEvidence{}, err
@@ -72,17 +76,28 @@ func resolveCodexProviderConfiguration(profile string) (ClientEvidence, error) {
 			providerID = strings.TrimSpace(profileConfig.ModelProvider)
 		}
 		selectionSource = "CODEX_PROFILE:" + profile
-	} else if codexProfilesPresent(home) {
-		// Codex does not export a CLI-selected profile to child hook
-		// processes. If profiles exist, the root model_provider is not proof
-		// of the provider used by this session; fail closed rather than
-		// attributing an OpenAI-profile request to FreeInference.
-		return ClientEvidence{
-			Client:                    ClientCodex,
-			ProviderID:                providerID,
-			ProviderSelectionVerified: false,
-			ProviderSelectionSource:   "codex profile selection unavailable",
-		}, errors.New("active Codex profile is not exposed to the Companion")
+	} else {
+		profilesPresent, profilesErr := codexProfilesPresent(home, readDir)
+		if profilesErr != nil {
+			return ClientEvidence{
+				Client:                    ClientCodex,
+				ProviderID:                providerID,
+				ProviderSelectionVerified: false,
+				ProviderSelectionSource:   "codex profile selection unavailable",
+			}, fmt.Errorf("inspect Codex profiles: %w", profilesErr)
+		}
+		if profilesPresent {
+			// Codex does not export a CLI-selected profile to child hook
+			// processes. If profiles exist, the root model_provider is not proof
+			// of the provider used by this session; fail closed rather than
+			// attributing an OpenAI-profile request to FreeInference.
+			return ClientEvidence{
+				Client:                    ClientCodex,
+				ProviderID:                providerID,
+				ProviderSelectionVerified: false,
+				ProviderSelectionSource:   "codex profile selection unavailable",
+			}, errors.New("active Codex profile is not exposed to the Companion")
+		}
 	}
 
 	provider, ok := base.Providers[providerID]
@@ -135,20 +150,20 @@ func resolveCodexProviderConfiguration(profile string) (ClientEvidence, error) {
 	}, nil
 }
 
-func codexProfilesPresent(home string) bool {
-	entries, err := os.ReadDir(home)
+func codexProfilesPresent(home string, readDir func(string) ([]os.DirEntry, error)) (bool, error) {
+	entries, err := readDir(home)
 	if err != nil {
-		return false
+		return false, err
 	}
 	for _, entry := range entries {
 		if entry.IsDir() || entry.Name() == "config.toml" {
 			continue
 		}
 		if strings.HasSuffix(entry.Name(), ".config.toml") && len(strings.TrimSuffix(entry.Name(), ".config.toml")) > 0 {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 // CodexProviderConfiguration returns the non-secret provider configuration

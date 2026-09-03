@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/adapters"
 	"github.com/b-a-m-n/freeinference-companion/internal/api"
@@ -644,10 +645,24 @@ func validCodexHookDefinition(data []byte) bool {
 	for _, groups := range definition.Hooks {
 		for _, group := range groups {
 			for _, command := range group.Hooks {
-				if command.Type == "command" && strings.Contains(command.Command, "${PLUGIN_ROOT}/scripts/run-hook.sh") {
+				if command.Type == "command" && isCodexRunnerInvocation(command.Command) {
 					return true
 				}
 			}
+		}
+	}
+	return false
+}
+
+func isCodexRunnerInvocation(command string) bool {
+	const runner = "${PLUGIN_ROOT}/scripts/run-hook.sh"
+	command = strings.TrimSpace(command)
+	for _, token := range []string{runner, `"` + runner + `"`, `'` + runner + `'`} {
+		if command == token {
+			return true
+		}
+		if strings.HasPrefix(command, token) && len(command) > len(token) {
+			return unicode.IsSpace(rune(command[len(token)]))
 		}
 	}
 	return false

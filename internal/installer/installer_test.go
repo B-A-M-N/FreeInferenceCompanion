@@ -286,6 +286,10 @@ func TestBinaryOnlyUpgradeDoesNotHideOldPluginVersions(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("PATH", "/usr/bin:/bin")
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
 	firstManifest, _, firstServer := testServer(t, "v0.2.0", "linux-amd64")
 	defer firstServer.Close()
 	if _, err := Install(Options{ManifestURL: firstManifest, Platform: "linux-amd64"}, io.Discard, io.Discard); err != nil {
@@ -296,12 +300,50 @@ func TestBinaryOnlyUpgradeDoesNotHideOldPluginVersions(t *testing.T) {
 	if _, err := Update(Options{ManifestURL: binaryManifest, Platform: "linux-amd64", NoPlugin: true}, io.Discard, io.Discard); err != nil {
 		t.Fatalf("binary-only upgrade: %v", err)
 	}
-	result, err := Update(Options{ManifestURL: binaryManifest, Platform: "linux-amd64"}, io.Discard, io.Discard)
+	pluginResult, err := Update(Options{ManifestURL: firstManifest, Platform: "linux-amd64", NoBin: true}, io.Discard, io.Discard)
 	if err != nil {
-		t.Fatalf("plugin completion: %v", err)
+		t.Fatalf("lower plugin-only update: %v", err)
 	}
-	if result.AlreadyLatest || !result.ClaudePluginReady || !result.CodexFilesReady {
-		t.Fatalf("plugin completion result = %+v", result)
+	if !pluginResult.AlreadyLatest || pluginResult.Version != "v0.2.0" {
+		t.Fatalf("lower plugin-only update should preserve current plugins: %+v", pluginResult)
+	}
+	result, err := Update(Options{ManifestURL: firstManifest, Platform: "linux-amd64"}, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("lower full update: %v", err)
+	}
+	if !result.AlreadyLatest || result.Version != "v0.3.0" {
+		t.Fatalf("lower full update should preserve newer binary: %+v", result)
+	}
+	metadata, found, err := LoadInstallationMetadata(paths.MetadataPath())
+	if err != nil || !found {
+		t.Fatalf("load metadata after lower updates: found=%v err=%v", found, err)
+	}
+	if metadata.InstalledVersion != "v0.3.0" || metadata.BinaryVersion != "v0.3.0" {
+		t.Fatalf("lower updates regressed installed version: %+v", metadata)
+	}
+}
+
+func TestInstallationMetadataRejectsLegacyDigestFormat(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := metadataForPaths(paths, "v0.2.0", "https://example.test", strings.Repeat("a", 64), "v0.2.0")
+	metadata.DigestFormat = ""
+	data, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.MetadataPath()), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.MetadataPath(), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := LoadInstallationMetadata(paths.MetadataPath()); err == nil || found || !strings.Contains(err.Error(), "digest format") {
+		t.Fatalf("legacy digest metadata was accepted: found=%v err=%v", found, err)
 	}
 }
 

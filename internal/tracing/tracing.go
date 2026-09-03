@@ -15,7 +15,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 	"unicode"
 )
@@ -293,7 +292,7 @@ func ConsumeLaunchReceipt(path, expectedClient, expectedOrigin string) (*LaunchR
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 != 0 {
 		return nil, errors.New("invalid trace receipt file")
 	}
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	f, err := openReceiptNoFollow(path)
 	if err != nil {
 		return nil, err
 	}

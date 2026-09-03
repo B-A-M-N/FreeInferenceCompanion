@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	codexTraceOwnershipSchema = 1
+	codexTraceOwnershipSchema = 2
 	maxCodexTraceOwnership    = 32 << 10
 )
 
@@ -27,7 +27,7 @@ type codexTraceOwnership struct {
 	AddedMappings           []string  `json:"added_mappings"`
 	CreatedNestedTable      bool      `json:"created_nested_table"`
 	Inline                  bool      `json:"inline"`
-	OriginalTrailingNewline bool      `json:"original_trailing_newline"`
+	OriginalTrailingNewline *bool     `json:"original_trailing_newline"`
 	BeforeFingerprint       string    `json:"before_fingerprint"`
 	AfterFingerprint        string    `json:"after_fingerprint"`
 	InstalledAt             time.Time `json:"installed_at"`
@@ -40,6 +40,9 @@ func codexTraceOwnershipPath(configPath string) string {
 func (m codexTraceOwnership) validate() error {
 	if m.SchemaVersion != codexTraceOwnershipSchema || !validCodexName(m.ProviderID) || m.ConfigPath == "" || len(m.AddedMappings) == 0 || len(m.AddedMappings) > 8 || m.InstalledAt.IsZero() {
 		return errors.New("invalid codex trace ownership metadata")
+	}
+	if m.OriginalTrailingNewline == nil {
+		return errors.New("codex trace ownership metadata is missing newline state")
 	}
 	if m.BeforeFingerprint == "" || m.AfterFingerprint == "" || len(m.BeforeFingerprint) != 64 || len(m.AfterFingerprint) != 64 {
 		return errors.New("invalid codex trace ownership fingerprint")
@@ -115,6 +118,14 @@ func loadCodexTraceOwnership(path string) (*codexTraceOwnership, bool, error) {
 		}
 		return nil, false, err
 	}
+	if metadata.SchemaVersion == 1 {
+		// Schema 1 did not record this bit. Its restore behavior retained the
+		// newline added by setup, so preserve that legacy behavior rather than
+		// guessing that the original file had no final newline.
+		legacyTrailingNewline := true
+		metadata.OriginalTrailingNewline = &legacyTrailingNewline
+		metadata.SchemaVersion = codexTraceOwnershipSchema
+	}
 	if err := metadata.validate(); err != nil {
 		return nil, false, err
 	}
@@ -168,11 +179,15 @@ func ownershipForTrace(path, providerID string, before, after string, mapping Co
 		AddedMappings:           append([]string(nil), mapping.Added...),
 		CreatedNestedTable:      mapping.CreatedTable,
 		Inline:                  mapping.Inline,
-		OriginalTrailingNewline: strings.HasSuffix(before, "\n"),
+		OriginalTrailingNewline: boolPointer(strings.HasSuffix(before, "\n")),
 		BeforeFingerprint:       fingerprintCodexConfig(before),
 		AfterFingerprint:        fingerprintCodexConfig(after),
 		InstalledAt:             time.Now().UTC(),
 	}
+}
+
+func boolPointer(value bool) *bool {
+	return &value
 }
 
 func (m codexTraceOwnership) expectedMapping(header string) (string, error) {

@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,7 +21,11 @@ func TestBuildReportModelMonitorOmitsUpstreamErrorBody(t *testing.T) {
 	if monitor == nil {
 		t.Fatal("expected model monitor")
 	}
-	if monitor.Error != "" {
-		t.Fatalf("upstream error body was copied into report: %q", monitor.Error)
+	encoded, err := json.Marshal(monitor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "upstream internal details") || strings.Contains(string(encoded), `"error"`) {
+		t.Fatalf("upstream error body was copied into report: %s", encoded)
 	}
 }

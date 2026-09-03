@@ -189,25 +189,47 @@ func managedBinaryExists(metadata *InstallationMetadata, paths Paths) bool {
 	return componentPathReady(metadata, metadataVersion(metadata, "binary"), paths.BinaryPath, true)
 }
 
-// installedComponentsVersion returns the version that protects the component
-// set this operation may replace. In particular, a plugin-only install must
-// still honor the installed plugin version even when no managed binary exists.
+// installedComponentsVersion returns the highest version among every component
+// this operation may replace, provided all of those components are intact.
+// Component versions are independent because partial updates can leave a
+// newer binary beside older plugins (or vice versa).
 func installedComponentsVersion(metadata *InstallationMetadata, found bool, paths Paths, opts Options) string {
-	if !found || metadata == nil || metadata.InstalledVersion == "" {
+	if !found || metadata == nil {
 		return ""
 	}
-	if !opts.NoBin && managedBinaryExists(metadata, paths) && metadata.BinaryVersion == metadata.InstalledVersion {
-		return metadata.InstalledVersion
+	versions := make([]string, 0, 4)
+	if !opts.NoBin {
+		if !managedBinaryExists(metadata, paths) {
+			return ""
+		}
+		versions = append(versions, metadata.BinaryVersion)
 	}
-	if !opts.NoPlugin && metadata.ClaudePluginVersion == metadata.InstalledVersion &&
-		metadata.CodexPluginVersion == metadata.InstalledVersion &&
-		metadata.CodexMarketplaceVersion == metadata.InstalledVersion &&
-		directoryComponentReady(metadata, "claude", paths.claudePluginPath()) &&
-		directoryComponentReady(metadata, "codex", paths.codexPluginPath()) &&
-		directoryComponentReady(metadata, "marketplace", paths.CodexMarketplaceDir) {
-		return metadata.InstalledVersion
+	if !opts.NoPlugin {
+		for _, component := range []struct {
+			name string
+			path string
+		}{
+			{name: "claude", path: paths.claudePluginPath()},
+			{name: "codex", path: paths.codexPluginPath()},
+			{name: "marketplace", path: paths.CodexMarketplaceDir},
+		} {
+			if !directoryComponentReady(metadata, component.name, component.path) {
+				return ""
+			}
+			versions = append(versions, metadataVersion(metadata, component.name))
+		}
 	}
-	return ""
+	return highestVersion(versions)
+}
+
+func highestVersion(versions []string) string {
+	highest := ""
+	for _, candidate := range versions {
+		if candidate != "" && (highest == "" || compareVersions(candidate, highest) > 0) {
+			highest = candidate
+		}
+	}
+	return highest
 }
 
 func metadataVersion(metadata *InstallationMetadata, component string) string {
@@ -420,6 +442,12 @@ func commitRelease(extractDir string, paths Paths, opts Options, manifest *Marke
 			metadata.CodexMarketplaceVersion = prior.CodexMarketplaceVersion
 		}
 	}
+	metadata.InstalledVersion = highestVersion([]string{
+		metadata.BinaryVersion,
+		metadata.ClaudePluginVersion,
+		metadata.CodexPluginVersion,
+		metadata.CodexMarketplaceVersion,
+	})
 	metadataStage, err := stageInstallationMetadata(paths.MetadataPath(), metadata)
 	if err != nil {
 		return failed(fmt.Errorf("stage installation metadata: %w", err))

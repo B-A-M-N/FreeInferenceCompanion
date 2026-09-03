@@ -13,6 +13,7 @@ import (
 
 const (
 	installationMetadataSchema = 3
+	installationDigestFormat   = "framed-v1"
 	maxInstallationMetadata    = 32 << 10
 )
 
@@ -40,6 +41,7 @@ type InstallationMetadata struct {
 	InstallerVersion        string    `json:"installer_version"`
 	ManifestOrigin          string    `json:"manifest_origin"`
 	ArtifactSHA256          string    `json:"artifact_sha256"`
+	DigestFormat            string    `json:"digest_format"`
 	ShimBackupPath          string    `json:"shim_backup_path,omitempty"`
 	ManagedBinaryOwned      bool      `json:"managed_binary_owned"`
 	ShimOwned               bool      `json:"shim_owned"`
@@ -92,6 +94,9 @@ func (p Paths) codexPluginPath() string {
 func (m InstallationMetadata) validate() error {
 	if m.SchemaVersion != installationMetadataSchema {
 		return fmt.Errorf("unsupported installation metadata schema %d", m.SchemaVersion)
+	}
+	if m.DigestFormat != installationDigestFormat {
+		return fmt.Errorf("unsupported installation metadata digest format %q", m.DigestFormat)
 	}
 	if strings.TrimSpace(m.InstalledVersion) == "" || !semverPattern.MatchString(m.InstalledVersion) {
 		return errors.New("installation metadata has an invalid installed version")
@@ -313,6 +318,7 @@ func metadataForPaths(paths Paths, version, manifestURL, artifactSHA string, ins
 		InstallerVersion:     installerVersion,
 		ManifestOrigin:       manifestURL,
 		ArtifactSHA256:       artifactSHA,
+		DigestFormat:         installationDigestFormat,
 		ManagedBinaryOwned:   true,
 		ShimOwned:            true,
 		ClaudePluginOwned:    true,

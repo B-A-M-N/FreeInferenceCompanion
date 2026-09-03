@@ -9,6 +9,8 @@ func TestValidCodexHookDefinitionParsesCommandEntries(t *testing.T) {
 	}
 	for _, invalid := range [][]byte{
 		[]byte(`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"broken"}]}]}}`),
+		[]byte("{\"hooks\":{\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"echo \\\"${PLUGIN_ROOT}/scripts/run-hook.sh\\\"\"}]}]}}"),
+		[]byte("{\"hooks\":{\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"\\\"${PLUGIN_ROOT}/scripts/run-hook.sh-extra\\\" SessionStart\"}]}]}}"),
 		[]byte(`{"hooks":{"SessionStart":[{"hooks":[{"type":"description","value":"${PLUGIN_ROOT}/scripts/run-hook.sh"}]}]}}`),
 		[]byte(`{"hooks":`),
 	} {

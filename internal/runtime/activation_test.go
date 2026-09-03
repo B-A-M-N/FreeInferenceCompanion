@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -152,6 +153,23 @@ env_key = "HOME"
 `)
 	if _, err := ResolveCodexProviderConfiguration(); err == nil {
 		t.Fatal("provider env_key HOME must not be accepted as a credential reference")
+	}
+}
+
+func TestResolveCodexProviderReadDirFailureIsUnknown(t *testing.T) {
+	clearActivationEnv(t)
+	writeCodexConfig(t, `model_provider = "freeinference"
+
+[model_providers.freeinference]
+base_url = "https://freeinference.org/v1"
+env_key = "CODEX_FI_KEY"
+`)
+	t.Setenv("CODEX_FI_KEY", "selected-provider-key")
+	evidence, err := resolveCodexProviderConfigurationWith("", func(string) ([]os.DirEntry, error) {
+		return nil, errors.New("permission denied")
+	})
+	if err == nil || evidence.ProviderSelectionVerified {
+		t.Fatalf("profile directory failure must remain unverified: evidence=%+v err=%v", evidence, err)
 	}
 }
 

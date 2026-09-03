@@ -17,11 +17,23 @@ func ensurePrivateDirNoFollow(path string) error {
 	if !filepath.IsAbs(clean) || clean == string(filepath.Separator) {
 		return errors.New("trace receipt directory path must be an absolute non-root path")
 	}
+	volume := filepath.VolumeName(clean)
+	root := volume + string(filepath.Separator)
+	if volume == "" {
+		root = string(filepath.Separator)
+	}
+	if clean == root {
+		return errors.New("trace receipt directory path cannot be a volume root")
+	}
 	if err := os.MkdirAll(clean, 0700); err != nil {
 		return err
 	}
-	current := string(filepath.Separator)
-	components := strings.Split(strings.TrimPrefix(clean, current), current)
+	relative := strings.TrimPrefix(clean, root)
+	if relative == clean || relative == "" {
+		return errors.New("trace receipt directory path is not beneath its volume root")
+	}
+	current := root
+	components := strings.Split(relative, string(filepath.Separator))
 	privateStart := len(components) - 2
 	for i, component := range components {
 		current = filepath.Join(current, component)

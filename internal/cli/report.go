@@ -95,7 +95,6 @@ type reportModelMonitor struct {
 	CheckedAt     *time.Time `json:"checked_at,omitempty"`
 	AgeSecs       *int64     `json:"age_seconds,omitempty"`
 	Stale         bool       `json:"stale,omitempty"`
-	Error         string     `json:"error,omitempty"`
 }
 
 type reportAccountUsage struct {
@@ -371,9 +370,6 @@ func printMarkdownReport(stdout io.Writer, report *reportData, reveal bool) {
 		}
 		if report.ModelMonitor.Stale {
 			fmt.Fprintln(stdout, "Freshness: stale")
-		}
-		if report.ModelMonitor.Error != "" {
-			fmt.Fprintf(stdout, "Error:   %s\n", report.ModelMonitor.Error)
 		}
 	}
 

@@ -98,6 +98,44 @@ func TestMigrateSnapshotFromV1(t *testing.T) {
 	}
 }
 
+func TestMigrateSnapshotPreservesValidLikelihoodAndDiscardsInvalid(t *testing.T) {
+	valid := 0.75
+	invalid := 2.0
+	s := &Snapshot{
+		SchemaVersion: 2,
+		Client:        ClientInfo{Type: ClientClaudeCode},
+		Session:       SessionInfo{ID: "s1"},
+		CacheDiagnosis: &CacheDiagnosis{CandidateCauses: []RankedCause{
+			{Likelihood: &valid},
+			{Likelihood: &invalid},
+		}},
+	}
+	if err := MigrateSnapshot(s); err != nil {
+		t.Fatalf("migrate v2: %v", err)
+	}
+	if got := s.CacheDiagnosis.CandidateCauses[0].HeuristicScore; got != valid {
+		t.Fatalf("valid likelihood = %v, want %v", got, valid)
+	}
+	if got := s.CacheDiagnosis.CandidateCauses[1].HeuristicScore; got != 0 {
+		t.Fatalf("invalid likelihood copied as %v", got)
+	}
+	if err := ValidateSnapshot(s); err != nil {
+		t.Fatalf("migrated snapshot rejected: %v", err)
+	}
+}
+
+func TestValidateSnapshotRejectsInvalidDiagnosisScore(t *testing.T) {
+	s := &Snapshot{
+		SchemaVersion:  StateVersion,
+		Client:         ClientInfo{Type: ClientClaudeCode},
+		Session:        SessionInfo{ID: "s1"},
+		CacheDiagnosis: &CacheDiagnosis{CandidateCauses: []RankedCause{{HeuristicScore: 1.1}}},
+	}
+	if err := ValidateSnapshot(s); err == nil {
+		t.Fatal("out-of-range heuristic score must be rejected")
+	}
+}
+
 func TestMigrateSnapshotRejectsFutureVersion(t *testing.T) {
 	s := &Snapshot{SchemaVersion: CurrentSchemaVersion + 1}
 	if err := MigrateSnapshot(s); err == nil {

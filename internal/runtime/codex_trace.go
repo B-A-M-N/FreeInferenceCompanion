@@ -559,7 +559,7 @@ func removeOwnedCodexMappings(contents, providerID string, ownership codexTraceO
 		removeEmptyCodexNestedTable(lines, nestedTable, nestedTableQuoted)
 	}
 	updated := strings.Join(lines, "")
-	if !ownership.OriginalTrailingNewline {
+	if ownership.OriginalTrailingNewline != nil && !*ownership.OriginalTrailingNewline {
 		updated = strings.TrimSuffix(updated, "\n")
 		updated = strings.TrimSuffix(updated, "\r")
 	}

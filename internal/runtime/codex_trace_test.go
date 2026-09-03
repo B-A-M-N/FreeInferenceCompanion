@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -95,6 +96,42 @@ func TestCodexTraceBackupRestoreIsReversible(t *testing.T) {
 	}
 	if _, err := os.Stat(path + codexTraceBackupSuffix); !os.IsNotExist(err) {
 		t.Fatalf("backup remains after restore: %v", err)
+	}
+}
+
+func TestLegacyCodexTraceOwnershipPreservesRestoreBehavior(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	before := "[model_providers.freeinference]\nbase_url=\"https://freeinference.org/v1\""
+	after := before + "\n\n[model_providers.freeinference.env_http_headers]\n\"X-Session-ID\" = \"FI_TRACE_SESSION_ID\"\n"
+	metadata := ownershipForTrace(configPath, "freeinference", before, after, CodexTraceMapping{
+		Added:        []string{"X-Session-ID"},
+		CreatedTable: true,
+	})
+	metadata.SchemaVersion = 1
+	metadata.OriginalTrailingNewline = nil
+	data, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadataPath := codexTraceOwnershipPath(configPath)
+	if err := os.WriteFile(metadataPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, found, err := loadCodexTraceOwnership(metadataPath)
+	if err != nil || !found {
+		t.Fatalf("load legacy metadata: found=%v err=%v", found, err)
+	}
+	if loaded.SchemaVersion != codexTraceOwnershipSchema || loaded.OriginalTrailingNewline == nil || !*loaded.OriginalTrailingNewline {
+		t.Fatalf("legacy newline state was not migrated: %+v", loaded)
+	}
+	restored, err := removeOwnedCodexMappings(after, "freeinference", *loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(restored, "\n") {
+		t.Fatalf("legacy restore changed prior newline behavior: %q", restored)
 	}
 }
 

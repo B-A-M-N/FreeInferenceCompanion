@@ -176,6 +176,19 @@ func ValidateSnapshot(s *Snapshot) error {
 		}
 	}
 
+	// Diagnosis scores are heuristic values, never percentages or arbitrary
+	// weights. Keep malformed persisted values out of renderers and reports.
+	if s.CacheDiagnosis != nil {
+		if !validHeuristicScore(s.CacheDiagnosis.Confidence) {
+			return fmt.Errorf("cache diagnosis confidence out of range [0,1]: %f", s.CacheDiagnosis.Confidence)
+		}
+		for i, cause := range s.CacheDiagnosis.CandidateCauses {
+			if !validHeuristicScore(cause.HeuristicScore) {
+				return fmt.Errorf("cache diagnosis candidate cause %d heuristic score out of range [0,1]: %f", i, cause.HeuristicScore)
+			}
+		}
+	}
+
 	// Session status must be a known constant. Empty is allowed — a
 	// freshly-initialized snapshot may not yet have a status set.
 	switch s.Session.Status {
@@ -185,6 +198,10 @@ func ValidateSnapshot(s *Snapshot) error {
 	}
 
 	return nil
+}
+
+func validHeuristicScore(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0) && value >= 0 && value <= 1
 }
 
 func validateFailureRecord(f *FailureRecord) error {
@@ -565,7 +582,9 @@ func MigrateSnapshot(s *Snapshot) error {
 				for i := range s.CacheDiagnosis.CandidateCauses {
 					cause := &s.CacheDiagnosis.CandidateCauses[i]
 					if cause.Likelihood != nil {
-						cause.HeuristicScore = *cause.Likelihood
+						if validHeuristicScore(*cause.Likelihood) {
+							cause.HeuristicScore = *cause.Likelihood
+						}
 						cause.Likelihood = nil
 					}
 				}

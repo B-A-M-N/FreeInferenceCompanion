@@ -31,7 +31,7 @@ func ensurePrivateDirNoFollow(path string) error {
 	if err != nil {
 		return fmt.Errorf("open filesystem root: %w", err)
 	}
-	defer unix.Close(fd)
+	defer func() { _ = unix.Close(fd) }()
 
 	for i, component := range components {
 		if component == "" || component == "." || component == ".." {
