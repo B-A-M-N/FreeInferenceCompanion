@@ -96,7 +96,9 @@ func createTestZIP(t *testing.T, version string) ([]byte, string) {
 	f.Write([]byte(`{"name":"freeinference-companion"}`))
 	f, _ = w.Create("plugins/claude-code/hooks/hooks.json")
 	f.Write([]byte(`{"hooks":{}}`))
-	f, _ = w.Create("plugins/claude-code/scripts/run-hook.sh")
+	claudeHook := &zip.FileHeader{Name: "plugins/claude-code/scripts/run-hook.sh", Method: zip.Deflate}
+	claudeHook.SetMode(0755)
+	f, _ = w.CreateHeader(claudeHook)
 	f.Write([]byte("#!/usr/bin/env bash\nexit 0\n"))
 	f, _ = w.Create("plugins/claude-code/package.json")
 	f.Write([]byte(`{"name":"freeinference-companion"}`))
@@ -105,7 +107,9 @@ func createTestZIP(t *testing.T, version string) ([]byte, string) {
 	f.Write([]byte(`{"name":"freeinference-companion"}`))
 	f, _ = w.Create("plugins/codex/hooks/hooks.json")
 	f.Write([]byte(`{"hooks":{}}`))
-	f, _ = w.Create("plugins/codex/scripts/run-hook.sh")
+	codexHook := &zip.FileHeader{Name: "plugins/codex/scripts/run-hook.sh", Method: zip.Deflate}
+	codexHook.SetMode(0755)
+	f, _ = w.CreateHeader(codexHook)
 	f.Write([]byte("#!/usr/bin/env bash\nexit 0\n"))
 
 	w.Close()
@@ -404,6 +408,37 @@ func TestExtractZIPPreservesExecutableMode(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0755 {
 		t.Fatalf("extracted mode = %o, want 0755", info.Mode().Perm())
+	}
+}
+
+func TestValidateReleaseLayoutRequiresExecutableHook(t *testing.T) {
+	root := t.TempDir()
+	for _, plugin := range []struct {
+		name string
+		base string
+		meta string
+	}{
+		{name: "Claude", base: filepath.Join(root, "plugins", "claude-code"), meta: ".claude-plugin/plugin.json"},
+		{name: "Codex", base: filepath.Join(root, "plugins", "codex"), meta: ".codex-plugin/plugin.json"},
+	} {
+		for _, rel := range []string{plugin.meta, "hooks/hooks.json", "scripts/run-hook.sh"} {
+			path := filepath.Join(plugin.base, rel)
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("{}\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Chmod(filepath.Join(plugin.base, "scripts/run-hook.sh"), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(filepath.Join(root, "plugins", "codex", "scripts", "run-hook.sh"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateReleaseLayout(root, false, true); err == nil {
+		t.Fatal("non-executable plugin runner passed release validation")
 	}
 }
 

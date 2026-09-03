@@ -432,7 +432,7 @@ func QualifyCacheWarning(snap *schema.Snapshot, currentContextTokens int64, prov
 	if !providerConfirmed {
 		return decision
 	}
-	if analysis.UsableSampleCount < MinObservationsForWarning {
+	if effectiveUsableSamples(analysis) < MinObservationsForWarning {
 		return decision
 	}
 	if currentContextTokens < MinContextTokensForWarning {

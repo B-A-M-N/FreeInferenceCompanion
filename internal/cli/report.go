@@ -292,7 +292,9 @@ func buildReportModelMonitor(gs *schema.GlobalState, modelID string, now time.Ti
 			age := max(0, int64(now.Sub(checked).Seconds()))
 			monitor.AgeSecs = &age
 			monitor.Stale = now.Before(checked) || now.Sub(checked) > 45*time.Minute
-			monitor.Error = secure.SanitizeField(metric.Latest.Error)
+			// Do not copy upstream error bodies into a shareable support report.
+			// They are not a typed, locally-controlled field and may contain
+			// infrastructure details or other sensitive text.
 		}
 		return monitor
 	}

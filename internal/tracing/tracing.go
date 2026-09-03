@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 	"unicode"
 )
@@ -72,6 +73,14 @@ func ValidateTraceID(id string) bool {
 		if !((r >= 'a' && r <= 'z') || (r >= '2' && r <= '7')) {
 			return false
 		}
+	}
+	// A 128-bit value encodes to 26 base32 symbols. The final symbol carries
+	// only three data bits; the remaining two bits must be zero. Without this
+	// check, ValidateTraceID accepts strings that GenerateTraceID can never
+	// produce.
+	const alphabet = "abcdefghijklmnopqrstuvwxyz234567"
+	if value := strings.IndexByte(alphabet, id[len(id)-1]); value < 0 || value&3 != 0 {
+		return false
 	}
 	return true
 }
@@ -203,14 +212,7 @@ func receiptDir() string {
 }
 
 func ensurePrivateDir(path string) error {
-	if err := os.MkdirAll(path, 0700); err != nil {
-		return err
-	}
-	info, err := os.Lstat(path)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return errors.New("trace receipt directory is not a private directory")
-	}
-	return os.Chmod(path, 0700)
+	return ensurePrivateDirNoFollow(path)
 }
 
 // WriteLaunchReceipt writes a short-lived, private handoff for SessionStart.
@@ -283,7 +285,7 @@ func ConsumeLaunchReceipt(path, expectedClient, expectedOrigin string) (*LaunchR
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 != 0 {
 		return nil, errors.New("invalid trace receipt file")
 	}
-	f, err := os.Open(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
 	}

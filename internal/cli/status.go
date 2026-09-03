@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -661,9 +662,15 @@ func stdinHasData(stdin io.Reader) bool {
 	if stdin == nil {
 		return false
 	}
-	// Test and embedding callers commonly provide a buffered reader. Honor
-	// its length when available so an empty in-memory reader is interactive
-	// input, not a phantom automatic status-line payload.
+	// A bufio.Reader's Len reports only bytes already buffered, not whether its
+	// underlying reader has data. Peek without consuming so a freshly wrapped
+	// pipe is still recognized as status-line input.
+	if buffered, ok := stdin.(*bufio.Reader); ok {
+		_, err := buffered.Peek(1)
+		return err == nil
+	}
+	// In-memory readers such as bytes.Buffer expose their complete remaining
+	// length, so Len is safe for those non-buffering reader types.
 	if sized, ok := stdin.(interface{ Len() int }); ok {
 		return sized.Len() > 0
 	}

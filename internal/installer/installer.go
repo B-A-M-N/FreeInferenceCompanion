@@ -385,6 +385,9 @@ func validateReleaseLayout(root string, needBinary, needPlugins bool) error {
 			if err != nil || !info.Mode().IsRegular() {
 				return fmt.Errorf("release archive is missing %s plugin file %s", plugin.name, required)
 			}
+			if required == "scripts/run-hook.sh" && info.Mode()&0111 == 0 {
+				return fmt.Errorf("release archive %s plugin runner is not executable", plugin.name)
+			}
 		}
 	}
 	return nil

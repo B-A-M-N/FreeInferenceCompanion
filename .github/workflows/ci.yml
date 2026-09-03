@@ -74,15 +74,32 @@ jobs:
       - name: Claude Code vendor plugin validation (when supported)
         run: |
           set -euo pipefail
-          # Claude Code 2.1.132 exposes a legacy validate command that hangs
-          # on this plugin and has no non-interactive validation contract.
-          # Newer releases expose --strict. Keep the matrix useful across
-          # both generations without letting the legacy command stall CI.
-          if claude plugin validate --help 2>&1 | grep -q -- '--strict'; then
-            claude plugin validate --strict plugins/claude-code
-          else
-            echo "::notice::$(claude --version) has no non-interactive strict plugin validator; internal manifest and wrapper checks cover this legacy release."
+          # Probe the actual validator command instead of parsing --help.
+          # Help text is not a stable compatibility contract, and grep -q can
+          # close the pipe early under pipefail. Older Claude releases may
+          # reject --strict or hang in their legacy validator; bound those
+          # cases and keep the repository-local checks authoritative.
+          set +e
+          validation_output="$(timeout --kill-after=5s 30s claude plugin validate --strict plugins/claude-code 2>&1)"
+          validation_status=$?
+          set -e
+          if [ -n "$validation_output" ]; then
+            printf '%s\n' "$validation_output"
           fi
+          if [ "$validation_status" -eq 0 ]; then
+            exit 0
+          fi
+          case "$validation_output" in
+            *unknown*--strict*|*--strict*unknown*|*unrecognized*--strict*|*--strict*unrecognized*|*invalid\ option*--strict*|*unexpected\ argument*--strict*)
+              echo "::notice::$(claude --version) does not support non-interactive strict plugin validation; internal manifest and wrapper checks cover this release."
+              exit 0
+              ;;
+          esac
+          if [ "$validation_status" -eq 124 ] || [ "$validation_status" -eq 137 ]; then
+            echo "::notice::$(claude --version) did not complete strict plugin validation within 30 seconds; internal manifest and wrapper checks cover this release."
+            exit 0
+          fi
+          exit "$validation_status"
       - name: Codex manifest and lifecycle hook validation
         run: |
           python3 -c "

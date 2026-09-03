@@ -22,10 +22,13 @@ Codex plugin iteration uses the repository marketplace at
 plugin manifest before testing with Codex:
 
 ```bash
-python3 /home/bamn/.codex/skills/.system/plugin-creator/scripts/read_marketplace_name.py \
-  --marketplace-path codex-marketplace/.agents/plugins/marketplace.json
-python3 /home/bamn/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py plugins/codex
+make plugin-syntax-check
+make plugin-validate
 ```
+
+These repository-local checks are the portable baseline. If you have the
+Codex plugin-creator tooling installed separately, run its validators from
+that installation rather than relying on an author-specific filesystem path.
 
 The authoritative plugin validation in CI includes a real pinned Codex CLI
 install/list check in addition to static manifest checks.

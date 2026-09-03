@@ -612,15 +612,45 @@ func checkCodexHookDefinition() api.CheckResult {
 	for _, root := range codexPluginRoots(home) {
 		hookPath := filepath.Join(root, "hooks", "hooks.json")
 		data, readErr := os.ReadFile(hookPath)
-		if readErr != nil || !strings.Contains(string(data), "${PLUGIN_ROOT}") || !strings.Contains(string(data), "run-hook.sh") {
+		if readErr != nil || !validCodexHookDefinition(data) {
 			continue
 		}
 		runner := filepath.Join(root, "scripts", "run-hook.sh")
-		if info, statErr := os.Stat(runner); statErr == nil && info.Mode()&0111 != 0 {
+		if info, statErr := os.Lstat(runner); statErr == nil && info.Mode().IsRegular() && info.Mode()&0111 != 0 {
 			return api.CheckResult{State: api.CheckPass, Detail: hookPath}
 		}
 	}
 	return api.CheckResult{State: api.CheckUnknown, Detail: "Codex hooks/hooks.json and executable runner not found"}
+}
+
+type codexHookDefinition struct {
+	Hooks map[string][]codexHookGroup `json:"hooks"`
+}
+
+type codexHookGroup struct {
+	Hooks []codexHookCommand `json:"hooks"`
+}
+
+type codexHookCommand struct {
+	Type    string `json:"type"`
+	Command string `json:"command"`
+}
+
+func validCodexHookDefinition(data []byte) bool {
+	var definition codexHookDefinition
+	if json.Unmarshal(data, &definition) != nil || len(definition.Hooks) == 0 {
+		return false
+	}
+	for _, groups := range definition.Hooks {
+		for _, group := range groups {
+			for _, command := range group.Hooks {
+				if command.Type == "command" && strings.Contains(command.Command, "${PLUGIN_ROOT}/scripts/run-hook.sh") {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func checkCodexHooksFeature() api.CheckResult {

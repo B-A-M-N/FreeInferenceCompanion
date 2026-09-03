@@ -34,12 +34,37 @@ func TestValidateTraceIDRejectsControlsArbitraryAndWrongLength(t *testing.T) {
 		"", valid + "x", strings.ToUpper(valid),
 		"fic-v1-aaaaaaaaaaaaaaaaaaaaaaaaa\n",
 		"fic-v1-aaaaaaaaaaaaaaaaaaaaaaaa!",
+		"fic-v1-aaaaaaaaaaaaaaaaaaaaaaaab",
 		"fic-v1-" + strings.Repeat("a", 100000),
 		"fic-v1-user-name",
 	} {
 		if ValidateTraceID(candidate) {
 			t.Errorf("ValidateTraceID(%q) accepted unsafe/arbitrary value", candidate)
 		}
+	}
+}
+
+func TestReceiptDirectoryRejectsSymlinkedParent(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	target := filepath.Join(t.TempDir(), "redirected")
+	if err := os.MkdirAll(target, 0700); err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Join(os.TempDir(), "freeinference-companion")
+	if err := os.Symlink(target, parent); err != nil {
+		t.Fatal(err)
+	}
+	_, err := WriteLaunchReceipt(LaunchReceipt{
+		TraceID:        "fic-v1-aaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Client:         "claude-code",
+		Provider:       "freeinference",
+		EndpointOrigin: "https://freeinference.org",
+		StartedAt:      time.Now().UTC(),
+		HeaderName:     SessionHeader,
+		Source:         SourceCompanionGenerated,
+	})
+	if err == nil {
+		t.Fatal("receipt creation followed a symlinked parent directory")
 	}
 }
 

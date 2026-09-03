@@ -81,6 +81,7 @@ func TestCollectCorrelatesNearestPublicMonitorSampleAndStatus(t *testing.T) {
 	if err := state.AppendEvent(paths, schema.ClientClaudeCode, sessionID, state.Event{
 		Type:       state.EventTurnFailed,
 		Model:      "glm-5.2",
+		Provider:   schema.ProviderFreeInference,
 		Detail:     "bad_gateway",
 		HTTPStatus: &status,
 		Retryable:  &retryable,
@@ -137,5 +138,56 @@ func TestCollectModelFilterUsesEventModelAfterSwitch(t *testing.T) {
 	report, err := Collect(paths, Filter{Model: "new-model", Since: now.Add(-time.Minute)}, now)
 	if err != nil || report.Total != 1 {
 		t.Fatalf("model-switch filter report=%+v err=%v", report, err)
+	}
+}
+
+func TestCollectDoesNotCorrelateNonFreeInferenceFailures(t *testing.T) {
+	paths := state.NewPathsWithDir(t.TempDir())
+	if err := paths.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	sessionID := "session-other-provider"
+	snap := &schema.Snapshot{
+		SchemaVersion: schema.StateVersion,
+		Client:        schema.ClientInfo{Type: schema.ClientClaudeCode},
+		Session:       schema.SessionInfo{ID: sessionID, StartedAt: now, LastEventAt: now, Status: schema.SessionActive},
+		Model:         schema.ModelInfo{ID: "shared-model"},
+	}
+	if err := state.UpdateSessionIndex(paths, snap); err != nil {
+		t.Fatal(err)
+	}
+	if err := paths.EnsureSessionDir(schema.ClientClaudeCode, sessionID); err != nil {
+		t.Fatal(err)
+	}
+	status := 502
+	if err := state.AppendEvent(paths, schema.ClientClaudeCode, sessionID, state.Event{
+		Type:       state.EventTurnFailed,
+		Model:      "shared-model",
+		Provider:   "another-provider",
+		Detail:     "bad_gateway",
+		HTTPStatus: &status,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ok := false
+	if err := state.SavePublicStatus(paths, &schema.PublicStatusCache{
+		Source: api.PublicStatusSource,
+		Models: []schema.PublicStatusModelCache{{
+			ModelID: "shared-model",
+			Latest:  &schema.PublicStatusSampleCache{OK: &ok, CheckedAt: now},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	report, err := Collect(paths, Filter{Since: now.Add(-time.Minute)}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Recent) != 1 {
+		t.Fatalf("report = %+v", report)
+	}
+	if report.Recent[0].PublicMonitor != nil {
+		t.Fatalf("non-FreeInference failure was correlated: %+v", report.Recent[0].PublicMonitor)
 	}
 }

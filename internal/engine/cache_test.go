@@ -197,6 +197,22 @@ func TestQualifyCacheWarningActivatesAfterThree(t *testing.T) {
 	}
 }
 
+func TestQualifyCacheWarningUsesLegacyRequestSamples(t *testing.T) {
+	now := time.Now()
+	readShare := 0.01
+	snap := &schema.Snapshot{
+		CacheAnalysis: &schema.CacheAnalysis{
+			RequestSamples: 3,
+			CacheReadShare: &readShare,
+			ConsecutiveLow: 3,
+		},
+	}
+	decision := QualifyCacheWarning(snap, MinContextTokensForWarning, true, now)
+	if !decision.Warn {
+		t.Fatal("legacy analysis with qualifying RequestSamples should warn")
+	}
+}
+
 func TestQualifyCacheWarningCooldown(t *testing.T) {
 	snap := &schema.Snapshot{}
 	now := time.Now()

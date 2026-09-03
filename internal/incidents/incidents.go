@@ -149,7 +149,12 @@ func Collect(paths state.Paths, filter Filter, now time.Time) (*Report, error) {
 			if incident.HTTPStatus != nil {
 				statusCounts[fmt.Sprintf("%d", *incident.HTTPStatus)]++
 			}
-			incident.PublicMonitor = nearestMonitorSample(monitor, incident.Model, incident.At)
+			// Public monitor samples are evidence about FreeInference only. A
+			// coincidentally identical model name in another provider must not
+			// make a local failure look correlated with FreeInference health.
+			if event.Provider == schema.ProviderFreeInference {
+				incident.PublicMonitor = nearestMonitorSample(monitor, incident.Model, incident.At)
+			}
 			report.Total++
 			categoryCounts[incident.Category]++
 			if incident.Model != "" {
