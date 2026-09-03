@@ -26,6 +26,7 @@ endif
 LDFLAGS=-ldflags "-s -w -X github.com/b-a-m-n/freeinference-companion/pkg/version.Version=$(BUILD_VERSION) -X main.commit=$(COMMIT)"
 STATIC_FLAGS=CGO_ENABLED=0
 RELEASE_DIR=release
+REPOSITORY_URL=https://github.com/B-A-M-N/FreeInferenceCompanion
 
 # Supported MVP platforms: Linux amd64/arm64, macOS amd64/arm64.
 PLATFORMS=linux-amd64 linux-arm64 darwin-amd64 darwin-arm64
@@ -219,12 +220,12 @@ marketplace:
 			hash=$$(hash_file "$(RELEASE_DIR)/$$asset"); \
 			test -n "$$hash" || { echo "error: cannot hash $$asset" >&2; exit 1; }; \
 			if [ $$first -eq 0 ]; then echo ','; fi; \
-			printf '    "%s": {"url": "https://github.com/b-a-m-n/freeinference-companion/releases/download/v%s/%s", "sha256": "%s"}' "$$p" "$$rel_version" "$$asset" "$$hash"; \
+			printf '    "%s": {"url": "$(REPOSITORY_URL)/releases/download/v%s/%s", "sha256": "%s"}' "$$p" "$$rel_version" "$$asset" "$$hash"; \
 			first=0; \
 		done; \
 		echo; \
 		echo '  },'; \
-		printf '  "plugin_urls": {"claude-code": "https://github.com/b-a-m-n/freeinference-companion/releases/download/v%s/freeinference-companion-claude_%s.zip", "codex": "https://github.com/b-a-m-n/freeinference-companion/releases/download/v%s/freeinference-companion-codex_%s.zip"}\n' "$$rel_version" "$$rel_version" "$$rel_version" "$$rel_version"; \
+		printf '  "plugin_urls": {"claude-code": "$(REPOSITORY_URL)/releases/download/v%s/freeinference-companion-claude_%s.zip", "codex": "$(REPOSITORY_URL)/releases/download/v%s/freeinference-companion-codex_%s.zip"}\n' "$$rel_version" "$$rel_version" "$$rel_version" "$$rel_version"; \
 		echo '}'; \
 	} > "$$out"; \
 	python3 -c "import json; json.load(open('$$out')); print('marketplace manifest written to $$out')"
@@ -288,7 +289,7 @@ package-smoke: package
 		test -x "$$idir/plugins/claude-code/scripts/run-hook.sh" || { echo "FAIL: $$p installer missing executable Claude hook runner"; exit 1; }; \
 		echo "installer archive OK: $$p"; \
 	done; \
-	python3 -c "import hashlib,json,pathlib; m=json.load(open('$(RELEASE_DIR)/marketplace.json')); assert set(m['platforms']) == set('$(PLATFORMS)'.split()); assert all(len(info['sha256']) == 64 and hashlib.sha256((pathlib.Path('$(RELEASE_DIR)') / pathlib.PurePosixPath(info['url']).name).read_bytes()).hexdigest() == info['sha256'] for info in m['platforms'].values())"; \
+	python3 -c "import hashlib,json,pathlib; m=json.load(open('$(RELEASE_DIR)/marketplace.json')); assert set(m['platforms']) == set('$(PLATFORMS)'.split()); assert all(info['url'].startswith('$(REPOSITORY_URL)/releases/download/') for info in m['platforms'].values()); assert all(url.startswith('$(REPOSITORY_URL)/releases/download/') for url in m['plugin_urls'].values()); assert all(len(info['sha256']) == 64 and hashlib.sha256((pathlib.Path('$(RELEASE_DIR)') / pathlib.PurePosixPath(info['url']).name).read_bytes()).hexdigest() == info['sha256'] for info in m['platforms'].values())"; \
 	\
 	extract="$$tmp/extract-$$cur"; \
 	mkdir -p "$$extract"; \

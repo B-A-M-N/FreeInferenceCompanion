@@ -18,6 +18,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	appversion "github.com/b-a-m-n/freeinference-companion/pkg/version"
 )
 
 type pkg struct {
@@ -118,7 +120,7 @@ func main() {
 		DataLicense:       "CC0-1.0",
 		SPDXID:            "SPDXRef-DOCUMENT",
 		DocName:           "freeinference-companion-" + version,
-		DocumentNamespace: "https://github.com/b-a-m-n/freeinference-companion/releases/" + version,
+		DocumentNamespace: appversion.RepositoryURL + "/releases/" + version,
 		CreationInfo: creationInfo{
 			Created:  created,
 			Creators: []string{"Tool: freeinference-companion-makefile"},

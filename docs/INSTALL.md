@@ -6,7 +6,7 @@ checkout development command and is documented in [DEVELOPMENT.md](DEVELOPMENT.m
 ## Release binary
 
 Download the checksummed release artifact for your platform from the
-[GitHub releases](https://github.com/b-a-m-n/freeinference-companion/releases),
+[GitHub releases](https://github.com/B-A-M-N/FreeInferenceCompanion/releases),
 along with `checksums.txt`. Set `VERSION` to the release you are installing
 and verify the exact archive before extracting it:
 
@@ -15,8 +15,8 @@ VERSION=0.1.0
 PLATFORM=linux-amd64       # linux-arm64, darwin-amd64, or darwin-arm64
 ARCHIVE="freeinference-companion-${VERSION}-${PLATFORM}.tar.gz"
 
-curl -fLO "https://github.com/b-a-m-n/freeinference-companion/releases/download/v${VERSION}/${ARCHIVE}"
-curl -fLO "https://github.com/b-a-m-n/freeinference-companion/releases/download/v${VERSION}/checksums.txt"
+curl -fLO "https://github.com/B-A-M-N/FreeInferenceCompanion/releases/download/v${VERSION}/${ARCHIVE}"
+curl -fLO "https://github.com/B-A-M-N/FreeInferenceCompanion/releases/download/v${VERSION}/checksums.txt"
 if command -v sha256sum >/dev/null 2>&1; then
   grep "  ${ARCHIVE}$" checksums.txt | sha256sum -c -
 else

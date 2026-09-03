@@ -4,11 +4,22 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/adapters"
 	"github.com/b-a-m-n/freeinference-companion/pkg/version"
 )
+
+func TestDefaultManifestURLUsesCanonicalRepository(t *testing.T) {
+	wantPrefix := version.RepositoryURL + "/releases/"
+	if !strings.HasPrefix(defaultManifestURL, wantPrefix) {
+		t.Fatalf("defaultManifestURL = %q, want prefix %q", defaultManifestURL, wantPrefix)
+	}
+	if !strings.HasSuffix(defaultManifestURL, "/latest/download/marketplace.json") {
+		t.Fatalf("defaultManifestURL = %q, want latest marketplace manifest", defaultManifestURL)
+	}
+}
 
 // TestVersionConsistency verifies that the CLI version, adapter plugin
 // version, and both plugin manifest versions all agree. This is the

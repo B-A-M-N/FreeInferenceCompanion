@@ -9,7 +9,7 @@ fixes.
 ## Private reports
 
 Please report suspected vulnerabilities privately through [GitHub Security
-Advisories](https://github.com/b-a-m-n/freeinference-companion/security/advisories/new).
+Advisories](https://github.com/B-A-M-N/FreeInferenceCompanion/security/advisories/new).
 Do not publish credentials, private prompts, or an exploit before a fix is
 available. Include the affected version, operating system, reproduction steps,
 and sanitized logs.
