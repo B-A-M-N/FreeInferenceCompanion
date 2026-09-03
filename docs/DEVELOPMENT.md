@@ -15,6 +15,7 @@ not the recommended end-user release path. `make package-smoke` and
 `make plugin-clean-install` extract the generated archives and verify bundled
 binary/plugin layouts. `make release` runs the release gate, packaging,
 reproducibility, archive smoke tests, and clean plugin-install checks.
+The publication checklist is in [RELEASING.md](RELEASING.md).
 
 Codex plugin iteration uses the repository marketplace at
 `codex-marketplace/.agents/plugins/marketplace.json`. Validate it and the

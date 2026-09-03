@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="360" viewBox="0 0 960 360" role="img" aria-labelledby="title desc">
+  <title id="title">FreeInference Companion terminal example</title>
+  <desc id="desc">A terminal showing local provider verification, disabled background refresh, and a compact FreeInference status line.</desc>
+  <rect width="960" height="360" rx="12" fill="#10151c"/>
+  <rect width="960" height="42" rx="12" fill="#1b232d"/>
+  <rect y="30" width="960" height="12" fill="#1b232d"/>
+  <circle cx="24" cy="21" r="6" fill="#d06b6b"/>
+  <circle cx="46" cy="21" r="6" fill="#d2a85a"/>
+  <circle cx="68" cy="21" r="6" fill="#6eaa7a"/>
+  <text x="96" y="26" fill="#9aa7b5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14">freeinference — local diagnostics</text>
+  <text x="32" y="82" fill="#83b8ff" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16">$ freeinference doctor</text>
+  <text x="32" y="112" fill="#d8dee7" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16">provider route       <tspan fill="#8bc48f">verified FreeInference</tspan></text>
+  <text x="32" y="138" fill="#d8dee7" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16">local hooks          <tspan fill="#8bc48f">ready</tspan></text>
+  <text x="32" y="164" fill="#d8dee7" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16">background refresh   <tspan fill="#d2a85a">disabled</tspan></text>
+  <text x="32" y="216" fill="#83b8ff" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16">$ freeinference status --compact</text>
+  <text x="32" y="258" fill="#f1f4f8" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="20">FI glm-5.1 <tspan fill="#9aa7b5">|</tspan> cache <tspan fill="#8bc48f">78%</tspan> <tspan fill="#9aa7b5">|</tspan> fresh 12.4K <tspan fill="#9aa7b5">|</tspan> ctx <tspan fill="#8bc48f">41%</tspan> <tspan fill="#9aa7b5">|</tspan> <tspan fill="#8bc48f">healthy</tspan></text>
+  <text x="32" y="312" fill="#7f8b99" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14">illustrative output — values are local observations</text>
+</svg>

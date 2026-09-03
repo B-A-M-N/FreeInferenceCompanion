@@ -14,12 +14,24 @@ runtime tests. `bench-ci`
 reports and gates Go benchmark average `ns/op`; it does not calculate p95 and
 must not be described as a p95 verification.
 
-Plugin syntax checks are intentionally labeled as syntax checks. CI also
-installs the pinned Claude Code validator and runs strict validation. For
-local releases, run the same vendor validation explicitly:
+Plugin syntax checks are intentionally labeled as syntax checks. CI tests the
+Claude Code compatibility matrix with pinned releases. Versions that expose
+the non-interactive strict validator run vendor validation; the legacy
+`2.1.132` CLI exposes a validation command that can hang on this plugin, so CI
+does not invoke that command and reports a notice after the internal manifest
+and wrapper checks pass. This keeps the legacy job finite while still testing
+the plugin against that release.
+
+For a current Claude Code release, run vendor validation explicitly:
 
 ```bash
 claude plugin validate --strict plugins/claude-code
+```
+
+For a legacy release without `--strict`, run the internal checks instead:
+
+```bash
+make plugin-syntax-check
 ```
 
 Before publishing, also run the plugin clean-install smoke tests (which repeat

@@ -5,9 +5,10 @@ checkout development command and is documented in [DEVELOPMENT.md](DEVELOPMENT.m
 
 ## Release binary
 
-Download the signed, checksummed `v0.1.0` artifact for your platform from the
-[GitHub release](https://github.com/b-a-m-n/freeinference-companion/releases),
-along with `checksums.txt`. Verify the exact archive before extracting it:
+Download the checksummed release artifact for your platform from the
+[GitHub releases](https://github.com/b-a-m-n/freeinference-companion/releases),
+along with `checksums.txt`. Set `VERSION` to the release you are installing
+and verify the exact archive before extracting it:
 
 ```bash
 VERSION=0.1.0

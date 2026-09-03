@@ -405,8 +405,10 @@ vet:
 lint: vet staticcheck
 
 # staticcheck is pinned so the release gate is reproducible across runners.
+# The Go module uses semantic tags (v0.7.0), while the binary reports the
+# calendar release as 2026.1.
 staticcheck:
-	@STATICCHECK_VERSION=2026.1.0; \
+	@STATICCHECK_VERSION=v0.7.0; \
 	if ! command -v staticcheck >/dev/null 2>&1; then \
 		echo "installing staticcheck $$STATICCHECK_VERSION..."; \
 		go install honnef.co/go/tools/cmd/staticcheck@$$STATICCHECK_VERSION; \
