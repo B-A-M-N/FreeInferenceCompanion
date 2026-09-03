@@ -92,14 +92,15 @@ explicit `FI_PROXY_UPSTREAM_URL` attestation; a bare local URL stays silent.
 ### Codex
 
 ```bash
-freeinference install
-freeinference codex-footer install
+codex plugin marketplace add B-A-M-N/FreeInferenceCompanion --ref master
+codex plugin add freeinference-companion@freeinference-companion
 codex plugin list --json
 ```
 
 Configure the provider and profiles using [Codex with
-FreeInference](docs/codex.md). Review and trust the installed hooks in Codex's
-`/hooks` panel after installation.
+FreeInference](docs/codex.md). The Codex package is skill-only and uses Codex's
+native marketplace manager; it does not install lifecycle hooks or sit in the
+inference path.
 
 ### Manual or source installation
 

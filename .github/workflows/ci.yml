@@ -104,11 +104,11 @@ jobs:
             exit 0
           fi
           exit "$validation_status"
-      - name: Codex manifest and lifecycle hook validation
+      - name: Codex manifest and marketplace validation
         run: |
           python3 -c "
           import json, sys
-          m = json.load(open('plugins/codex/.codex-plugin/plugin.json'))
+          m = json.load(open('plugins/freeinference-companion/.codex-plugin/plugin.json'))
           # Top-level required fields.
           for key in ('name', 'version', 'description', 'author'):
               assert key in m, f'missing top-level {key}'
@@ -126,12 +126,15 @@ jobs:
               assert key in iface, f'missing interface.{key}'
           assert isinstance(iface['capabilities'], list) and len(iface['capabilities']) > 0, 'capabilities must be a non-empty list'
           assert isinstance(iface['defaultPrompt'], list) and len(iface['defaultPrompt']) > 0, 'defaultPrompt must be a non-empty list'
-          hooks = json.load(open('plugins/codex/hooks/hooks.json'))
-          required_events = {'SessionStart', 'SessionEnd', 'UserPromptSubmit', 'PreCompact', 'PostCompact', 'Stop'}
-          assert set(hooks.get('hooks', {})) == required_events, 'Codex lifecycle hook event set drifted'
-          assert all(isinstance(groups, list) and groups for groups in hooks['hooks'].values()), 'Codex hook groups must be non-empty'
-          assert __import__('os').access('plugins/codex/scripts/run-hook.sh', __import__('os').X_OK), 'Codex hook runner must be executable'
-          print('Codex manifest and lifecycle hooks are internally consistent.')
+          marketplace = json.load(open('.agents/plugins/marketplace.json'))
+          assert marketplace['name'] == 'freeinference-companion', 'unexpected marketplace name'
+          entries = [p for p in marketplace['plugins'] if p.get('name') == m['name']]
+          assert len(entries) == 1, 'marketplace must contain one matching plugin entry'
+          entry = entries[0]
+          assert entry['source'] == {'source': 'local', 'path': './plugins/freeinference-companion'}, 'invalid marketplace source'
+          assert entry['policy'] == {'installation': 'AVAILABLE', 'authentication': 'ON_INSTALL'}, 'invalid marketplace policy'
+          assert entry['category'] == 'Developer Tools', 'invalid marketplace category'
+          print('Codex skill-only manifest is internally consistent.')
           "
 
   plugin-validity-required:
@@ -161,8 +164,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$CODEX_HOME"
-          codex plugin marketplace add "$GITHUB_WORKSPACE/codex-marketplace" --json
-          codex plugin add freeinference-companion@freeinference-companion-local --json
+          codex plugin marketplace add "$GITHUB_WORKSPACE" --json
+          codex plugin add freeinference-companion@freeinference-companion --json
           codex plugin list --json > "$RUNNER_TEMP/codex-plugin-list.json"
           python3 - "$RUNNER_TEMP/codex-plugin-list.json" <<'PY'
           import json
@@ -171,7 +174,7 @@ jobs:
           data = json.load(open(sys.argv[1]))
           installed = data.get("installed", [])
           assert any(
-              item.get("pluginId") == "freeinference-companion@freeinference-companion-local"
+              item.get("pluginId") == "freeinference-companion@freeinference-companion"
               and item.get("installed") is True
               for item in installed
           ), data

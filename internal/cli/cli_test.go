@@ -535,10 +535,22 @@ func TestDisabledModeDiagnosticCommandsDoNotProbe(t *testing.T) {
 	t.Setenv("FI_CACHE_DIR", t.TempDir())
 	t.Setenv("FREEINFERENCE_BASE_URL", "https://freeinference.org/v1")
 	t.Setenv("FREEINFERENCE_API_KEY", "test-key")
+
+	// The diagnostic contract includes the binary-resolvability check. CI does
+	// not normally put the Go test executable on PATH, so expose it under the
+	// command name the installed hooks use.
+	if exe, err := os.Executable(); err == nil {
+		fiDir := t.TempDir()
+		fiPath := filepath.Join(fiDir, "freeinference")
+		if err := os.Symlink(exe, fiPath); err == nil {
+			t.Setenv("PATH", fiDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+		}
+	}
+
 	var out, errOut strings.Builder
 	code := Run([]string{"freeinference", "doctor"}, strings.NewReader(""), &out, &errOut)
 	if code != 0 {
-		t.Errorf("disabled doctor exit = %d, want 0 (diagnostic commands work when disabled)", code)
+		t.Errorf("disabled doctor exit = %d, want 0 (diagnostic commands work when disabled):\n%s", code, out.String())
 	}
 	// Diagnostic commands must not probe the provider in disabled mode.
 	output := out.String()

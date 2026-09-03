@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"unicode"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/adapters"
 	"github.com/b-a-m-n/freeinference-companion/internal/api"
@@ -72,14 +71,11 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 
 	// 4. Claude hook configuration present.
 	add("Claude hook config", checkClaudeHookConfig())
-	// 5. Codex installation is intentionally decomposed. A plugin directory,
-	// a registered Codex plugin, a hook definition, the hooks feature flag, and
-	// hook trust are separate states and must not be reported as one pass.
-	add("Codex plugin installed", checkCodexPluginInstalled())
+	// 5. Codex skill installation is intentionally separate from lifecycle
+	// hooks: the Companion Codex package is skill-only and uses Codex's native
+	// marketplace manager.
+	add("Codex skill installed", checkCodexPluginInstalled())
 	add("Codex plugin registration", checkCodexPluginRegistration())
-	add("Codex hook definition", checkCodexHookDefinition())
-	add("Codex hooks feature", checkCodexHooksFeature())
-	add("Codex hook trust", checkCodexHookTrust())
 	add("Codex native footer", checkCodexNativeFooter())
 
 	// 6. Status-line wrapper valid.
@@ -210,7 +206,7 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 		// make `doctor` exit 1 — diagnostics stay usable when disabled.
 		for i := range checks {
 			switch checks[i].name {
-			case "freeinference binary", "Claude hook config", "Codex plugin installed", "Codex plugin registration", "Codex hook definition", "Codex hooks feature", "Codex hook trust", "Codex native footer", "Status-line wrapper":
+			case "freeinference binary", "Claude hook config", "Codex skill installed", "Codex plugin registration", "Codex native footer", "Status-line wrapper":
 				if checks[i].result.State == api.CheckFail {
 					checks[i].result.State = api.CheckWarn
 				}
@@ -592,161 +588,17 @@ func checkCodexPluginRegistration() api.CheckResult {
 	if codexHome == "" {
 		codexHome = filepath.Join(home, ".codex")
 	}
-	cacheRoot := filepath.Join(codexHome, "plugins", "cache", "freeinference-companion-local", "freeinference-companion")
-	versions, _ := filepath.Glob(filepath.Join(cacheRoot, "*"))
+	cacheRoot := filepath.Join(codexHome, "plugins", "cache")
+	versions, _ := filepath.Glob(filepath.Join(cacheRoot, "*", "freeinference-companion", "*"))
 	for _, version := range versions {
 		if codexPluginManifest(version) {
-			return api.CheckResult{State: api.CheckPass, Detail: "Codex-managed cache found at " + version}
+			return api.CheckResult{State: api.CheckPass, Detail: "Codex marketplace cache found at " + version}
 		}
 	}
 	if codexPluginManifest(filepath.Join(codexHome, "plugins", "freeinference-companion")) {
-		return api.CheckResult{State: api.CheckWarn, Detail: "files are present, but Codex marketplace registration is not established"}
+		return api.CheckResult{State: api.CheckWarn, Detail: "skill files are present, but Codex marketplace installation is not established"}
 	}
-	return api.CheckResult{State: api.CheckUnknown, Detail: "Codex marketplace registration not established"}
-}
-
-func checkCodexHookDefinition() api.CheckResult {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return api.CheckResult{State: api.CheckUnknown, Detail: "no home directory"}
-	}
-	for _, root := range codexPluginRoots(home) {
-		hookPath := filepath.Join(root, "hooks", "hooks.json")
-		data, readErr := os.ReadFile(hookPath)
-		if readErr != nil || !validCodexHookDefinition(data) {
-			continue
-		}
-		runner := filepath.Join(root, "scripts", "run-hook.sh")
-		if info, statErr := os.Lstat(runner); statErr == nil && info.Mode().IsRegular() && info.Mode()&0111 != 0 {
-			return api.CheckResult{State: api.CheckPass, Detail: hookPath}
-		}
-	}
-	return api.CheckResult{State: api.CheckUnknown, Detail: "Codex hooks/hooks.json and executable runner not found"}
-}
-
-type codexHookDefinition struct {
-	Hooks map[string][]codexHookGroup `json:"hooks"`
-}
-
-type codexHookGroup struct {
-	Hooks []codexHookCommand `json:"hooks"`
-}
-
-type codexHookCommand struct {
-	Type    string `json:"type"`
-	Command string `json:"command"`
-}
-
-func validCodexHookDefinition(data []byte) bool {
-	var definition codexHookDefinition
-	if json.Unmarshal(data, &definition) != nil || len(definition.Hooks) == 0 {
-		return false
-	}
-	for _, groups := range definition.Hooks {
-		for _, group := range groups {
-			for _, command := range group.Hooks {
-				if command.Type == "command" && isCodexRunnerInvocation(command.Command) {
-					return true
-				}
-			}
-		}
-	}
-	return false
-}
-
-func isCodexRunnerInvocation(command string) bool {
-	const runner = "${PLUGIN_ROOT}/scripts/run-hook.sh"
-	command = strings.TrimSpace(command)
-	for _, token := range []string{runner, `"` + runner + `"`, `'` + runner + `'`} {
-		if command == token {
-			return true
-		}
-		if strings.HasPrefix(command, token) && len(command) > len(token) {
-			return unicode.IsSpace(rune(command[len(token)]))
-		}
-	}
-	return false
-}
-
-func checkCodexHooksFeature() api.CheckResult {
-	path, err := runtime.CodexConfigPath()
-	if err != nil {
-		return api.CheckResult{State: api.CheckUnknown, Detail: "Codex config path unavailable"}
-	}
-	data, err := readDoctorFile(path, 1<<20)
-	if os.IsNotExist(err) {
-		return api.CheckResult{State: api.CheckPass, Detail: "hooks enabled by default (no config override)"}
-	}
-	if err != nil {
-		return api.CheckResult{State: api.CheckUnknown, Detail: "Codex feature configuration unavailable"}
-	}
-	if enabled, found := codexHooksFeatureOverride(string(data)); found {
-		if !enabled {
-			return api.CheckResult{State: api.CheckWarn, Detail: "hooks disabled in Codex config"}
-		}
-		return api.CheckResult{State: api.CheckPass, Detail: "hooks enabled in Codex config"}
-	}
-	return api.CheckResult{State: api.CheckPass, Detail: "hooks enabled by default (no config override)"}
-}
-
-func readDoctorFile(path string, maxBytes int64) ([]byte, error) {
-	f, err := config.OpenNoFollow(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("file is not a regular file")
-	}
-	data, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(data)) > maxBytes {
-		return nil, fmt.Errorf("file exceeds the supported size limit")
-	}
-	return data, nil
-}
-
-func codexHooksFeatureOverride(contents string) (bool, bool) {
-	table := ""
-	for _, raw := range strings.Split(contents, "\n") {
-		line := strings.TrimSpace(raw)
-		if hash := strings.IndexByte(line, '#'); hash >= 0 {
-			line = strings.TrimSpace(line[:hash])
-		}
-		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
-			table = strings.TrimSpace(line[1 : len(line)-1])
-			continue
-		}
-		key, value, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		key = strings.TrimSpace(key)
-		value = strings.TrimSpace(value)
-		if (table == "features" && key == "hooks") || key == "features.hooks" {
-			switch value {
-			case "true":
-				return true, true
-			case "false":
-				return false, true
-			}
-		}
-	}
-	return false, false
-}
-
-func checkCodexHookTrust() api.CheckResult {
-	registration := checkCodexPluginRegistration()
-	if registration.State == api.CheckPass {
-		return api.CheckResult{State: api.CheckWarn, Detail: "Codex-managed trust state is not locally inspectable; review `/hooks` after changes"}
-	}
-	return api.CheckResult{State: api.CheckUnknown, Detail: "trust cannot be established until Codex marketplace installation is active; review `/hooks`"}
+	return api.CheckResult{State: api.CheckUnknown, Detail: "Codex marketplace installation not detected"}
 }
 
 func checkCodexNativeFooter() api.CheckResult {

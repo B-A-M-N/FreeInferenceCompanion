@@ -104,56 +104,22 @@ Claude Code configuration, not a Codex profile.
 ## 4. Optional: FreeInference Companion plugin
 
 The companion plugin is separate from the model-provider configuration above.
-It installs Codex lifecycle hooks alongside the diagnostic skills. The hooks
-record bounded session and turn state locally; they do not proxy prompts,
-rewrite requests, or add inference calls. Session start/end perform no
-upstream work by default. If `FI_AUTO_REFRESH=1` is explicitly set, stale
-metadata refreshes run detached, while automatic authenticated refreshes are
-globally spaced by one minute and enter a provider-wide cooldown after a rate
-limit. Explicit `refresh --force` remains a user-requested operation.
+It is intentionally skill-only: it provides user-requested provider
+diagnostics and model-discovery guidance without installing lifecycle hooks,
+proxying prompts, rewriting requests, or adding inference calls. Metadata
+refresh is disabled by default; `FI_AUTO_REFRESH=1` is an explicit opt-in for
+throttled, detached refresh work.
 
-After installing or updating the plugin, open `/hooks` in Codex and review /
-trust the current plugin hook definition. Codex deliberately skips changed
-non-managed plugin hooks until they are trusted.
-
-The bundled hook map is intentionally limited to Codex lifecycle events:
-
-| Codex event | Companion behavior |
-| --- | --- |
-| `SessionStart` (`startup`, `resume`, `compact`, `clear`) | Reactivate the existing logical session; only `clear` starts a new conversational epoch. |
-| `UserPromptSubmit` | Record a bounded turn transition and optional `turn_id`; never persist prompt text. |
-| `PreCompact` / `PostCompact` | Record the compaction boundary without inventing token counts or reduction percentages. |
-| `Stop` | End the correlated turn; duplicate or stale `turn_id` deliveries are ignored. |
-| `SessionEnd` | Complete the logical session. |
-
-Codex does not provide `PostModelSwitch` or `StopFailure` in this integration.
-The active model is observed on every lifecycle event that supplies one, and
-model changes are recorded with hook-event provenance.
-
-The normal Companion installer copies the plugin to
-`~/.codex/plugins/freeinference-companion` and, when the Codex CLI is
-available, registers and installs it through a local marketplace. If Codex was
-not on `PATH` during installation, complete registration with:
+Install it through Codex's supported marketplace flow:
 
 ```bash
-freeinference install
-# For an existing installation:
-freeinference update
-
-codex plugin marketplace add ~/.codex/plugins/freeinference-companion-marketplace
-codex plugin add freeinference-companion@freeinference-companion-local
+codex plugin marketplace add B-A-M-N/FreeInferenceCompanion --ref master
+codex plugin add freeinference-companion@freeinference-companion
+codex plugin list --json
 ```
 
-For a source checkout, the equivalent marketplace-backed install is:
-
-```bash
-codex plugin marketplace add /path/to/FreeInferenceCompanion/codex-marketplace
-codex plugin add freeinference-companion@freeinference-companion-local
-```
-
-The Codex plugin bundle includes its hook runner and platform-matched CLI
-binary, so the hooks do not depend on a separate `freeinference` executable
-already being on `PATH`.
+Updating the marketplace or plugin later is explicit, so Codex never silently
+changes the package.
 
 Codex also owns a native footer. To configure Codex to show its own model,
 remaining-context, and current-directory items while preserving existing
@@ -207,6 +173,7 @@ Disable new trace injection with `freeinference config set tracing.enabled
 false` or `FI_TRACING=0`. If the selected provider is unverified, off-host, or
 already has a different `X-Session-ID` mapping, the launcher starts Codex
 normally and does not replace that mapping.
+
 
 After installation, these skills are available:
 

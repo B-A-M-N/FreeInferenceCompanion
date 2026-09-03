@@ -1,6 +1,6 @@
 // Package installer provides the install/upgrade/uninstall flow for the
 // FreeInference Companion CLI. It downloads release ZIPs from a marketplace
-// manifest, verifies checksums, extracts plugin archives, and places the
+// manifest, verifies checksums, extracts the Claude Code plugin, and places the
 // binary on the user's PATH.
 package installer
 
@@ -35,7 +35,7 @@ type Options struct {
 	ExistingVersion string
 	// DryRun reports what would happen without making changes.
 	DryRun bool
-	// NoPlugin skips plugin extraction.
+	// NoPlugin skips Claude Code plugin extraction.
 	NoPlugin bool
 	// NoBin skips binary installation.
 	NoBin bool
@@ -48,7 +48,7 @@ type Result struct {
 	Version            string
 	OldVersion         string
 	BinaryPath         string
-	Plugins            []string // paths to extracted plugin directories
+	Plugins            []string // paths to extracted Claude Code plugin directories
 	PathMsg            string   // note about PATH if binary not yet on it
 	Updated            bool
 	AlreadyLatest      bool
@@ -56,9 +56,6 @@ type Result struct {
 	PartiallyInstalled bool
 	Warnings           []string
 	ClaudePluginReady  bool
-	CodexFilesReady    bool
-	CodexRegistered    bool
-	CodexTrusted       bool
 }
 
 // Install performs a full installation. It downloads the release ZIP, verifies
@@ -370,24 +367,15 @@ func validateReleaseLayout(root string, needBinary, needPlugins bool) error {
 	if !needPlugins {
 		return nil
 	}
-	for _, plugin := range []struct {
-		name     string
-		rel      string
-		manifest string
-	}{
-		{name: "Claude", rel: "plugins/claude-code", manifest: ".claude-plugin/plugin.json"},
-		{name: "Codex", rel: "plugins/codex", manifest: ".codex-plugin/plugin.json"},
-	} {
-		base := filepath.Join(root, plugin.rel)
-		for _, required := range []string{plugin.manifest, "hooks/hooks.json", "scripts/run-hook.sh"} {
-			path := filepath.Join(base, required)
-			info, err := os.Lstat(path)
-			if err != nil || !info.Mode().IsRegular() {
-				return fmt.Errorf("release archive is missing %s plugin file %s", plugin.name, required)
-			}
-			if required == "scripts/run-hook.sh" && info.Mode()&0111 == 0 {
-				return fmt.Errorf("release archive %s plugin runner is not executable", plugin.name)
-			}
+	base := filepath.Join(root, "plugins", "claude-code")
+	for _, required := range []string{".claude-plugin/plugin.json", "hooks/hooks.json", "scripts/run-hook.sh"} {
+		path := filepath.Join(base, required)
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() {
+			return fmt.Errorf("release archive is missing Claude plugin file %s", required)
+		}
+		if required == "scripts/run-hook.sh" && info.Mode()&0111 == 0 {
+			return errors.New("release archive Claude plugin runner is not executable")
 		}
 	}
 	return nil
@@ -435,12 +423,8 @@ func runCodexPluginCommand(codex string, args ...string) error {
 func extractPluginPaths(paths Paths) []string {
 	var plugins []string
 	claudePlugin := filepath.Join(paths.ClaudePluginDir, "freeinference-companion")
-	codexPlugin := filepath.Join(paths.CodexPluginDir, "freeinference-companion")
 	if _, err := os.Stat(claudePlugin); err == nil {
 		plugins = append(plugins, claudePlugin)
-	}
-	if _, err := os.Stat(codexPlugin); err == nil {
-		plugins = append(plugins, codexPlugin)
 	}
 	return plugins
 }
