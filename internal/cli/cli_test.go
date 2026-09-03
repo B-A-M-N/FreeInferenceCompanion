@@ -41,7 +41,9 @@ func TestDoctorRunsAllChecksWithoutEarlyExit(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("FREEINFERENCE_BASE_URL", server.URL)
+	t.Setenv("FI_CUSTOM_ENDPOINT", server.URL)
+	t.Setenv("FI_CUSTOM_API_KEY", "custom-test-key")
+	t.Setenv("FREEINFERENCE_BASE_URL", "")
 	t.Setenv("FREEINFERENCE_API_KEY", "")
 	t.Setenv("FI_HEALTH_URL", "")
 	t.Setenv("FI_ALLOW_INSECURE_LOCALHOST", "1")
@@ -86,9 +88,12 @@ func TestDoctorRunsAllChecksWithoutEarlyExit(t *testing.T) {
 }
 
 func TestDoctorFailsWhenEndpointDown(t *testing.T) {
-	t.Setenv("FREEINFERENCE_BASE_URL", "http://127.0.0.1:1")
+	t.Setenv("FI_CUSTOM_ENDPOINT", "http://127.0.0.1:1")
+	t.Setenv("FI_CUSTOM_API_KEY", "custom-test-key")
+	t.Setenv("FREEINFERENCE_BASE_URL", "")
 	t.Setenv("FREEINFERENCE_API_KEY", "")
 	t.Setenv("FI_HEALTH_URL", "")
+	t.Setenv("FI_ALLOW_INSECURE_LOCALHOST", "1")
 
 	var out, errOut strings.Builder
 	code := cmdDoctor(testPaths(t), nil, &out, &errOut)
@@ -97,6 +102,34 @@ func TestDoctorFailsWhenEndpointDown(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "failed") {
 		t.Errorf("doctor should summarize failures:\n%s", out.String())
+	}
+}
+
+func TestDoctorDoesNotProbeUnverifiedEndpoint(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	t.Setenv("FI_CUSTOM_ENDPOINT", "")
+	t.Setenv("FI_CUSTOM_API_KEY", "")
+	t.Setenv("FREEINFERENCE_BASE_URL", server.URL)
+	t.Setenv("FREEINFERENCE_API_KEY", "")
+	t.Setenv("FI_ALLOW_INSECURE_LOCALHOST", "1")
+	t.Setenv("FI_HEALTH_URL", "")
+
+	var out, errOut strings.Builder
+	code := cmdDoctor(testPaths(t), []string{"--probe", "--model", "glm-5.1"}, &out, &errOut)
+	if code != 0 {
+		t.Fatalf("unverified doctor exit = %d, want 0 with skipped network checks:\n%s", code, out.String())
+	}
+	if calls != 0 {
+		t.Fatalf("unverified doctor made %d network request(s)", calls)
+	}
+	if !strings.Contains(out.String(), "FreeInference route not verified; no request sent") {
+		t.Fatalf("doctor did not disclose skipped probe:\n%s", out.String())
 	}
 }
 
@@ -488,9 +521,8 @@ env_key = "FREEINFERENCE_API_KEY"
 }
 
 // TestDoctorProbeWithInvalidEndpoint is the P0-1 regression test: an invalid
-// API URL combined with `freeinference doctor --probe` must NOT panic. It must skip the
-// inference probe, report the configuration failure, and exit 1 (not a runtime
-// panic exit 2).
+// API URL combined with `freeinference doctor --probe` must NOT panic or make a
+// request. It reports the unverified route and exits cleanly.
 func TestDoctorProbeWithInvalidEndpoint(t *testing.T) {
 	// Invalid URL containing userinfo — fails ValidateBaseURL.
 	t.Setenv("FREEINFERENCE_BASE_URL", "https://user:pass@freeinference.org/v1")
@@ -499,8 +531,8 @@ func TestDoctorProbeWithInvalidEndpoint(t *testing.T) {
 
 	var out, errOut strings.Builder
 	code := cmdDoctor(testPaths(t), []string{"--probe", "--model", "test-model"}, &out, &errOut)
-	if code != 1 {
-		t.Errorf("doctor --probe with invalid endpoint: exit = %d, want 1 (output:\n%s)", code, out.String())
+	if code != 0 {
+		t.Errorf("doctor --probe with invalid endpoint: exit = %d, want 0 (output:\n%s)", code, out.String())
 	}
 	// The inference probe must be skipped, not panicked against.
 	output := out.String()
@@ -510,8 +542,8 @@ func TestDoctorProbeWithInvalidEndpoint(t *testing.T) {
 	if !strings.Contains(output, "Inference probe") {
 		t.Errorf("expected 'Inference probe' check in output:\n%s", output)
 	}
-	if !strings.Contains(output, "skipped due to invalid endpoint") {
-		t.Errorf("expected probe to be skipped due to invalid endpoint:\n%s", output)
+	if !strings.Contains(output, "FreeInference route not verified; no request sent") {
+		t.Errorf("expected probe to be skipped without a request:\n%s", output)
 	}
 }
 
