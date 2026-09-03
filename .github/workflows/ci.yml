@@ -130,6 +130,20 @@ jobs:
           print('Codex manifest and lifecycle hooks are internally consistent.')
           "
 
+  plugin-validity-required:
+    name: Plugin manifests (schema + compatibility)
+    if: ${{ always() }}
+    needs: plugin-validity
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every compatibility validator
+        if: ${{ needs.plugin-validity.result != 'success' }}
+        run: |
+          echo "one or more plugin compatibility validators did not pass"
+          exit 1
+      - name: Report compatibility gate
+        run: echo "all plugin compatibility validators passed"
+
   codex-runtime:
     name: Codex CLI plugin install (pinned)
     runs-on: ubuntu-latest
