@@ -2,6 +2,12 @@
 
 All notable changes to FreeInference Companion are recorded here.
 
+## 0.1.5 — 2026-09-11
+
+### Fixed
+
+- Make the fail-open Claude attribution timeout prompt on slower macOS runners.
+
 ## 0.1.4 — 2026-09-11
 
 Installer migration fix.
