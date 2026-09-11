@@ -589,6 +589,68 @@ func TestAddClientIntegrationHonorsCodexProxyAttestation(t *testing.T) {
 	}
 }
 
+func TestAddClientIntegrationAdoptsCoreOwnedCodexPayload(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	t.Setenv("CODEX_HOME", "")
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("PATH", "/usr/bin:/bin")
+	manifestURL, _, server := testServer(t, "v0.2.0", "linux-amd64")
+	defer server.Close()
+	if _, err := Install(Options{ManifestURL: manifestURL, Platform: "linux-amd64"}, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, found, err := LoadInstallationMetadata(paths.MetadataPath())
+	if err != nil || !found {
+		t.Fatalf("load installation metadata: found=%t err=%v", found, err)
+	}
+	root := filepath.Join(home, "harvardcodex")
+	writeIntegrationFixture(t, filepath.Join(root, "config.toml"), "model_provider = \"fi\"\n\n[model_providers.fi]\nbase_url = \"http://127.0.0.1:18769/v1\"\n")
+	targetPlugin := filepath.Join(root, "plugins", "freeinference-companion")
+	targetMarketplace := filepath.Join(root, "plugins", "freeinference-companion-marketplace")
+	if err := copyDir(targetPlugin, paths.CoreCodexPluginPath); err != nil {
+		t.Fatalf("copy core Codex plugin: %v", err)
+	}
+	if err := copyDir(targetMarketplace, paths.CodexMarketplaceDir); err != nil {
+		t.Fatalf("copy core Codex marketplace: %v", err)
+	}
+	metadata.CodexPluginPath = targetPlugin
+	metadata.CodexPluginSHA256, err = pathDigest(targetPlugin)
+	if err != nil {
+		t.Fatalf("digest Codex plugin: %v", err)
+	}
+	metadata.CodexMarketplacePath = targetMarketplace
+	metadata.CodexMarketplaceSHA256, err = pathDigest(targetMarketplace)
+	if err != nil {
+		t.Fatalf("digest Codex marketplace: %v", err)
+	}
+	if err := SaveInstallationMetadata(paths.MetadataPath(), *metadata); err != nil {
+		t.Fatal(err)
+	}
+	if err := clientenv.SetCodexProxyAttestation(home, root, "https://freeinference.org/v1"); err != nil {
+		t.Fatal(err)
+	}
+	integration, err := AddClientIntegration(home, clientenv.ClientCodex, root, io.Discard)
+	if err != nil {
+		t.Fatalf("core-owned Codex payload was not adopted: %v", err)
+	}
+	if integration.Client != string(clientenv.ClientCodex) || integration.ConfigRoot != root {
+		t.Fatalf("integration summary = %+v", integration)
+	}
+	clientMetadata, err := loadClientEnvironmentMetadata(clientEnvironmentMetadataPath(home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if integrationByID(t, clientMetadata, string(clientenv.ClientCodex), root) == nil {
+		t.Fatalf("adopted Codex integration was not recorded: %+v", clientMetadata)
+	}
+}
+
 func TestRemoveClientIntegrationRemovesOnlySelectedEnvironment(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

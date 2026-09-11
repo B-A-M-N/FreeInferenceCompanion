@@ -158,6 +158,18 @@ func addClientIntegrationLocked(home string, paths Paths, metadata *Installation
 	if err := clientenv.ValidateEnvironmentWithHome(client, root, home); err != nil {
 		return IntegrationSummary{}, err
 	}
+	coreOwnedDirectories := make(map[string]string)
+	if client == clientenv.ClientCodex && metadata != nil {
+		for _, evidence := range [][2]string{
+			{metadata.CodexPluginPath, metadata.CodexPluginSHA256},
+			{metadata.CodexMarketplacePath, metadata.CodexMarketplaceSHA256},
+		} {
+			if evidence[0] == "" || evidence[1] == "" {
+				continue
+			}
+			coreOwnedDirectories[canonical(evidence[0])] = evidence[1]
+		}
+	}
 	environment := clientenv.Environment{Client: client, ConfigRoot: root, Source: clientenv.SourceExplicit}
 	results, reconcileErr := ReconcileClientEnvironments(reconcileOptions{
 		home: paths.home(),
@@ -165,10 +177,11 @@ func addClientIntegrationLocked(home string, paths Paths, metadata *Installation
 			clientenv.ClientClaudeCode: paths.CoreClaudePluginPath,
 			clientenv.ClientCodex:      paths.CoreCodexPluginPath,
 		},
-		version:   version,
-		discovery: false,
-		explicit:  []clientenv.Environment{environment},
-		stdout:    stdout,
+		coreOwnedDirectories: coreOwnedDirectories,
+		version:              version,
+		discovery:            false,
+		explicit:             []clientenv.Environment{environment},
+		stdout:               stdout,
 	})
 	if reconcileErr != nil {
 		return IntegrationSummary{}, reconcileErr
