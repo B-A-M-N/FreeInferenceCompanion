@@ -41,8 +41,9 @@ run_attribution() {
                 fi
                 kill "-$signal" "$pid" 2>/dev/null || true
             }
-            kill_process_tree "$child_pid" TERM
-            sleep 0.1
+            # Kill immediately after the deadline. A graceful TERM plus a
+            # fixed sleep makes the fail-open path exceed its budget on
+            # slower macOS runners, while KILL still gets reaped below.
             kill_process_tree "$child_pid" KILL
             wait "$child_pid" 2>/dev/null || true
             return 0
