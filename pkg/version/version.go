@@ -15,7 +15,6 @@ package version
 // development builds self-consistent.
 var Version = "0.1.1"
 
-
 // RepositoryURL is the canonical public repository URL. Keep this separate
 // from the Go module path: the repository name is intentionally CamelCase on
 // GitHub, while Go import paths remain lowercase.

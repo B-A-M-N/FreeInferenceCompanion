@@ -128,9 +128,7 @@ func RemoveClientIntegration(home string, client clientenv.Client, root string, 
 			return nil, errors.New(warnings[0])
 		}
 		joined := make([]string, len(warnings))
-		for i, warning := range warnings {
-			joined[i] = warning
-		}
+		copy(joined, warnings)
 		return removed, fmt.Errorf("%s", strings.Join(joined, "; "))
 	}
 	return removed, nil

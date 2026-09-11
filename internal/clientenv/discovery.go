@@ -144,11 +144,11 @@ func ValidateEnvironment(client Client, root string) error {
 	switch client {
 	case ClientClaudeCode:
 		if !looksLikeClaudeSettings(filepath.Join(root, "settings.json")) {
-			return errors.New("Claude settings.json does not select an approved FreeInference /v1 endpoint")
+			return errors.New("claude settings.json does not select an approved FreeInference /v1 endpoint")
 		}
 	case ClientCodex:
 		if !looksLikeCodexConfig(filepath.Join(root, "config.toml")) {
-			return errors.New("Codex config.toml does not select an approved FreeInference /v1 endpoint")
+			return errors.New("codex config.toml does not select an approved FreeInference /v1 endpoint")
 		}
 	default:
 		return fmt.Errorf("unsupported client %q", client)

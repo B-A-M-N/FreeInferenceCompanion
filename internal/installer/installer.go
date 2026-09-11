@@ -422,10 +422,6 @@ func registerCodexMarketplace(paths Paths, pluginSrc string, stdout io.Writer) e
 	return nil
 }
 
-func runCodexPluginCommand(codex string, args ...string) error {
-	return runCodexPluginCommandForHome(codex, "", args...)
-}
-
 // runCodexPluginCommandForHome invokes the Codex plugin manager against one
 // explicit configuration root. CODEX_HOME is set exactly once so concurrent
 // fan-out cannot accidentally mutate the installer's current environment.

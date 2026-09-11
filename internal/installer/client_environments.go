@@ -471,11 +471,11 @@ func validateAdditionalOwnedDirectory(path string, previous *ClientIntegration) 
 		expectedDigest = previous.MarketplaceSHA256
 	}
 	if expectedDigest == "" {
-		return fmt.Errorf("owned Companion directory has no checksum %s", path)
+		return fmt.Errorf("owned companion directory has no checksum %s", path)
 	}
 	matched, err := pathDigestMatches(path, expectedDigest)
 	if err != nil || !matched {
-		return fmt.Errorf("Companion directory changed after installation: %s", path)
+		return fmt.Errorf("companion directory changed after installation: %s", path)
 	}
 	return nil
 }
@@ -603,8 +603,6 @@ func canonical(path string) string {
 	}
 	return canonical
 }
-
-func underlyingPathError(err error) error { return err }
 
 func unregisterCodexClientMarketplace(codexHome string) []string {
 	codex, err := exec.LookPath("codex")
