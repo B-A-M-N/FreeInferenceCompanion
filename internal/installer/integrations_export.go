@@ -61,10 +61,10 @@ func AddClientIntegration(home string, client clientenv.Client, root string, std
 	results, err := ReconcileClientEnvironments(reconcileOptions{
 		home: paths.home(),
 		pluginSources: map[clientenv.Client]string{
-			clientenv.ClientClaudeCode: paths.claudePluginPath(),
-			clientenv.ClientCodex:      paths.codexPluginPath(),
+			clientenv.ClientClaudeCode: paths.CoreClaudePluginPath,
+			clientenv.ClientCodex:      paths.CoreCodexPluginPath,
 		},
-		version:   corePluginVersion(paths),
+		version:   corePluginVersionOrDefault(paths, "v0.2.0"),
 		discovery: false,
 		explicit:  []clientenv.Environment{environment},
 		stdout:    stdout,
@@ -87,6 +87,13 @@ func AddClientIntegration(home string, client clientenv.Client, root string, std
 		}
 	}
 	return IntegrationSummary{}, errors.New("explicit client integration did not complete")
+}
+
+func corePluginVersionOrDefault(paths Paths, fallback string) string {
+	if version := corePluginVersion(paths); version != "" {
+		return version
+	}
+	return fallback
 }
 
 func corePluginVersion(paths Paths) string {

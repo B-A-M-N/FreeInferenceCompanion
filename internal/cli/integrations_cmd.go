@@ -29,6 +29,8 @@ func cmdIntegrations(args []string, stdout, stderr io.Writer) int {
 		return cmdIntegrationsAdd(args[1:], stdout, stderr)
 	case "remove":
 		return cmdIntegrationsRemove(args[1:], stdout, stderr)
+	case "diagnose":
+		return cmdIntegrationsDiagnose(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown integrations command: %s\n", args[0])
 		printIntegrationsHelp(stderr)
@@ -91,8 +93,9 @@ func cmdIntegrationsRead(args []string, stdout, stderr io.Writer) int {
 
 func cmdIntegrationsAdd(args []string, stdout, stderr io.Writer) int {
 	var (
-		client clientenv.Client
-		root   string
+		client        clientenv.Client
+		root          string
+		proxyUpstream string
 	)
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -110,6 +113,13 @@ func cmdIntegrationsAdd(args []string, stdout, stderr io.Writer) int {
 				return 2
 			}
 			root = args[i]
+		case "--proxy-upstream":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(stderr, "error: --proxy-upstream requires a URL")
+				return 2
+			}
+			proxyUpstream = args[i]
 		default:
 			fmt.Fprintf(stderr, "unknown flag: %s\n", args[i])
 			return 2
@@ -118,6 +128,17 @@ func cmdIntegrationsAdd(args []string, stdout, stderr io.Writer) int {
 	if client == "" || root == "" {
 		fmt.Fprintln(stderr, "error: integrations add requires --client and --root")
 		return 2
+	}
+	homeHint, homeErr := os.UserHomeDir()
+	if homeErr != nil {
+		fmt.Fprintf(stderr, "error: no home directory: %v\n", homeErr)
+		return 1
+	}
+	if client == clientenv.ClientCodex && proxyUpstream != "" {
+		if err := clientenv.SetCodexProxyAttestation(homeHint, root, proxyUpstream); err != nil {
+			fmt.Fprintf(stderr, "error: proxy attestation: %v\n", err)
+			return 2
+		}
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -177,6 +198,82 @@ func cmdIntegrationsRemove(args []string, stdout, stderr io.Writer) int {
 	}
 	for _, path := range removed {
 		fmt.Fprintf(stdout, "Removed %s\n", path)
+	}
+	return 0
+}
+
+func cmdIntegrationsDiagnose(args []string, stdout, stderr io.Writer) int {
+	var (
+		client  clientenv.Client
+		root    string
+		jsonOut bool
+	)
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--json":
+			jsonOut = true
+		case "--client":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(stderr, "error: --client requires claude-code or codex")
+				return 2
+			}
+			client = clientenv.Client(args[i])
+		case "--root":
+			i++
+			if i >= len(args) {
+				fmt.Fprintln(stderr, "error: --root requires a directory argument")
+				return 2
+			}
+			root = args[i]
+		default:
+			fmt.Fprintf(stderr, "unknown flag: %s\n", args[i])
+			return 2
+		}
+	}
+	if client == "" || root == "" {
+		fmt.Fprintln(stderr, "error: integrations diagnose requires --client and --root")
+		return 2
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Fprintf(stderr, "error: no home directory: %v\n", err)
+		return 1
+	}
+	result := map[string]any{"client": string(client), "config_root": root}
+	if client == clientenv.ClientCodex {
+		state, baseURL, routeErr := clientenv.VerifyCodexConfigRoute(home, root)
+		result["route_state"] = string(state)
+		result["provider_base_url"] = baseURL
+		if routeErr != nil {
+			result["route_error"] = routeErr.Error()
+		}
+		caps, capsErr := clientenv.InspectCodexModelCatalog(root)
+		result["model_capabilities"] = caps
+		if capsErr != nil {
+			result["model_capabilities_error"] = capsErr.Error()
+		}
+		result["overall"] = map[string]bool{
+			"ready": (state == clientenv.CodexRouteVerifiedDirect || state == clientenv.CodexRouteVerifiedProxy) && caps.SkillsAllowed && caps.PluginsAllowed,
+		}
+	}
+	if jsonOut {
+		if err := encodeJSON(stdout, result); err != nil {
+			fmt.Fprintf(stderr, "error: encode diagnostics: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+	fmt.Fprintf(stdout, "Client ................. %s\n", client)
+	fmt.Fprintf(stdout, "Config root ............ %s\n", root)
+	for _, key := range []string{"route_state", "provider_base_url", "route_error", "overall"} {
+		if value, ok := result[key]; ok {
+			fmt.Fprintf(stdout, "%-22s %v\n", key, value)
+		}
+	}
+	if caps, ok := result["model_capabilities"].(clientenv.CodexModelCapabilities); ok {
+		fmt.Fprintf(stdout, "Skills allowed ......... %t\n", caps.SkillsAllowed)
+		fmt.Fprintf(stdout, "Plugins allowed ........ %t\n", caps.PluginsAllowed)
 	}
 	return 0
 }

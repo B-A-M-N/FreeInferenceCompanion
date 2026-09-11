@@ -35,6 +35,10 @@ type Paths struct {
 	ClaudePluginPath string
 	// CodexPluginPath is the installed Companion Codex plugin directory.
 	CodexPluginPath string
+	// CoreClaudePluginPath is the installer-owned verified Claude artifact.
+	CoreClaudePluginPath string
+	// CoreCodexPluginPath is the installer-owned verified skill-only Codex artifact.
+	CoreCodexPluginPath string
 	// Home records the home directory that produced these canonical paths.
 	Home         string
 	metadataPath string
@@ -61,19 +65,21 @@ func PathsForHome(home string) (Paths, error) {
 	claudePluginPath := filepath.Join(claudePluginDir, "freeinference-companion")
 	codexPluginPath := filepath.Join(codexHome, "plugins", "freeinference-companion")
 	return Paths{
-		InstallDir:          installDir,
-		CodexHome:           codexHome,
-		ClaudeHome:          claudeHome,
-		BinaryPath:          filepath.Join(installDir, "bin", "freeinference"),
-		LocalBin:            localBin,
-		ClaudePluginDir:     claudePluginDir,
-		CodexPluginDir:      filepath.Join(codexHome, "plugins"),
-		CodexMarketplaceDir: filepath.Join(codexHome, "plugins", "freeinference-companion-marketplace"),
-		ShimPath:            filepath.Join(localBin, "freeinference"),
-		ClaudePluginPath:    claudePluginPath,
-		CodexPluginPath:     codexPluginPath,
-		Home:                home,
-		metadataPath:        installationMetadataPath(home),
+		InstallDir:           installDir,
+		CodexHome:            codexHome,
+		ClaudeHome:           claudeHome,
+		BinaryPath:           filepath.Join(installDir, "bin", "freeinference"),
+		LocalBin:             localBin,
+		ClaudePluginDir:      claudePluginDir,
+		CodexPluginDir:       filepath.Join(codexHome, "plugins"),
+		CodexMarketplaceDir:  filepath.Join(codexHome, "plugins", "freeinference-companion-marketplace"),
+		CoreClaudePluginPath: filepath.Join(installDir, "plugins", "claude-code"),
+		CoreCodexPluginPath:  filepath.Join(installDir, "plugins", "codex"),
+		ShimPath:             filepath.Join(localBin, "freeinference"),
+		ClaudePluginPath:     claudePluginPath,
+		CodexPluginPath:      codexPluginPath,
+		Home:                 home,
+		metadataPath:         installationMetadataPath(home),
 	}, nil
 }
 

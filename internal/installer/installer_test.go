@@ -103,6 +103,13 @@ func createTestZIP(t *testing.T, version string) ([]byte, string) {
 	f, _ = w.Create("plugins/claude-code/package.json")
 	f.Write([]byte(`{"name":"freeinference-companion"}`))
 
+	// Current Codex payload is skill-only and bundled in the checksummed
+	// platform archive.
+	f, _ = w.Create("plugins/codex/.codex-plugin/plugin.json")
+	f.Write([]byte(`{"name":"freeinference-companion"}`))
+	f, _ = w.Create("plugins/codex/skills/attribution/SKILL.md")
+	f.Write([]byte("attribution skill\n"))
+
 	w.Close()
 
 	hash := sha256.Sum256([]byte(buf.String()))

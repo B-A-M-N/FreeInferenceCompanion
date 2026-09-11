@@ -88,7 +88,29 @@ freeinference integrations list
 freeinference integrations remove --client codex --root /path/to/codex-home
 ```
 
-Use `freeinference install --no-integration-discovery` to restrict fan-out to
+Loopback-backed Codex profiles are candidates, never automatic integrations.
+Register them explicitly with an approved upstream attestation:
+
+```bash
+freeinference integrations add --client codex --root /path/to/profile \
+  --proxy-upstream https://freeinference.org/v1
+```
+
+Diagnose one profile, including generated model capability flags:
+
+```bash
+freeinference integrations diagnose --client codex --root /path/to/profile [--json]
+```
+
+A usable Codex plugin environment must allow both:
+
+```json
+{"include_skills_usage_instructions": true, "include_plugin_usage_instructions": true}
+```
+
+FIC detects blocking catalogs read-only; it never rewrites an
+externally generated `models.json`. Use
+`freeinference install --no-integration-discovery` to restrict fan-out to
 canonical roots. Existing unowned Companion directories are never overwritten.
 Already-installed profiles are upgraded on later installs, including when the
 core release version is unchanged.

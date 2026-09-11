@@ -6,6 +6,7 @@ package installer
 
 import (
 	"archive/zip"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -387,6 +388,26 @@ func validateReleaseLayout(root string, needBinary, needPlugins bool) error {
 		if required == "scripts/run-hook.sh" && info.Mode()&0111 == 0 {
 			return errors.New("release archive Claude plugin runner is not executable")
 		}
+	}
+	codexBase := filepath.Join(root, "plugins", "codex")
+	manifestPath := filepath.Join(codexBase, ".codex-plugin", "plugin.json")
+	info, err := os.Lstat(manifestPath)
+	if err != nil || !info.Mode().IsRegular() {
+		return errors.New("release archive is missing Codex plugin manifest")
+	}
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return fmt.Errorf("read release Codex plugin manifest: %w", err)
+	}
+	var manifest struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil || manifest.Name != "freeinference-companion" {
+		return errors.New("release archive Codex plugin manifest is invalid")
+	}
+	skillsInfo, err := os.Lstat(filepath.Join(codexBase, "skills"))
+	if err != nil || !skillsInfo.IsDir() {
+		return errors.New("release archive is missing Codex plugin skills")
 	}
 	return nil
 }

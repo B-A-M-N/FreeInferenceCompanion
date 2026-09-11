@@ -52,7 +52,7 @@ func TestReconcileInstallsFreeInferenceProfilesAndRecordsOwnership(t *testing.T)
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	t.Setenv("CODEX_HOME", "")
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	claudeRoot := filepath.Join(home, ".config", "claude-code", "fi-profile-a")
+	claudeRoot := filepath.Join(home, ".config", "claude-profiles", "fi-profile-a")
 	codexRoot := filepath.Join(home, ".custom-codex")
 	writeIntegrationFixture(t, filepath.Join(claudeRoot, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://freeinference.org/v1"}}`)
 	writeIntegrationFixture(t, filepath.Join(codexRoot, "config.toml"), "model_provider = \"fi\"\n\n[model_providers.fi]\nbase_url = \"https://freeinference.org/v1\"\n")
@@ -272,7 +272,7 @@ func TestInstallReconcilesNewProfilesAtSameVersion(t *testing.T) {
 		t.Fatalf("initial install unexpectedly integrated profiles: %+v", first.EnvironmentIntegrations)
 	}
 
-	claudeRoot := filepath.Join(home, ".config", "claude-code", "fi-profile-a")
+	claudeRoot := filepath.Join(home, ".config", "claude-profiles", "fi-profile-a")
 	codexRoot := filepath.Join(home, ".custom-codex")
 	writeIntegrationFixture(t, filepath.Join(claudeRoot, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://freeinference.org/v1"}}`)
 	writeIntegrationFixture(t, filepath.Join(codexRoot, "config.toml"), "model_provider = \"fi\"\n\n[model_providers.fi]\nbase_url = \"https://freeinference.org/v1\"\n")
@@ -285,21 +285,23 @@ func TestInstallReconcilesNewProfilesAtSameVersion(t *testing.T) {
 		t.Fatalf("same-version result = %+v", second)
 	}
 	if len(second.EnvironmentIntegrations) != 2 {
-		t.Fatalf("same-version integrations = %+v", second.EnvironmentIntegrations)
+		t.Fatalf("same-version integrations = %+v warnings=%+v", second.EnvironmentIntegrations, second.Warnings)
 	}
 	claudePlugin := filepath.Join(claudeRoot, "plugins", "freeinference-companion", ".claude-plugin", "plugin.json")
 	if _, err := os.Stat(claudePlugin); err != nil {
 		t.Errorf("profile plugin missing after same-version install: %s: %v", claudePlugin, err)
 	}
+	codexPlugin := filepath.Join(codexRoot, "plugins", "freeinference-companion", ".codex-plugin", "plugin.json")
+	if _, err := os.Stat(codexPlugin); err != nil {
+		t.Errorf("Codex profile plugin missing after same-version install: %s: %v", codexPlugin, err)
+	}
 	metadata, err := loadClientEnvironmentMetadata(clientEnvironmentMetadataPath(home))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if integrationByID(t, metadata, "claude-code", claudeRoot) == nil {
+	if integrationByID(t, metadata, "claude-code", claudeRoot) == nil || integrationByID(t, metadata, "codex", codexRoot) == nil {
 		t.Fatalf("same-version ownership records missing: %+v", metadata.Integrations)
 	}
-	// New Codex packages are skill-only; a Codex configuration route remains
-	// discoverable but no plugin artifact is fan-out installed into it.
 }
 
 func TestUninstallClientEnvironmentsRemovesOnlyRecordedOwnedPaths(t *testing.T) {
@@ -418,10 +420,10 @@ func TestAddClientIntegrationRegistersExplicitArbitraryRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Dir(paths.ClaudePluginPath), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(paths.CoreClaudePluginPath), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := copyDir(paths.ClaudePluginPath, pluginFixture(t, "core-claude", "v1")); err != nil {
+	if err := copyDir(paths.CoreClaudePluginPath, pluginFixture(t, "core-claude", "v1")); err != nil {
 		t.Fatal(err)
 	}
 	metadata := metadataForPaths(paths, "v0.2.0", "https://example.test", strings.Repeat("a", 64), "v0.2.0")

@@ -44,7 +44,7 @@ Identity is `(client type, configuration root)`; model profiles inside one root 
 - Claude: `settings.json` `env.ANTHROPIC_BASE_URL`
 - Codex: selected provider's `model_providers.<id>.base_url`
 
-Discovery never recursively scans projects and never uses launcher names. Explicit `add` supports arbitrary roots. Existing unowned Companion directories are refused; modified owned installs are preserved until reconciled safely. `remove` deletes only paths derived from the recorded identity and only after digest ownership checks pass.
+Discovery never recursively scans projects and never uses launcher names. Explicit `add` supports arbitrary roots. Codex loopback routes are candidates and require `--proxy-upstream <approved FI /v1 URL>`; direct `https://freeinference.org/v1` roots verify automatically. `integrations diagnose` reports route state, plugin manager state, and generated model capabilities without mutating `models.json`. Existing unowned Companion directories are refused; modified owned installs are preserved until reconciled safely. `remove` deletes only paths derived from the recorded identity and only after digest ownership checks pass.
 
 | Command | Description |
 | --- | --- |

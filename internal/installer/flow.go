@@ -389,6 +389,20 @@ func commitRelease(extractDir string, paths Paths, opts Options, manifest *Marke
 		if err := tx.replace(paths.claudePluginPath(), claudeStage); err != nil {
 			return failed(fmt.Errorf("install Claude plugin: %w", err))
 		}
+		claudeCoreStage, err := stageDirectory(claudeSrc, paths.CoreClaudePluginPath)
+		if err != nil {
+			return failed(fmt.Errorf("stage core Claude plugin: %w", err))
+		}
+		if err := tx.replace(paths.CoreClaudePluginPath, claudeCoreStage); err != nil {
+			return failed(fmt.Errorf("install core Claude plugin: %w", err))
+		}
+		codexCoreStage, err := stageDirectory(filepath.Join(extractDir, "plugins", "codex"), paths.CoreCodexPluginPath)
+		if err != nil {
+			return failed(fmt.Errorf("stage core Codex plugin: %w", err))
+		}
+		if err := tx.replace(paths.CoreCodexPluginPath, codexCoreStage); err != nil {
+			return failed(fmt.Errorf("install core Codex plugin: %w", err))
+		}
 		result.ClaudePluginReady = true
 		result.Plugins = extractPluginPaths(paths)
 	}
@@ -866,7 +880,8 @@ func reconcileClientEnvironmentsFromCore(paths Paths, opts Options, version stri
 	integrations, err := ReconcileClientEnvironments(reconcileOptions{
 		home: paths.home(),
 		pluginSources: map[clientenv.Client]string{
-			clientenv.ClientClaudeCode: paths.claudePluginPath(),
+			clientenv.ClientClaudeCode: paths.CoreClaudePluginPath,
+			clientenv.ClientCodex:      paths.CoreCodexPluginPath,
 		},
 		version:   version,
 		dryRun:    opts.DryRun,
