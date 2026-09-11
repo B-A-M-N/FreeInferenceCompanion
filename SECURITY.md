@@ -14,6 +14,27 @@ Do not publish credentials, private prompts, or an exploit before a fix is
 available. Include the affected version, operating system, reproduction steps,
 and sanitized logs.
 
+## Commit attribution
+
+Optional Git commit attribution is default-off and configured with
+`freeinference attribution set off|append|standalone`.
+
+When `append` or `standalone` is enabled, the plugin's `PreToolUse` Bash hook
+may rewrite an already-authorized agent-issued `git commit -m` command only by
+appending these lines to its visible message:
+
+```text
+Inference: <model> via FreeInference.org
+Support-FreeInference: https://freeinference.org/
+```
+
+It never stages files, creates or amends commits, invokes Git, performs
+network requests, or modifies Claude's native `attribution.commit` setting.
+`append` does nothing unless native agent attribution is already present.
+The parser fails open and leaves the command unchanged for ambiguous or
+unsafe Git grammar. The hook only mutates when the current client runtime is
+verified as FreeInference. `off` produces no Git behavior.
+
 ## Data and credentials
 
 The companion reads provider credentials from the environment and keeps them

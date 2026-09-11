@@ -1,5 +1,7 @@
 package schema
 
+import "encoding/json"
+
 // ============================================================
 // Claude Code hook input (flat schema)
 // Source: https://code.claude.com/docs/en/hooks
@@ -118,6 +120,17 @@ type CodexHookInput struct {
 	Prompt         string `json:"prompt,omitempty"`
 	Trigger        string `json:"trigger,omitempty"`
 	Reason         string `json:"reason,omitempty"`
+
+	// PreToolUse fields. ToolInput preserves every unknown field.
+	ToolName  string                     `json:"tool_name,omitempty"`
+	ToolUseID string                     `json:"tool_use_id,omitempty"`
+	ToolInput map[string]json.RawMessage `json:"tool_input,omitempty"`
+}
+
+// ToolHookOutput rewrites one tool invocation. UpdatedInput must contain the
+// complete replacement object; clients discard omitted fields.
+type ToolHookOutput struct {
+	UpdatedInput map[string]json.RawMessage `json:"updatedInput"`
 }
 
 // ============================================================

@@ -258,3 +258,7 @@ freeinference fi-status --json
 ## License
 
 MIT
+
+## Commit attribution
+
+FreeInference attribution is default-off. Use `freeinference attribution set off|append|standalone`. Enabled modes can rewrite an already-authorized agent `git commit -m` only by appending `Inference: <model> via FreeInference.org` and a support link. Companion never stages, creates, or amends commits, never uses a `Co-Authored-By` identity, and never changes Claude's native attribution setting. See `docs/CLI.md` and `SECURITY.md`.

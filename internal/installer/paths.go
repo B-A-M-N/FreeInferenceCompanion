@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/b-a-m-n/freeinference-companion/internal/clientenv"
 )
 
 // Paths holds the filesystem locations used by the installer.
@@ -20,6 +22,10 @@ type Paths struct {
 	// CodexPluginDir is retained only to identify legacy installer-owned files
 	// during cleanup; new installs never write to this directory.
 	CodexPluginDir string
+	// CodexHome is the canonical Codex configuration root targeted by core install.
+	CodexHome string
+	// ClaudeHome is the canonical Claude configuration root targeted by core install.
+	ClaudeHome string
 	// CodexMarketplaceDir is the local marketplace root used to register the
 	// bundled Codex plugin with Codex's native plugin manager.
 	CodexMarketplaceDir string
@@ -29,28 +35,35 @@ type Paths struct {
 	ClaudePluginPath string
 	// CodexPluginPath is the installed Companion Codex plugin directory.
 	CodexPluginPath string
-	metadataPath    string
+	// Home records the home directory that produced these canonical paths.
+	Home         string
+	metadataPath string
 }
 
 // DefaultPaths returns Paths using standard locations.
 func DefaultPaths() (Paths, error) {
-	home := homeDir()
+	return PathsForHome(homeDir())
+}
+
+// PathsForHome resolves deterministic core paths for an explicit home.
+func PathsForHome(home string) (Paths, error) {
 	if home == "" {
 		return Paths{}, fmt.Errorf("home dir: HOME unset")
 	}
-
 	localBin := filepath.Join(home, ".local", "bin")
 	installDir := filepath.Join(home, ".local", "freeinference")
-	codexHome := strings.TrimSpace(os.Getenv("CODEX_HOME"))
-	if codexHome == "" {
-		codexHome = filepath.Join(home, ".codex")
-	}
+	// Core ownership is deterministic. CODEX_HOME remains a runtime selector;
+	// installer fan-out treats it as an additional environment below.
+	codexHome := clientenv.CanonicalRoot(home, clientenv.ClientCodex)
+	claudeHome := clientenv.CanonicalRoot(home, clientenv.ClientClaudeCode)
 
-	claudePluginDir := filepath.Join(home, ".claude", "plugins")
+	claudePluginDir := filepath.Join(claudeHome, "plugins")
 	claudePluginPath := filepath.Join(claudePluginDir, "freeinference-companion")
 	codexPluginPath := filepath.Join(codexHome, "plugins", "freeinference-companion")
 	return Paths{
 		InstallDir:          installDir,
+		CodexHome:           codexHome,
+		ClaudeHome:          claudeHome,
 		BinaryPath:          filepath.Join(installDir, "bin", "freeinference"),
 		LocalBin:            localBin,
 		ClaudePluginDir:     claudePluginDir,
@@ -59,6 +72,7 @@ func DefaultPaths() (Paths, error) {
 		ShimPath:            filepath.Join(localBin, "freeinference"),
 		ClaudePluginPath:    claudePluginPath,
 		CodexPluginPath:     codexPluginPath,
+		Home:                home,
 		metadataPath:        installationMetadataPath(home),
 	}, nil
 }
@@ -122,4 +136,18 @@ func PathIsOnPath(dir string) bool {
 		}
 	}
 	return false
+}
+
+// home returns the home directory represented by canonical installer paths.
+func (p Paths) home() string {
+	if p.Home != "" {
+		return p.Home
+	}
+	if p.ClaudeHome != "" {
+		return filepath.Dir(p.ClaudeHome)
+	}
+	if p.CodexHome != "" {
+		return filepath.Dir(p.CodexHome)
+	}
+	return ""
 }

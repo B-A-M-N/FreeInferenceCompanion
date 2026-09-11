@@ -6,6 +6,29 @@ and plugin setup, see [Codex with FreeInference](codex.md).
 
 ## Commands
 
+### Commit attribution
+
+```text
+freeinference attribution status [--json]
+freeinference attribution set off|append|standalone [--json]
+```
+
+| Mode | Native agent attribution present | Native attribution absent |
+| --- | --- | --- |
+| `off` (default) | no change | no change |
+| `append` | append inference attribution | no change |
+| `standalone` | append and deduplicate provenance | append inference attribution |
+
+The attribution is:
+
+```text
+Inference: <model> via FreeInference.org
+Support-FreeInference: https://freeinference.org/
+```
+
+Companion never stages or originates a commit. Ambiguous Git grammar fails open unchanged. Native Claude attribution settings are not modified. Lower-level equivalent: `freeinference config set attribution.commit_mode <mode>`.
+
+
 | Command | Description |
 | --- | --- |
 | `freeinference status [--compact\|--level summary\|standard\|detailed] [--client <type>] [--session <id>] [--json]` | Show local session metrics at the requested detail; no network request |

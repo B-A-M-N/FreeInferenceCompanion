@@ -4,7 +4,7 @@
 //
 // The release version is injected at build time via -ldflags:
 //
-//	go build -ldflags "-X github.com/b-a-m-n/freeinference-companion/pkg/version.Version=0.2.0"
+//	go build -ldflags "-X github.com/b-a-m-n/freeinference-companion/pkg/version.Version=0.1.1"
 //
 // The fallback matches the plugin manifest versions for development builds.
 package version
@@ -14,6 +14,7 @@ package version
 // overrides this via -ldflags for release builds; the fallback keeps
 // development builds self-consistent.
 var Version = "0.1.1"
+
 
 // RepositoryURL is the canonical public repository URL. Keep this separate
 // from the Go module path: the repository name is intentionally CamelCase on

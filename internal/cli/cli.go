@@ -66,6 +66,12 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int
 	if cmd == "uninstall" {
 		return cmdUninstall(rest, stdout, stderr)
 	}
+	if cmd == "integrations" {
+		return cmdIntegrations(rest, stdout, stderr)
+	}
+	if cmd == "attribution" {
+		return cmdAttribution(rest, stdout, stderr)
+	}
 	if cmd == "codex-footer" {
 		return cmdCodexFooter(rest, stdout, stderr)
 	}
@@ -335,7 +341,11 @@ Usage:
     [--since <duration|timestamp>] [--json] [--help]
   freeinference dashboard
   freeinference install [--manifest <url>] [--platform <key>] [--dry-run] [--no-plugin] [--force]
+    [--no-integration-discovery]
   freeinference update [--manifest <url>] [--platform <key>] [--dry-run] [--force]
+    [--no-integration-discovery]
+  freeinference integrations list|discover|add|remove --client <type> --root <path>
+  freeinference attribution status|set [--json]
   freeinference uninstall [--help]
   freeinference context [--client <type>] [--session <id>] [--help]
   freeinference cache [--client <type>] [--session <id>] [--help]

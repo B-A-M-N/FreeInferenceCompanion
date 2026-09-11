@@ -96,6 +96,18 @@
           }
         ]
       }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/run-hook.sh\" PreToolUse",
+            "timeout": 5
+          }
+        ]
+      }
     ]
   }
 }
