@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/install"
 )
@@ -253,6 +254,120 @@ func TestClaudeCodeHookSyntax(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bash -n failed: %v\noutput: %s", err, string(out))
 	}
+}
+
+func TestClaudeAttributionHookIsExecutableAndFailOpen(t *testing.T) {
+	script := filepath.Join(pluginDir("claude-code"), "scripts", "attribution-hook.sh")
+	info, err := os.Stat(script)
+	if err != nil {
+		t.Fatalf("stat attribution-hook.sh: %v", err)
+	}
+	if info.Mode().Perm()&0111 == 0 {
+		t.Fatal("attribution-hook.sh must be executable")
+	}
+	if out, err := exec.Command("/bin/bash", "-n", script).CombinedOutput(); err != nil {
+		t.Fatalf("Bash syntax check failed: %v\noutput: %s", err, out)
+	}
+
+	testCases := []struct {
+		name       string
+		overrides  map[string]string
+		makeBinary bool
+		binaryMode os.FileMode
+		exitCode   string
+		wantArgs   bool
+		hang       bool
+	}{
+		{name: "disabled marker", overrides: map[string]string{"FI_DISABLED": "1"}, makeBinary: true},
+		{name: "disabled mode", overrides: map[string]string{"FI_ATTRIBUTION_COMMIT_MODE": " OFF "}, makeBinary: true},
+		{name: "missing binary", overrides: map[string]string{"CLAUDE_PLUGIN_ROOT": filepath.Join(t.TempDir(), "missing")}},
+		{name: "non executable binary", overrides: map[string]string{}, makeBinary: true, binaryMode: 0644},
+		{name: "failing binary", overrides: map[string]string{}, makeBinary: true, binaryMode: 0755, exitCode: "23", wantArgs: true},
+		{name: "hanging binary", overrides: map[string]string{}, makeBinary: true, binaryMode: 0755, hang: true},
+	}
+	for _, test := range testCases {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			inputPath := filepath.Join(root, "input")
+			argsPath := filepath.Join(root, "args")
+			overrides := map[string]string{
+				"CLAUDE_PLUGIN_ROOT":         root,
+				"PLUGIN_ROOT":                "",
+				"PATH":                       "/usr/bin:/bin",
+				"FI_DISABLED":                "",
+				"FI_ATTRIBUTION_COMMIT_MODE": "",
+				"FAKE_INPUT":                 inputPath,
+				"FAKE_ARGS":                  argsPath,
+				"FAKE_EXIT":                  test.exitCode,
+				"FAKE_HANG":                  "0",
+			}
+			for key, value := range test.overrides {
+				overrides[key] = value
+			}
+			if test.hang {
+				overrides["FAKE_HANG"] = "1"
+			}
+			if test.makeBinary {
+				candidate := filepath.Join(root, "bin", runtime.GOOS+"-"+runtime.GOARCH, "freeinference")
+				if err := os.MkdirAll(filepath.Dir(candidate), 0700); err != nil {
+					t.Fatal(err)
+				}
+				fake := "#!/bin/sh\nif [ \"${FAKE_HANG:-0}\" = \"1\" ]; then while :; do :; done; fi\ncat > \"$FAKE_INPUT\"\nprintf '%s' \"$*\" > \"$FAKE_ARGS\"\nexit \"${FAKE_EXIT:-0}\"\n"
+				mode := test.binaryMode
+				if mode == 0 {
+					mode = 0755
+				}
+				if err := os.WriteFile(candidate, []byte(fake), mode); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cmd := exec.Command("/bin/bash", script)
+			cmd.Env = withEnvironmentOverrides(overrides)
+			stdin := "{\"tool_input\":{\"command\":\"git commit -m 'a b' && echo \\\"$x\\\"\"}}\n"
+			cmd.Stdin = strings.NewReader(stdin)
+			started := time.Now()
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("attribution hook failed open with %v\noutput: %s", err, out)
+			}
+			if test.hang && time.Since(started) > 4*time.Second {
+				t.Fatalf("hanging attribution child was not stopped promptly: %s", time.Since(started))
+			}
+			_, inputErr := os.Stat(inputPath)
+			_, argsErr := os.Stat(argsPath)
+			if test.wantArgs {
+				if inputErr != nil || argsErr != nil {
+					t.Fatalf("bundled binary was not invoked: input=%v args=%v", inputErr, argsErr)
+				}
+				data, err := os.ReadFile(inputPath)
+				if err != nil || string(data) != stdin {
+					t.Fatalf("hook stdin changed: %q err=%v", data, err)
+				}
+				args, err := os.ReadFile(argsPath)
+				if err != nil || string(args) != "hook claude-code PreToolUse" {
+					t.Fatalf("hook arguments=%q err=%v", args, err)
+				}
+			} else if inputErr == nil || argsErr == nil {
+				t.Fatalf("hook invoked a binary in fail-open case: input=%v args=%v", inputErr, argsErr)
+			}
+		})
+	}
+}
+
+func withEnvironmentOverrides(overrides map[string]string) []string {
+	env := make([]string, 0, len(os.Environ())+len(overrides))
+	for _, item := range os.Environ() {
+		key, _, ok := strings.Cut(item, "=")
+		if ok {
+			if _, replace := overrides[key]; replace {
+				continue
+			}
+		}
+		env = append(env, item)
+	}
+	for key, value := range overrides {
+		env = append(env, key+"="+value)
+	}
+	return env
 }
 
 func TestClaudeCodeHookExitZeroWhenMissingBinary(t *testing.T) {

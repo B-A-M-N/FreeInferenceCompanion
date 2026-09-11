@@ -1,11 +1,12 @@
 // Package installer provides the install/upgrade/uninstall flow for the
 // FreeInference Companion CLI. It downloads release ZIPs from a marketplace
-// manifest, verifies checksums, extracts the Claude Code plugin, and places the
-// binary on the user's PATH.
+// manifest, verifies checksums, extracts the Claude Code and Codex payloads,
+// and places the binary on the user's PATH.
 package installer
 
 import (
 	"archive/zip"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -49,20 +50,22 @@ type Options struct {
 
 // Result reports what was installed or updated.
 type Result struct {
-	Version            string
-	OldVersion         string
-	BinaryPath         string
-	Plugins            []string // paths to extracted Claude Code plugin directories
-	PathMsg            string   // note about PATH if binary not yet on it
-	Updated            bool
-	AlreadyLatest      bool
-	Installed          bool
-	PartiallyInstalled bool
-	Warnings           []string
-	ClaudePluginReady  bool
-	CodexFilesReady    bool
-	CodexRegistered    bool
-	CodexTrusted       bool
+	Version                   string
+	OldVersion                string
+	BinaryPath                string
+	Plugins                   []string // paths to extracted Claude Code plugin directories
+	PathMsg                   string   // note about PATH if binary not yet on it
+	Updated                   bool
+	AlreadyLatest             bool
+	Installed                 bool
+	PartiallyInstalled        bool
+	Warnings                  []string
+	ClaudePluginReady         bool
+	CodexPluginInstalled      bool
+	CodexMarketplaceInstalled bool
+	CodexMarketplaceAdded     bool
+	CodexPluginRegistered     bool
+	CodexNativeStatusKnown    bool
 
 	EnvironmentIntegrations []EnvironmentIntegrationResult
 	IntegrationsChanged     bool
@@ -378,7 +381,7 @@ func validateReleaseLayout(root string, needBinary, needPlugins bool) error {
 		return nil
 	}
 	base := filepath.Join(root, "plugins", "claude-code")
-	for _, required := range []string{".claude-plugin/plugin.json", "hooks/hooks.json", "scripts/run-hook.sh"} {
+	for _, required := range []string{".claude-plugin/plugin.json", "hooks/hooks.json", "scripts/run-hook.sh", "scripts/attribution-hook.sh"} {
 		path := filepath.Join(base, required)
 		info, err := os.Lstat(path)
 		if err != nil || !info.Mode().IsRegular() {
@@ -387,6 +390,35 @@ func validateReleaseLayout(root string, needBinary, needPlugins bool) error {
 		if required == "scripts/run-hook.sh" && info.Mode()&0111 == 0 {
 			return errors.New("release archive Claude plugin runner is not executable")
 		}
+	}
+	// Codex is optional for older release archives. When present, validate its
+	// manifest and skill tree so canonical Codex installation cannot consume an
+	// arbitrary directory from an otherwise valid archive.
+	codexBase := filepath.Join(root, "plugins", "codex")
+	baseInfo, err := os.Lstat(codexBase)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil || !baseInfo.IsDir() {
+		return errors.New("release archive Codex plugin tree is invalid")
+	}
+	manifestPath := filepath.Join(codexBase, ".codex-plugin", "plugin.json")
+	if _, err := os.Lstat(manifestPath); err != nil {
+		return fmt.Errorf("release archive is missing Codex plugin manifest: %w", err)
+	}
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return fmt.Errorf("read release Codex plugin manifest: %w", err)
+	}
+	var manifest struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil || manifest.Name != "freeinference-companion" {
+		return errors.New("release archive Codex plugin manifest is invalid")
+	}
+	skillsInfo, err := os.Lstat(filepath.Join(codexBase, "skills"))
+	if err != nil || !skillsInfo.IsDir() {
+		return errors.New("release archive is missing Codex plugin skills")
 	}
 	return nil
 }
@@ -449,6 +481,10 @@ func extractPluginPaths(paths Paths) []string {
 	claudePlugin := filepath.Join(paths.ClaudePluginDir, "freeinference-companion")
 	if _, err := os.Stat(claudePlugin); err == nil {
 		plugins = append(plugins, claudePlugin)
+	}
+	codexPlugin := paths.codexPluginPath()
+	if _, err := os.Stat(codexPlugin); err == nil {
+		plugins = append(plugins, codexPlugin)
 	}
 	return plugins
 }

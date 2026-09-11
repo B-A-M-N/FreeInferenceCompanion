@@ -122,6 +122,13 @@ codex plugin list --json
 Updating the marketplace or plugin later is explicit, so Codex never silently
 changes the package.
 
+When `freeinference install` or `update` installs the bundled payload, it
+records the local payload, marketplace registration, and plugin registration
+as separate states. If Codex is not installed or native registration fails,
+the payload may be present while native registration remains incomplete; rerun
+the command after fixing Codex. Codex may require a new session before the
+newly registered skills are visible.
+
 Codex also owns a native footer. To configure Codex to show its own model,
 remaining-context, and current-directory items while preserving existing
 footer items:

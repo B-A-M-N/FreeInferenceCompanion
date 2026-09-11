@@ -49,7 +49,14 @@ func installOrUpdate(opts Options, stdout, stderr io.Writer, update bool) (*Resu
 		}
 	}
 	if metadataFound {
-		if err := validateMetadataPaths(metadata, paths); err != nil {
+		paths, err = validateAndNormalizeMetadataPaths(metadata, paths)
+		if err != nil {
+			return nil, err
+		}
+		paths = pathsForRecordedCodex(paths, metadata)
+	} else {
+		paths, err = paths.normalizeLegacyPaths()
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -87,6 +94,11 @@ func installOrUpdate(opts Options, stdout, stderr io.Writer, update bool) (*Resu
 	if coreCurrent {
 		result := &Result{Version: installedVersion, OldVersion: installedVersion, AlreadyLatest: true}
 		integrationErr := withInstallerLock(paths, func() error {
+			if !opts.NoPlugin {
+				if err := reconcileCanonicalCodexRegistration(paths, result, stdout); err != nil {
+					return err
+				}
+			}
 			return reconcileClientEnvironmentsFromCore(paths, opts, installedVersion, result, stdout)
 		})
 		if integrationErr != nil {
@@ -127,15 +139,22 @@ func installOrUpdate(opts Options, stdout, stderr io.Writer, update bool) (*Resu
 			return fmt.Errorf("read installation metadata: %w", err)
 		}
 		if found {
-			if err := validateMetadataPaths(latest, paths); err != nil {
+			paths, err = validateAndNormalizeMetadataPaths(latest, paths)
+			if err != nil {
 				return err
 			}
+			paths = pathsForRecordedCodex(paths, latest)
 			if latestVersion := installedComponentsVersion(latest, found, paths, opts); latestVersion != "" {
 				cmp := compareVersions(manifest.Version, latestVersion)
 				if cmp == 0 && !opts.Force && requestedComponentsReady(latest, paths, manifest.Version, opts) {
 					result.Version = latestVersion
 					result.OldVersion = latestVersion
 					result.AlreadyLatest = true
+					if !opts.NoPlugin {
+						if err := reconcileCanonicalCodexRegistration(paths, result, stdout); err != nil {
+							return err
+						}
+					}
 					return reconcileClientEnvironmentsFromCore(paths, opts, latestVersion, result, stdout)
 				}
 			}
@@ -221,6 +240,7 @@ func installedComponentsVersion(metadata *InstallationMetadata, found bool, path
 	}
 	if !opts.NoPlugin {
 		versions = append(versions, metadata.ClaudePluginVersion)
+		versions = append(versions, metadata.CodexPluginVersion, metadata.CodexMarketplaceVersion)
 	}
 	return highestVersion(versions)
 }
@@ -317,36 +337,149 @@ func requestedComponentsReady(metadata *InstallationMetadata, paths Paths, versi
 		if !directoryComponentReady(metadata, "claude", paths.claudePluginPath()) {
 			return false
 		}
+		if !coreDirectoryComponentReady(metadata.CoreClaudePluginPath, metadata.CoreClaudePluginSHA256, paths.CoreClaudePluginPath) {
+			return false
+		}
+		codexTracked := metadata.CodexPluginOwned || metadata.CodexPluginVersion != "" || metadata.CoreCodexPluginPath != ""
+		if codexTracked && (metadata.CodexPluginVersion != version || metadata.CodexMarketplaceVersion != version ||
+			!directoryComponentReady(metadata, "codex", paths.codexPluginPath()) ||
+			!directoryComponentReady(metadata, "marketplace", paths.CodexMarketplaceDir) ||
+			!coreDirectoryComponentReady(metadata.CoreCodexPluginPath, metadata.CoreCodexPluginSHA256, paths.CoreCodexPluginPath) ||
+			!metadata.CodexNativeRegistrationKnown) {
+			return false
+		}
 	}
 	return true
 }
 
 func validateMetadataPaths(metadata *InstallationMetadata, paths Paths) error {
+	_, err := validateAndNormalizeMetadataPaths(metadata, paths)
+	return err
+}
+
+func validateAndNormalizeMetadataPaths(metadata *InstallationMetadata, paths Paths) (Paths, error) {
 	if metadata == nil {
-		return errors.New("installation metadata is empty")
+		return Paths{}, errors.New("installation metadata is empty")
+	}
+	normalizedPaths, normalizeErr := paths.normalizeLegacyPaths()
+	if normalizeErr != nil {
+		return Paths{}, normalizeErr
+	}
+	codexExpected := normalizedPaths.codexPluginPath()
+	marketplaceExpected := normalizedPaths.CodexMarketplaceDir
+	canonicalPaths, canonicalErr := PathsForHome(normalizedPaths.Home)
+	legacyPathsExplicit := canonicalErr == nil && canonical(normalizedPaths.codexPluginPath()) != canonical(canonicalPaths.codexPluginPath())
+	if !legacyPathsExplicit {
+		if legacyPlugin, legacyMarketplace, ok := recordedLegacyCodexPaths(metadata); ok {
+			// Older installers used CODEX_HOME for core ownership. The recorded pair
+			// is the migration source; new Paths still target canonical ~/.codex.
+			codexExpected = legacyPlugin
+			marketplaceExpected = legacyMarketplace
+		}
 	}
 	for label, pathPair := range map[string][2]string{
-		"managed binary":    {metadata.ManagedBinaryPath, paths.BinaryPath},
-		"shim":              {metadata.ShimPath, paths.shimPath()},
-		"Claude plugin":     {metadata.ClaudePluginPath, paths.claudePluginPath()},
-		"Codex plugin":      {metadata.CodexPluginPath, paths.codexPluginPath()},
-		"Codex marketplace": {metadata.CodexMarketplacePath, paths.CodexMarketplaceDir},
+		"managed binary":    {metadata.ManagedBinaryPath, normalizedPaths.BinaryPath},
+		"shim":              {metadata.ShimPath, normalizedPaths.shimPath()},
+		"Claude plugin":     {metadata.ClaudePluginPath, normalizedPaths.claudePluginPath()},
+		"Codex plugin":      {metadata.CodexPluginPath, codexExpected},
+		"Codex marketplace": {metadata.CodexMarketplacePath, marketplaceExpected},
 	} {
 		recorded, err := canonicalPath(pathPair[0])
 		if err != nil {
-			return fmt.Errorf("installation metadata has invalid %s path", label)
+			return Paths{}, fmt.Errorf("installation metadata has invalid %s path", label)
 		}
 		expected, err := canonicalPath(pathPair[1])
 		if err != nil || recorded != expected {
-			return fmt.Errorf("installation metadata belongs to a different %s path", label)
+			return Paths{}, fmt.Errorf("installation metadata belongs to a different %s path", label)
 		}
 	}
-	return nil
+	for label, pathPair := range map[string][2]string{
+		"core Claude plugin": {metadata.CoreClaudePluginPath, normalizedPaths.CoreClaudePluginPath},
+		"core Codex plugin":  {metadata.CoreCodexPluginPath, normalizedPaths.CoreCodexPluginPath},
+	} {
+		if pathPair[0] == "" {
+			continue
+		}
+		recorded, err := canonicalPath(pathPair[0])
+		if err != nil {
+			return Paths{}, fmt.Errorf("installation metadata has invalid %s path", label)
+		}
+		expected, err := canonicalPath(pathPair[1])
+		if err != nil || recorded != expected {
+			return Paths{}, fmt.Errorf("installation metadata belongs to a different %s path", label)
+		}
+	}
+	return normalizedPaths, nil
+}
+
+func coreDirectoryComponentReady(recordedPath, recordedDigest, expectedPath string) bool {
+	if recordedPath == "" || recordedDigest == "" || recordedPath != expectedPath {
+		return false
+	}
+	info, err := os.Lstat(expectedPath)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return false
+	}
+	matched, err := pathDigestMatches(expectedPath, recordedDigest)
+	return err == nil && matched
+}
+
+func recordedLegacyCodexPaths(metadata *InstallationMetadata) (string, string, bool) {
+	if metadata == nil {
+		return "", "", false
+	}
+	plugin, pluginErr := canonicalPath(metadata.CodexPluginPath)
+	marketplace, marketplaceErr := canonicalPath(metadata.CodexMarketplacePath)
+	if pluginErr != nil || marketplaceErr != nil {
+		return "", "", false
+	}
+	root := filepath.Dir(filepath.Dir(plugin))
+	if plugin != filepath.Join(root, "plugins", "freeinference-companion") || marketplace != filepath.Join(root, "plugins", "freeinference-companion-marketplace") {
+		return "", "", false
+	}
+	return plugin, marketplace, true
+}
+
+func pathsForRecordedCodex(paths Paths, metadata *InstallationMetadata) Paths {
+	plugin, marketplace, ok := recordedLegacyCodexPaths(metadata)
+	if !ok {
+		return paths
+	}
+	canonical, err := canonicalPath(paths.codexPluginPath())
+	if err == nil && canonical == plugin {
+		return paths
+	}
+	paths.CodexHome = filepath.Dir(filepath.Dir(plugin))
+	paths.CodexPluginDir = filepath.Dir(plugin)
+	paths.CodexPluginPath = plugin
+	paths.CodexMarketplaceDir = marketplace
+	return paths
 }
 
 func commitRelease(extractDir string, paths Paths, opts Options, manifest *MarketplaceManifest, artifactHash string, result *Result, stdout io.Writer, prior *InstallationMetadata, priorFound bool) error {
 	tx := &installTransaction{}
-	failed := func(err error) error { tx.rollback(); return err }
+	nativeRegistrationAttempted := false
+	appendNativeWarnings := func(warnings []string) {
+		for _, warning := range warnings {
+			result.PartiallyInstalled = true
+			result.Warnings = append(result.Warnings, warning)
+			if stdout != nil {
+				fmt.Fprintf(stdout, "  Warning: %s\n", warning)
+			}
+		}
+	}
+	rollbackNative := func() {
+		if !nativeRegistrationAttempted {
+			return
+		}
+		appendNativeWarnings(unregisterCodexMarketplaceStatus(paths))
+		if prior == nil {
+			return
+		}
+		appendNativeWarnings(restoreCodexNativeRegistrationForMetadata(paths, prior))
+	}
+	defer tx.rollback()
+	failed := func(err error) error { rollbackNative(); tx.rollback(); return err }
 	if !opts.NoBin {
 		binarySrc := findBinary(extractDir)
 		if err := validateBinaryOwnership(paths, prior, priorFound); err != nil {
@@ -377,8 +510,15 @@ func commitRelease(extractDir string, paths Paths, opts Options, manifest *Marke
 			result.PathMsg = msg
 		}
 	}
+	codexAvailable := false
 	if !opts.NoPlugin {
 		claudeSrc := filepath.Join(extractDir, "plugins", "claude-code")
+		codexSrc := filepath.Join(extractDir, "plugins", "codex")
+		if info, sourceErr := os.Lstat(codexSrc); sourceErr == nil {
+			codexAvailable = info.IsDir()
+		} else if !os.IsNotExist(sourceErr) {
+			return failed(fmt.Errorf("inspect Codex plugin source: %w", sourceErr))
+		}
 		if err := validateOwnedDirectory(paths.claudePluginPath(), prior, priorFound, priorDigest(prior, true)); err != nil {
 			return failed(err)
 		}
@@ -386,8 +526,52 @@ func commitRelease(extractDir string, paths Paths, opts Options, manifest *Marke
 		if err != nil {
 			return failed(fmt.Errorf("stage Claude plugin: %w", err))
 		}
-		if err := tx.replace(paths.claudePluginPath(), claudeStage); err != nil {
+		if err := tx.replaceStaged(paths.claudePluginPath(), claudeStage, false); err != nil {
 			return failed(fmt.Errorf("install Claude plugin: %w", err))
+		}
+		priorCoreClaudePath, priorCoreClaudeDigest := priorCoreEvidence(prior)
+		if err := validateCoreDirectory(paths.CoreClaudePluginPath, prior, priorFound, priorCoreClaudePath, priorCoreClaudeDigest); err != nil {
+			return failed(err)
+		}
+		claudeCoreStage, err := stageDirectory(claudeSrc, paths.CoreClaudePluginPath)
+		if err != nil {
+			return failed(fmt.Errorf("stage core Claude plugin: %w", err))
+		}
+		if err := tx.replaceStaged(paths.CoreClaudePluginPath, claudeCoreStage, false); err != nil {
+			return failed(fmt.Errorf("install core Claude plugin: %w", err))
+		}
+		priorCoreCodexPath, priorCoreCodexDigest := priorCodexCoreEvidence(prior)
+		if codexAvailable {
+			if err := validateCoreDirectory(paths.CoreCodexPluginPath, prior, priorFound, priorCoreCodexPath, priorCoreCodexDigest); err != nil {
+				return failed(err)
+			}
+			codexCoreStage, err := stageDirectory(codexSrc, paths.CoreCodexPluginPath)
+			if err != nil {
+				return failed(fmt.Errorf("stage core Codex plugin: %w", err))
+			}
+			if err := tx.replaceStaged(paths.CoreCodexPluginPath, codexCoreStage, false); err != nil {
+				return failed(fmt.Errorf("install core Codex plugin: %w", err))
+			}
+			if err := validateOwnedDirectory(paths.codexPluginPath(), prior, priorFound, priorDigest(prior, false)); err != nil {
+				return failed(err)
+			}
+			codexPluginStage, err := stageDirectory(codexSrc, paths.codexPluginPath())
+			if err != nil {
+				return failed(fmt.Errorf("stage canonical Codex plugin: %w", err))
+			}
+			if err := tx.replaceStaged(paths.codexPluginPath(), codexPluginStage, false); err != nil {
+				return failed(fmt.Errorf("install canonical Codex plugin: %w", err))
+			}
+			if err := validateOwnedDirectory(paths.CodexMarketplaceDir, prior, priorFound, priorMarketplaceDigest(prior)); err != nil {
+				return failed(err)
+			}
+			marketplaceStage, err := stageCodexMarketplace(paths, codexSrc)
+			if err != nil {
+				return failed(fmt.Errorf("stage canonical Codex marketplace: %w", err))
+			}
+			if err := tx.replace(paths.CodexMarketplaceDir, marketplaceStage); err != nil {
+				return failed(fmt.Errorf("install canonical Codex marketplace: %w", err))
+			}
 		}
 		result.ClaudePluginReady = true
 		result.Plugins = extractPluginPaths(paths)
@@ -398,6 +582,20 @@ func commitRelease(extractDir string, paths Paths, opts Options, manifest *Marke
 	metadata.ClaudePluginOwned = !opts.NoPlugin
 	metadata.ManagedBinarySHA256, _ = pathDigest(paths.BinaryPath)
 	metadata.ClaudePluginSHA256, _ = pathDigest(paths.claudePluginPath())
+	if !opts.NoPlugin {
+		metadata.CoreClaudePluginPath = paths.CoreClaudePluginPath
+		metadata.CoreClaudePluginSHA256, _ = pathDigest(paths.CoreClaudePluginPath)
+		if codexAvailable {
+			metadata.CodexPluginOwned = true
+			metadata.CodexPluginSHA256, _ = pathDigest(paths.codexPluginPath())
+			metadata.CodexPluginVersion = manifest.Version
+			metadata.CodexMarketplaceOwned = true
+			metadata.CodexMarketplaceSHA256, _ = pathDigest(paths.CodexMarketplaceDir)
+			metadata.CodexMarketplaceVersion = manifest.Version
+			metadata.CoreCodexPluginPath = paths.CoreCodexPluginPath
+			metadata.CoreCodexPluginSHA256, _ = pathDigest(paths.CoreCodexPluginPath)
+		}
+	}
 	if priorFound && prior != nil {
 		if opts.NoBin {
 			metadata.ManagedBinaryOwned = prior.ManagedBinaryOwned
@@ -415,22 +613,56 @@ func commitRelease(extractDir string, paths Paths, opts Options, manifest *Marke
 			metadata.CodexMarketplaceOwned = prior.CodexMarketplaceOwned
 			metadata.CodexMarketplaceSHA256 = prior.CodexMarketplaceSHA256
 			metadata.CodexMarketplaceVersion = prior.CodexMarketplaceVersion
-		} else if priorFound && prior != nil {
-			// Preserve ownership records for legacy Codex installs. New installs
-			// never replace or register Codex files; retaining these records lets
-			// uninstall remove only files this installer previously owned.
+			metadata.CoreClaudePluginPath = prior.CoreClaudePluginPath
+			metadata.CoreClaudePluginSHA256 = prior.CoreClaudePluginSHA256
+			metadata.CoreCodexPluginPath = prior.CoreCodexPluginPath
+			metadata.CoreCodexPluginSHA256 = prior.CoreCodexPluginSHA256
+		}
+		if !opts.NoPlugin && !codexAvailable {
 			metadata.CodexPluginOwned = prior.CodexPluginOwned
 			metadata.CodexPluginSHA256 = prior.CodexPluginSHA256
 			metadata.CodexPluginVersion = prior.CodexPluginVersion
 			metadata.CodexMarketplaceOwned = prior.CodexMarketplaceOwned
 			metadata.CodexMarketplaceSHA256 = prior.CodexMarketplaceSHA256
 			metadata.CodexMarketplaceVersion = prior.CodexMarketplaceVersion
+			metadata.CoreCodexPluginPath = prior.CoreCodexPluginPath
+			metadata.CoreCodexPluginSHA256 = prior.CoreCodexPluginSHA256
+			metadata.CodexNativeRegistrationKnown = prior.CodexNativeRegistrationKnown
+			metadata.CodexMarketplaceAdded = prior.CodexMarketplaceAdded
+			metadata.CodexPluginRegistered = prior.CodexPluginRegistered
+		}
+		if opts.NoPlugin {
+			metadata.CodexNativeRegistrationKnown = prior.CodexNativeRegistrationKnown
+			metadata.CodexMarketplaceAdded = prior.CodexMarketplaceAdded
+			metadata.CodexPluginRegistered = prior.CodexPluginRegistered
+		}
+	}
+	if codexAvailable {
+		nativeRegistrationAttempted = true
+		registered, marketplaceAdded, warnings := registerCodexMarketplaceForHome(paths.CodexHome, paths.CodexMarketplaceDir, stdout)
+		metadata.CodexNativeRegistrationKnown = true
+		metadata.CodexMarketplaceAdded = marketplaceAdded
+		metadata.CodexPluginRegistered = registered
+		result.CodexPluginInstalled = true
+		result.CodexMarketplaceInstalled = true
+		result.CodexMarketplaceAdded = marketplaceAdded
+		result.CodexPluginRegistered = registered
+		result.CodexNativeStatusKnown = true
+		appendNativeWarnings(warnings)
+		if stdout != nil {
+			fmt.Fprintf(stdout, "  Codex payload: plugin installed=%t, marketplace installed=%t\n", result.CodexPluginInstalled, result.CodexMarketplaceInstalled)
+			fmt.Fprintf(stdout, "  Codex native registration: marketplace added=%t, plugin registered=%t\n", marketplaceAdded, registered)
 		}
 	}
 	metadata.InstalledVersion = highestVersion([]string{
 		metadata.BinaryVersion,
 		metadata.ClaudePluginVersion,
+		metadata.CodexPluginVersion,
 	})
+	// Metadata is the ownership commit point for every target recorded by this
+	// transaction. Until it commits, deferred rollback restores all filesystem
+	// replacements. After it commits, rollback is disallowed by transaction
+	// state and only backup cleanup can produce a recoverable warning.
 	metadataStage, err := stageInstallationMetadata(paths.MetadataPath(), metadata)
 	if err != nil {
 		return failed(fmt.Errorf("stage installation metadata: %w", err))
@@ -439,16 +671,71 @@ func commitRelease(extractDir string, paths Paths, opts Options, manifest *Marke
 		_ = os.Remove(metadataStage)
 		return failed(fmt.Errorf("commit installation metadata: %w", err))
 	}
+	tx.cleanupCommitted = true
 	if err := tx.finalize(); err != nil {
-		// The target files and metadata are already committed. Cleanup failure is
-		// recoverable and must not be reported as an install failure that invites
-		// rollback of a state which can no longer be rolled back atomically.
 		result.PartiallyInstalled = true
 		warning := fmt.Sprintf("cleanup of installation rollback files failed: %v", err)
 		result.Warnings = append(result.Warnings, warning)
 		if stdout != nil {
 			fmt.Fprintf(stdout, "  Warning: %s\n", warning)
 		}
+	}
+	return nil
+}
+
+func reconcileCanonicalCodexRegistration(paths Paths, result *Result, stdout io.Writer) error {
+	metadata, found, err := LoadInstallationMetadata(paths.MetadataPath())
+	if err != nil {
+		return fmt.Errorf("read Codex registration status: %w", err)
+	}
+	if !found || metadata == nil || !metadata.CodexMarketplaceOwned {
+		return nil
+	}
+	result.CodexPluginInstalled = metadata.CodexPluginOwned
+	result.CodexMarketplaceInstalled = metadata.CodexMarketplaceOwned
+	result.CodexMarketplaceAdded = metadata.CodexMarketplaceAdded
+	result.CodexPluginRegistered = metadata.CodexPluginRegistered
+	result.CodexNativeStatusKnown = metadata.CodexNativeRegistrationKnown
+	if metadata.CodexNativeRegistrationKnown && metadata.CodexPluginRegistered {
+		return nil
+	}
+
+	registered, marketplaceAdded, warnings := registerCodexMarketplaceForHome(paths.CodexHome, paths.CodexMarketplaceDir, stdout)
+	appendWarnings := func(items []string) {
+		for _, warning := range items {
+			result.PartiallyInstalled = true
+			result.Warnings = append(result.Warnings, warning)
+			if stdout != nil {
+				fmt.Fprintf(stdout, "  Warning: %s\n", warning)
+			}
+		}
+	}
+	appendWarnings(warnings)
+	previousMarketplaceAdded, previousPluginRegistered := metadata.CodexMarketplaceAdded, metadata.CodexPluginRegistered
+	metadata.CodexNativeRegistrationKnown = true
+	metadata.CodexMarketplaceAdded = marketplaceAdded
+	metadata.CodexPluginRegistered = registered
+	result.CodexMarketplaceAdded = marketplaceAdded
+	result.CodexPluginRegistered = registered
+	result.CodexNativeStatusKnown = true
+
+	metadataStage, err := stageInstallationMetadata(paths.MetadataPath(), *metadata)
+	if err != nil {
+		appendWarnings(unregisterCodexMarketplaceStatus(paths))
+		appendWarnings(restoreCodexNativeRegistration(paths, previousMarketplaceAdded, previousPluginRegistered))
+		return fmt.Errorf("stage Codex registration status: %w", err)
+	}
+	tx := &installTransaction{}
+	defer tx.rollback()
+	if err := tx.replace(paths.MetadataPath(), metadataStage); err != nil {
+		_ = os.Remove(metadataStage)
+		appendWarnings(unregisterCodexMarketplaceStatus(paths))
+		appendWarnings(restoreCodexNativeRegistration(paths, previousMarketplaceAdded, previousPluginRegistered))
+		return fmt.Errorf("commit Codex registration status: %w", err)
+	}
+	if err := tx.finalize(); err != nil {
+		warning := fmt.Sprintf("cleanup of Codex registration status rollback files failed: %v", err)
+		appendWarnings([]string{warning})
 	}
 	return nil
 }
@@ -461,6 +748,48 @@ func priorDigest(metadata *InstallationMetadata, claude bool) string {
 		return metadata.ClaudePluginSHA256
 	}
 	return metadata.CodexPluginSHA256
+}
+
+func priorMarketplaceDigest(metadata *InstallationMetadata) string {
+	if metadata == nil {
+		return ""
+	}
+	return metadata.CodexMarketplaceSHA256
+}
+
+func validateCoreDirectory(path string, metadata *InstallationMetadata, found bool, recordedPath, recordedDigest string) error {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !found || metadata == nil || recordedPath != path || recordedDigest == "" {
+		return fmt.Errorf("refusing to replace unowned core plugin path %s", path)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("owned core plugin path is not a directory: %s", path)
+	}
+	matched, err := pathDigestMatches(path, recordedDigest)
+	if err != nil || !matched {
+		return fmt.Errorf("core plugin path changed after installation: %s", path)
+	}
+	return nil
+}
+
+func priorCoreEvidence(metadata *InstallationMetadata) (string, string) {
+	if metadata == nil {
+		return "", ""
+	}
+	return metadata.CoreClaudePluginPath, metadata.CoreClaudePluginSHA256
+}
+
+func priorCodexCoreEvidence(metadata *InstallationMetadata) (string, string) {
+	if metadata == nil {
+		return "", ""
+	}
+	return metadata.CoreCodexPluginPath, metadata.CoreCodexPluginSHA256
 }
 
 func manifestURLOrigin(raw string) string {
@@ -555,8 +884,8 @@ func validateShimOwnership(paths Paths, metadata *InstallationMetadata, found bo
 		if err != nil {
 			return fmt.Errorf("inspect existing shim: %w", err)
 		}
-		expected, _ := filepath.Abs(paths.BinaryPath)
-		actual, _ := filepath.Abs(target)
+		expected, _ := canonicalMutationPath(paths.BinaryPath)
+		actual, _ := canonicalMutationPath(target)
 		if actual != expected {
 			return fmt.Errorf("refusing to replace a foreign shim %s", path)
 		}
@@ -592,6 +921,15 @@ func stageShim(shimPath, binaryPath string) (string, error) {
 }
 
 func stageCodexMarketplace(paths Paths, pluginSource string) (string, error) {
+	if err := ensureNoSymlinkedAncestors(paths.CodexMarketplaceDir); err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.CodexMarketplaceDir), 0755); err != nil {
+		return "", err
+	}
+	if err := ensureNoSymlinkedAncestors(paths.CodexMarketplaceDir); err != nil {
+		return "", err
+	}
 	stage, err := os.MkdirTemp(filepath.Dir(paths.CodexMarketplaceDir), ".freeinference-marketplace-*")
 	if err != nil {
 		return "", err
@@ -654,6 +992,10 @@ func Uninstall(paths Paths, stdout, stderr io.Writer) error {
 }
 
 func UninstallWithResult(paths Paths, stdout, stderr io.Writer) (*UninstallResult, error) {
+	normalized, normalizeErr := paths.normalizeLegacyPaths()
+	if normalizeErr == nil {
+		paths = normalized
+	}
 	if paths.MetadataPath() == "" {
 		return nil, errors.New("installer metadata path is unavailable")
 	}
@@ -672,9 +1014,12 @@ func UninstallWithResult(paths Paths, stdout, stderr io.Writer) (*UninstallResul
 			}
 			return errors.New("installation metadata is missing; refusing to remove unowned files")
 		}
-		if err := validateMetadataPaths(metadata, paths); err != nil {
-			return err
+		var normalizeErr error
+		paths, normalizeErr = validateAndNormalizeMetadataPaths(metadata, paths)
+		if normalizeErr != nil {
+			return normalizeErr
 		}
+		paths = pathsForRecordedCodex(paths, metadata)
 		if metadata.ManagedBinaryOwned {
 			if err := validateOwnedFile(paths.BinaryPath, metadata.ManagedBinarySHA256, true); err != nil {
 				return err
@@ -699,14 +1044,26 @@ func UninstallWithResult(paths Paths, stdout, stderr io.Writer) (*UninstallResul
 			if err := validateOwnedDirectoryForRemoval(paths.CodexMarketplaceDir, metadata.CodexMarketplaceSHA256); err != nil {
 				return err
 			}
-			result.Warnings = append(result.Warnings, unregisterCodexMarketplaceStatus(paths)...)
 		}
-		alternateRemoved, alternateWarnings := UninstallClientEnvironments(paths.home(), stdout)
-		result.Removed = append(result.Removed, alternateRemoved...)
-		result.Warnings = append(result.Warnings, alternateWarnings...)
-
 		tx := &installTransaction{}
-		failed := func(err error) error { tx.rollback(); return err }
+		nativeCleaned := false
+		nativeCleanupCommitted := false
+		if metadata.CodexMarketplaceOwned && nativeCodexRegistrationNeedsCleanup(metadata) {
+			nativeWarnings := unregisterCodexMarketplaceStatus(paths)
+			if len(nativeWarnings) > 0 && metadata.CodexNativeRegistrationKnown {
+				result.Warnings = append(result.Warnings, nativeWarnings...)
+				return fmt.Errorf("native Codex cleanup failed; local files were preserved: %s", nativeWarnings[0])
+			}
+			result.Warnings = append(result.Warnings, nativeWarnings...)
+			nativeCleaned = len(nativeWarnings) == 0
+		}
+		failed := func(err error) error {
+			tx.rollback()
+			if nativeCleaned && !nativeCleanupCommitted {
+				result.Warnings = append(result.Warnings, restoreCodexNativeRegistrationForMetadata(paths, metadata)...)
+			}
+			return err
+		}
 		for _, target := range []struct {
 			path, label string
 			owned       bool
@@ -735,11 +1092,20 @@ func UninstallWithResult(paths Paths, stdout, stderr io.Writer) (*UninstallResul
 		if err := tx.remove(paths.MetadataPath()); err != nil {
 			return failed(fmt.Errorf("remove installation metadata: %w", err))
 		}
+		// All owned targets and the ownership document have been moved into the
+		// transaction's committed state. A later rollback-file cleanup error must
+		// not restore native registration to paths that are now intentionally gone.
+		nativeCleanupCommitted = true
 		if err := tx.finalize(); err != nil {
-			result.Warnings = append(result.Warnings, fmt.Sprintf("cleanup of uninstall rollback files failed: %v", err))
+			return failed(fmt.Errorf("cleanup of uninstall rollback files: %w", err))
 		}
 		_ = os.Remove(filepath.Dir(paths.BinaryPath))
 		_ = os.Remove(paths.InstallDir)
+		// Alternate cleanup happens only after the core transaction has committed;
+		// a core failure above must not strand or forget alternate ownership.
+		alternateRemoved, alternateWarnings := uninstallClientEnvironmentsLocked(paths.home(), stdout)
+		result.Removed = append(result.Removed, alternateRemoved...)
+		result.Warnings = append(result.Warnings, alternateWarnings...)
 		return nil
 	})
 	return result, err
@@ -793,8 +1159,8 @@ func validateOwnedShimForRemoval(paths Paths, metadata *InstallationMetadata) er
 		if err != nil {
 			return err
 		}
-		actual, _ := filepath.Abs(target)
-		expected, _ := filepath.Abs(paths.BinaryPath)
+		actual, _ := canonicalMutationPath(target)
+		expected, _ := canonicalMutationPath(paths.BinaryPath)
 		if actual != expected {
 			return fmt.Errorf("refusing to remove foreign shim %s", path)
 		}
@@ -838,43 +1204,110 @@ func unregisterCodexMarketplaceStatus(paths Paths) []string {
 	return warnings
 }
 
-func registerCodexMarketplaceStatus(paths Paths, stdout io.Writer) (bool, []string) {
-	return registerCodexMarketplaceForHome(paths.CodexHome, paths.CodexMarketplaceDir, stdout)
+func nativeCodexRegistrationNeedsCleanup(metadata *InstallationMetadata) bool {
+	if metadata == nil || !metadata.CodexMarketplaceOwned {
+		return false
+	}
+	// Older metadata did not record native state. Make a best effort to remove
+	// both names in that case; current metadata can avoid touching Codex when
+	// installation already proved that native registration was absent.
+	return !metadata.CodexNativeRegistrationKnown || metadata.CodexMarketplaceAdded || metadata.CodexPluginRegistered
 }
 
-func registerCodexMarketplaceForHome(codexHome, marketplacePath string, stdout io.Writer) (bool, []string) {
+func restoreCodexNativeRegistration(paths Paths, marketplaceAdded, pluginRegistered bool) []string {
+	if !marketplaceAdded && !pluginRegistered {
+		return nil
+	}
 	codex, err := exec.LookPath("codex")
 	if err != nil {
-		return false, []string{"Codex plugin files installed; Codex CLI was not found for native registration"}
+		return []string{"Codex CLI was not found; prior native plugin registration could not be restored"}
+	}
+	var warnings []string
+	if marketplaceAdded {
+		if err := runCodexPluginCommandForHome(codex, paths.CodexHome, "plugin", "marketplace", "add", paths.CodexMarketplaceDir, "--json"); err != nil {
+			warnings = append(warnings, "prior Codex marketplace registration could not be restored")
+			return warnings
+		}
+	}
+	if pluginRegistered {
+		if err := runCodexPluginCommandForHome(codex, paths.CodexHome, "plugin", "add", "freeinference-companion@freeinference-companion-local", "--json"); err != nil {
+			warnings = append(warnings, "prior Codex plugin registration could not be restored")
+		}
+	}
+	return warnings
+}
+
+func restoreCodexNativeRegistrationForMetadata(paths Paths, metadata *InstallationMetadata) []string {
+	if metadata == nil {
+		return nil
+	}
+	if !metadata.CodexNativeRegistrationKnown {
+		// Legacy metadata cannot tell us whether native registration existed;
+		// restore both names after a failed local transaction to preserve the
+		// most likely pre-existing state.
+		return restoreCodexNativeRegistration(paths, true, true)
+	}
+	return restoreCodexNativeRegistration(paths, metadata.CodexMarketplaceAdded, metadata.CodexPluginRegistered)
+}
+
+func registerCodexMarketplaceStatus(paths Paths, stdout io.Writer) (bool, []string) {
+	registered, _, warnings := registerCodexMarketplaceForHome(paths.CodexHome, paths.CodexMarketplaceDir, stdout)
+	return registered, warnings
+}
+
+func registerCodexMarketplaceForHome(codexHome, marketplacePath string, stdout io.Writer) (bool, bool, []string) {
+	codex, err := exec.LookPath("codex")
+	if err != nil {
+		return false, false, []string{"Codex plugin files installed; Codex CLI was not found for native registration"}
 	}
 	if err := runCodexPluginCommandForHome(codex, codexHome, "plugin", "marketplace", "add", marketplacePath, "--json"); err != nil {
-		return false, []string{"Codex marketplace registration did not complete; run `codex plugin marketplace add` manually"}
+		return false, false, []string{"Codex marketplace registration did not complete; run `codex plugin marketplace add` manually"}
 	}
 	if err := runCodexPluginCommandForHome(codex, codexHome, "plugin", "add", "freeinference-companion@freeinference-companion-local", "--json"); err != nil {
-		return false, []string{"Codex plugin installation did not complete; run `codex plugin add freeinference-companion@freeinference-companion-local` manually"}
+		return false, true, []string{"Codex plugin installation did not complete; run `codex plugin add freeinference-companion@freeinference-companion-local` manually"}
 	}
 	if stdout != nil {
 		fmt.Fprintln(stdout, "  Registered and installed the Codex plugin through its local marketplace.")
 	}
-	return true, nil
+	return true, true, nil
 }
 
 func reconcileClientEnvironmentsFromCore(paths Paths, opts Options, version string, result *Result, stdout io.Writer) error {
 	if opts.NoPlugin {
 		return nil
 	}
+	metadata, found, metadataErr := LoadInstallationMetadata(paths.MetadataPath())
+	if metadataErr != nil || !found || metadata == nil {
+		return fmt.Errorf("verified core installation metadata is unavailable")
+	}
+	if !coreDirectoryComponentReady(metadata.CoreClaudePluginPath, metadata.CoreClaudePluginSHA256, paths.CoreClaudePluginPath) {
+		return fmt.Errorf("verified core plugin ownership evidence is missing or changed")
+	}
+	pluginSources := map[clientenv.Client]string{
+		clientenv.ClientClaudeCode: paths.CoreClaudePluginPath,
+	}
+	if metadata.CoreCodexPluginPath != "" {
+		if !coreDirectoryComponentReady(metadata.CoreCodexPluginPath, metadata.CoreCodexPluginSHA256, paths.CoreCodexPluginPath) {
+			return fmt.Errorf("verified core Codex plugin ownership evidence is missing or changed")
+		}
+		pluginSources[clientenv.ClientCodex] = paths.CoreCodexPluginPath
+	}
 	integrations, err := ReconcileClientEnvironments(reconcileOptions{
-		home: paths.home(),
-		pluginSources: map[clientenv.Client]string{
-			clientenv.ClientClaudeCode: paths.claudePluginPath(),
-		},
-		version:   version,
-		dryRun:    opts.DryRun,
-		discovery: !opts.NoIntegrationDiscovery,
-		stdout:    stdout,
+		home:          paths.home(),
+		pluginSources: pluginSources,
+		version:       version,
+		dryRun:        opts.DryRun,
+		discovery:     !opts.NoIntegrationDiscovery,
+		stdout:        stdout,
 	})
 	if err != nil {
-		return fmt.Errorf("reconcile client environments: %w", err)
+		warning := fmt.Sprintf("reconcile client environments: %v", err)
+		result.PartiallyInstalled = true
+		result.Warnings = append(result.Warnings, warning)
+		if stdout != nil {
+			fmt.Fprintf(stdout, "  Warning: %s\n", warning)
+		}
+		return nil
 	}
 	for _, integration := range integrations {
 		if integration.Action == "installed" || integration.Action == "planned" {

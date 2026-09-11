@@ -16,7 +16,6 @@ import (
 
 const (
 	clientEnvironmentMetadataSchema = 1
-	clientEnvironmentDigestFormat   = "framed-v2"
 	maxClientEnvironmentMetadata    = 128 << 10
 )
 
@@ -37,6 +36,7 @@ type ClientIntegration struct {
 	MarketplaceSHA256 string    `json:"marketplace_sha256,omitempty"`
 	Version           string    `json:"version"`
 	Registered        bool      `json:"registered,omitempty"`
+	MarketplaceAdded  bool      `json:"marketplace_added,omitempty"`
 	DiscoverySource   string    `json:"discovery_source"`
 	InstalledAt       time.Time `json:"installed_at"`
 }
@@ -47,7 +47,13 @@ type EnvironmentIntegrationResult struct {
 	ConfigRoot string `json:"config_root"`
 	Action     string `json:"action"`
 	Warning    string `json:"warning,omitempty"`
+
+	source string
 }
+
+// Source exposes internal reconciliation provenance for tests/status without
+// changing the public JSON contract.
+func (r EnvironmentIntegrationResult) Source() string { return r.source }
 
 // ReconcileOptions are inputs owned by installOrUpdate.
 type reconcileOptions struct {
@@ -156,7 +162,7 @@ func validateClientIntegration(record *ClientIntegration) error {
 	if recorded != expected {
 		return errors.New("plugin path is not derivable from client identity")
 	}
-	if record.MarketplacePath != "" || record.MarketplaceSHA256 != "" {
+	if record.MarketplacePath != "" || record.MarketplaceSHA256 != "" || record.MarketplaceAdded {
 		if record.Client != string(clientenv.ClientCodex) || record.MarketplacePath == "" || record.MarketplaceSHA256 == "" {
 			return errors.New("invalid marketplace ownership")
 		}
@@ -199,15 +205,38 @@ func expectedClientPluginPath(client, root string) (string, error) {
 	return filepath.Join(canonicalRoot, "plugins", "freeinference-companion"), nil
 }
 
+// validateSerializedMetadataSize applies the same bounded-document policy to
+// writes that reads enforce, before any temporary state is created.
+func validateSerializedMetadataSize(data []byte) error {
+	// The persisted document includes one trailing newline. Validate the exact
+	// on-disk size against the reader limit, not just the compact payload.
+	if len(data)+1 > maxClientEnvironmentMetadata {
+		return fmt.Errorf("serialized client environment metadata is %d bytes with newline; limit is %d", len(data)+1, maxClientEnvironmentMetadata)
+	}
+	return nil
+}
+
+// saveMetadataFailureHook is test-only fault injection at the ownership
+// commit boundary. It is nil in normal operation.
+var saveMetadataFailureHook func() error
+
 func saveClientEnvironmentMetadata(path string, metadata *ClientEnvironmentMetadata) error {
 	if err := validateClientEnvironmentMetadata(metadata); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return err
-	}
 	data, err := json.MarshalIndent(metadata, "", "  ")
 	if err != nil {
+		return err
+	}
+	if err := validateSerializedMetadataSize(data); err != nil {
+		return err
+	}
+	if saveMetadataFailureHook != nil {
+		if err := saveMetadataFailureHook(); err != nil {
+			return err
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".client-environments-*")
@@ -248,41 +277,60 @@ func ReconcileClientEnvironments(opts reconcileOptions) ([]EnvironmentIntegratio
 		environments = filterCanonical(environments)
 	}
 	environments = append(environments, opts.explicit...)
-	// Previously owned roots survive removal from discovery; upgrades must not
-	// strand an old Companion copy in them.
-	for _, record := range prior.Integrations {
-		// A root that no longer exists has nothing to reconcile or own. Drop its
-		// stale record; never recreate an abandoned client profile.
-		if info, statErr := os.Lstat(record.ConfigRoot); statErr != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-			continue
+	// Previously owned roots survive removal from discovery only when discovery
+	// is enabled. No-discovery is a strict no-fan-out mode: retain every prior
+	// record but do not inspect, repair, prune, or recreate its target.
+	if opts.discovery {
+		for _, record := range prior.Integrations {
+			// A root that no longer exists has nothing to reconcile or own. Drop its
+			// stale record; never recreate an abandoned client profile.
+			if info, statErr := os.Lstat(record.ConfigRoot); statErr != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+				continue
+			}
+			environments = append(environments, clientenv.Environment{
+				Client:     clientenv.Client(record.Client),
+				ConfigRoot: record.ConfigRoot,
+				Source:     clientenv.SourceRecorded,
+			})
 		}
-		environments = append(environments, clientenv.Environment{
-			Client:     clientenv.Client(record.Client),
-			ConfigRoot: record.ConfigRoot,
-			Source:     clientenv.SourceRecorded,
-		})
 	}
 	environments = dedupeClientEnvironments(environments)
 	records := make([]ClientIntegration, 0, len(environments))
+	if !opts.discovery {
+		// Preserve records verbatim. Explicitly requested roots below can replace
+		// their matching record through upsertClientIntegration.
+		records = append(records, prior.Integrations...)
+	}
 	changed := false
 	now := time.Now().UTC()
+	type pendingReconciliation struct {
+		tx          *installTransaction
+		resultIndex int
+	}
+	var pending []pendingReconciliation
 	for _, environment := range environments {
 		if isCanonicalRoot(opts.home, environment) {
 			continue
 		}
-		result, record, warning := reconcileOneClientEnvironment(environment, prior, opts, now)
+		result, record, warning, tx := reconcileOneClientEnvironment(environment, prior, opts, now)
+		result.source = string(environment.Source)
 		results = append(results, result)
+		if tx != nil {
+			pending = append(pending, pendingReconciliation{tx: tx, resultIndex: len(results) - 1})
+		}
 		if warning != "" {
 			// A failed reconciliation must not erase proof that an existing old
 			// copy is Companion-owned. Preserve its record until a later safe
 			// update succeeds or explicit uninstall removes it.
-			if previous := findClientIntegration(prior, environment); previous != nil {
-				records = append(records, *previous)
+			if opts.discovery {
+				if previous := findClientIntegration(prior, environment); previous != nil {
+					upsertClientIntegration(&records, *previous)
+				}
 			}
 			continue
 		}
 		changed = true
-		records = append(records, record)
+		upsertClientIntegration(&records, record)
 	}
 	if opts.dryRun {
 		return results, nil
@@ -290,10 +338,71 @@ func ReconcileClientEnvironments(opts reconcileOptions) ([]EnvironmentIntegratio
 	if changed || len(records) != len(prior.Integrations) {
 		next := &ClientEnvironmentMetadata{SchemaVersion: clientEnvironmentMetadataSchema, Integrations: records}
 		if err := saveClientEnvironmentMetadata(metadataPath, next); err != nil {
-			return results, fmt.Errorf("save client environment metadata: %w", err)
+			for i := len(pending) - 1; i >= 0; i-- {
+				pending[i].tx.rollback()
+			}
+			rollbackErr := rollbackInstalledRecords(&ClientEnvironmentMetadata{Integrations: records}, prior)
+			if rollbackErr != nil {
+				return results, fmt.Errorf("save client environment metadata: %v; ownership rollback also failed: %w", err, rollbackErr)
+			}
+			return results, fmt.Errorf("save client environment metadata (installed environments rolled back): %w", err)
+		}
+	}
+	for _, item := range pending {
+		if err := item.tx.finalize(); err != nil {
+			results[item.resultIndex].Warning = appendWarning(results[item.resultIndex].Warning, fmt.Sprintf("cleanup: %v", err))
 		}
 	}
 	return results, nil
+}
+
+func appendWarning(existing, warning string) string {
+	if existing == "" {
+		return warning
+	}
+	return existing + "; " + warning
+}
+
+// rollbackInstalledRecords removes only newly installed records when durable
+// ownership cannot be committed. Prior owned records remain untouched and
+// represented by the original metadata file.
+func rollbackInstalledRecords(installed, prior *ClientEnvironmentMetadata) error {
+	var firstErr error
+	for _, record := range installed.Integrations {
+		if findClientIntegration(prior, clientenv.Environment{Client: clientenv.Client(record.Client), ConfigRoot: record.ConfigRoot}) != nil {
+			continue
+		}
+		for _, target := range []string{record.PluginPath, record.MarketplacePath} {
+			if target == "" {
+				continue
+			}
+			if err := removePath(target); err != nil && !os.IsNotExist(err) && firstErr == nil {
+				firstErr = err
+			}
+		}
+		if record.Registered || record.MarketplaceAdded {
+			for _, warning := range unregisterCodexClientMarketplace(record.ConfigRoot) {
+				if firstErr == nil {
+					firstErr = errors.New(warning)
+				}
+			}
+		}
+	}
+	return firstErr
+}
+
+func upsertClientIntegration(records *[]ClientIntegration, record ClientIntegration) {
+	if records == nil {
+		return
+	}
+	id := clientIntegrationID(record.Client, record.ConfigRoot)
+	for i := range *records {
+		if clientIntegrationID((*records)[i].Client, (*records)[i].ConfigRoot) == id {
+			(*records)[i] = record
+			return
+		}
+	}
+	*records = append(*records, record)
 }
 
 func filterCanonical(environments []clientenv.Environment) []clientenv.Environment {
@@ -355,28 +464,28 @@ func isCanonicalRoot(home string, environment clientenv.Environment) bool {
 	}
 }
 
-func reconcileOneClientEnvironment(environment clientenv.Environment, prior *ClientEnvironmentMetadata, opts reconcileOptions, now time.Time) (EnvironmentIntegrationResult, ClientIntegration, string) {
+func reconcileOneClientEnvironment(environment clientenv.Environment, prior *ClientEnvironmentMetadata, opts reconcileOptions, now time.Time) (EnvironmentIntegrationResult, ClientIntegration, string, *installTransaction) {
 	result := EnvironmentIntegrationResult{Client: string(environment.Client), ConfigRoot: environment.ConfigRoot}
 	pluginSource, sourceErr := opts.sourceFor(environment.Client)
 	if sourceErr != nil {
 		result.Action, result.Warning = "warning", sourceErr.Error()
-		return result, ClientIntegration{}, sourceErr.Error()
+		return result, ClientIntegration{}, sourceErr.Error(), nil
 	}
 	if environment.Source != clientenv.SourceRecorded {
 		if warning := validateClientConfigRoot(environment.ConfigRoot); warning != nil {
 			result.Action, result.Warning = "warning", warning.Error()
-			return result, ClientIntegration{}, warning.Error()
+			return result, ClientIntegration{}, warning.Error(), nil
 		}
 	}
 	expectedPlugin, err := expectedClientPluginPath(string(environment.Client), environment.ConfigRoot)
 	if err != nil {
 		result.Action, result.Warning = "warning", err.Error()
-		return result, ClientIntegration{}, err.Error()
+		return result, ClientIntegration{}, err.Error(), nil
 	}
 	previous := findClientIntegration(prior, environment)
 	if err := validateAdditionalOwnedDirectory(expectedPlugin, previous); err != nil {
 		result.Action, result.Warning = "warning", err.Error()
-		return result, ClientIntegration{}, err.Error()
+		return result, ClientIntegration{}, err.Error(), nil
 	}
 	record := ClientIntegration{
 		Client:          string(environment.Client),
@@ -390,52 +499,71 @@ func reconcileOneClientEnvironment(environment clientenv.Environment, prior *Cli
 		marketplacePath := filepath.Join(environment.ConfigRoot, "plugins", "freeinference-companion-marketplace")
 		if err := validateAdditionalOwnedDirectory(marketplacePath, previous); err != nil {
 			result.Action, result.Warning = "warning", err.Error()
-			return result, ClientIntegration{}, err.Error()
+			return result, ClientIntegration{}, err.Error(), nil
 		}
 		record.MarketplacePath = marketplacePath
 	}
 	if opts.dryRun {
 		result.Action = "planned"
-		return result, record, ""
+		return result, record, "", nil
 	}
 	tx := &installTransaction{}
+	if err := safeMkdirAll(environment.ConfigRoot, filepath.Dir(expectedPlugin)); err != nil {
+		result.Action, result.Warning = "warning", err.Error()
+		return result, ClientIntegration{}, err.Error(), nil
+	}
 	stage, err := stageDirectory(pluginSource, expectedPlugin)
 	if err == nil {
-		err = tx.replace(expectedPlugin, stage)
+		err = tx.replaceStaged(expectedPlugin, stage, false)
 	}
 	if err != nil {
 		tx.rollback()
 		result.Action, result.Warning = "warning", fmt.Sprintf("install plugin: %v", err)
-		return result, ClientIntegration{}, result.Warning
+		return result, ClientIntegration{}, result.Warning, nil
 	}
 	if environment.Client == clientenv.ClientCodex {
-		marketplaceStage, marketErr := stageCodexMarketplace(Paths{CodexMarketplaceDir: record.MarketplacePath}, pluginSource)
+		var marketplaceStage string
+		var marketErr error
+		if marketErr = safeMkdirAll(environment.ConfigRoot, filepath.Dir(record.MarketplacePath)); marketErr == nil {
+			marketplaceStage, marketErr = stageCodexMarketplace(Paths{CodexMarketplaceDir: record.MarketplacePath}, pluginSource)
+		}
 		if marketErr == nil {
 			marketErr = tx.replace(record.MarketplacePath, marketplaceStage)
 		}
 		if marketErr != nil {
 			tx.rollback()
 			result.Action, result.Warning = "warning", fmt.Sprintf("install marketplace: %v", marketErr)
-			return result, ClientIntegration{}, result.Warning
+			return result, ClientIntegration{}, result.Warning, nil
 		}
 	}
-	if err := tx.finalize(); err != nil {
-		result.Action, result.Warning = "warning", fmt.Sprintf("cleanup: %v", err)
-		return result, ClientIntegration{}, result.Warning
+	pluginDigest, digestErr := pathDigest(expectedPlugin)
+	if digestErr != nil {
+		tx.rollback()
+		result.Action, result.Warning = "warning", fmt.Sprintf("fingerprint plugin: %v", digestErr)
+		return result, ClientIntegration{}, result.Warning, nil
 	}
-	record.PluginSHA256, _ = pathDigest(expectedPlugin)
+	record.PluginSHA256 = pluginDigest
 	if record.MarketplacePath != "" {
-		record.MarketplaceSHA256, _ = pathDigest(record.MarketplacePath)
+		record.MarketplaceSHA256, digestErr = pathDigest(record.MarketplacePath)
+		if digestErr != nil {
+			tx.rollback()
+			result.Action, result.Warning = "warning", fmt.Sprintf("fingerprint marketplace: %v", digestErr)
+			return result, ClientIntegration{}, result.Warning, nil
+		}
 	}
 	if environment.Client == clientenv.ClientCodex {
-		registered, warnings := registerCodexMarketplaceForHome(record.ConfigRoot, record.MarketplacePath, opts.stdout)
+		registered, marketplaceAdded, warnings := registerCodexMarketplaceForHome(record.ConfigRoot, record.MarketplacePath, opts.stdout)
+		// Marketplace add occurs before plugin add. Persist attempted/added state
+		// even when the second external operation fails so uninstall/repair can
+		// remove the partial native registration later.
+		record.MarketplaceAdded = marketplaceAdded
 		record.Registered = registered
 		if len(warnings) > 0 {
-			result.Warning = warnings[0]
+			result.Warning = appendWarning(result.Warning, warnings[0])
 		}
 	}
 	result.Action = "installed"
-	return result, record, ""
+	return result, record, "", tx
 }
 
 func validateClientConfigRoot(root string) error {
@@ -493,71 +621,110 @@ func findClientIntegration(metadata *ClientEnvironmentMetadata, environment clie
 	return nil
 }
 
-// UninstallClientEnvironments removes only paths derivable from recorded
-// client/config-root identities. It never trusts plugin_path as an arbitrary
-// deletion target and never removes an owned directory changed after install.
+// UninstallClientEnvironments is the public, locked entry point. It preserves
+// ownership on any failed selected removal and only forgets metadata after all
+// owned targets are gone.
 func UninstallClientEnvironments(home string, stdout io.Writer) ([]string, []string) {
+	paths, err := PathsForHome(home)
+	if err != nil {
+		return nil, []string{err.Error()}
+	}
+	var removed, warnings []string
+	err = withInstallerLock(paths, func() error {
+		removed, warnings = uninstallClientEnvironmentsLocked(home, stdout)
+		return nil
+	})
+	if err != nil {
+		return removed, append(warnings, err.Error())
+	}
+	return removed, warnings
+}
+
+// uninstallClientEnvironmentsLocked removes all recorded alternate
+// environments. Caller contract: the installer lock is already held.
+func uninstallClientEnvironmentsLocked(home string, stdout io.Writer) ([]string, []string) {
 	path := clientEnvironmentMetadataPath(home)
 	metadata, err := loadClientEnvironmentMetadata(path)
 	if err != nil {
 		return nil, []string{fmt.Sprintf("read client environment ownership: %v", err)}
 	}
-	removed, warnings := UninstallClientIntegration(home, metadata, nil, stdout)
-	if len(warnings) > 0 {
-		return removed, warnings
-	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return removed, []string{fmt.Sprintf("remove client environment metadata: %v", err)}
-	}
-	return removed, nil
+	return UninstallClientIntegration(home, metadata, nil, stdout)
 }
 
-// UninstallClientIntegration removes one recorded identity. A nil selector
-// means all alternate integrations. The transaction spans selected records and
-// metadata removal; drift/digest failures retain ownership for later repair.
+// UninstallClientIntegration removes one recorded identity, or all records
+// when selector is nil. Filesystem removals and the ownership document form
+// one transaction: metadata is committed only after every selected target has
+// been safely removed. Drift or removal failures preserve all ownership
+// evidence and roll back already removed owned copies.
 func UninstallClientIntegration(home string, metadata *ClientEnvironmentMetadata, selector *clientenv.Environment, stdout io.Writer) ([]string, []string) {
 	if metadata == nil {
 		return nil, []string{"client environment ownership metadata is unavailable"}
 	}
 	path := clientEnvironmentMetadataPath(home)
+	var selected []ClientIntegration
 	var removed, warnings []string
-	tx := &installTransaction{}
 	for i := range metadata.Integrations {
 		record := metadata.Integrations[i]
 		if selector != nil && clientIntegrationID(record.Client, record.ConfigRoot) != clientIntegrationID(string(selector.Client), selector.ConfigRoot) {
 			continue
 		}
+		selected = append(selected, record)
+	}
+	if selector != nil && len(selected) == 0 {
+		return nil, []string{"no matching client integration was found"}
+	}
+	tx := &installTransaction{}
+	var nativeCleaned []ClientIntegration
+	var nativeNeedsRestore []ClientIntegration
+	for _, record := range selected {
 		recordRemoved, recordWarnings := uninstallOneClientIntegration(tx, record)
 		removed = append(removed, recordRemoved...)
 		warnings = append(warnings, recordWarnings...)
-		if record.Registered {
-			warnings = append(warnings, unregisterCodexClientMarketplace(record.ConfigRoot)...)
+		if len(recordWarnings) == 0 && (record.Registered || record.MarketplaceAdded) {
+			nativeWarnings := unregisterCodexClientMarketplace(record.ConfigRoot)
+			warnings = append(warnings, nativeWarnings...)
+			if len(nativeWarnings) == 0 {
+				nativeCleaned = append(nativeCleaned, record)
+			} else {
+				nativeNeedsRestore = append(nativeNeedsRestore, record)
+			}
 		}
 	}
-	if selector != nil && len(removed) == 0 {
-		return removed, append(warnings, "no matching client integration was found")
-	}
-	if len(warnings) > 0 && selector != nil {
+	if len(warnings) > 0 {
 		tx.rollback()
+		nativeNeedsRestore = append(nativeNeedsRestore, nativeCleaned...)
+		warnings = append(warnings, restoreCodexClientMarketplaces(nativeNeedsRestore)...)
 		return nil, warnings
 	}
 	remaining := make([]ClientIntegration, 0, len(metadata.Integrations))
 	for _, record := range metadata.Integrations {
-		if selector == nil || clientIntegrationID(record.Client, record.ConfigRoot) != clientIntegrationID(string(selector.Client), selector.ConfigRoot) {
+		isSelected := false
+		for _, selectedRecord := range selected {
+			if record.Client == selectedRecord.Client && clientIntegrationID(record.Client, record.ConfigRoot) == clientIntegrationID(selectedRecord.Client, selectedRecord.ConfigRoot) {
+				isSelected = true
+				break
+			}
+		}
+		if !isSelected {
 			remaining = append(remaining, record)
 		}
 	}
 	if len(remaining) > 0 {
 		if err := saveClientEnvironmentMetadata(path, &ClientEnvironmentMetadata{SchemaVersion: clientEnvironmentMetadataSchema, Integrations: remaining}); err != nil {
 			tx.rollback()
-			return nil, append(warnings, fmt.Sprintf("save client environment metadata: %v", err))
+			warnings = append(warnings, restoreCodexClientMarketplaces(nativeCleaned)...)
+			warnings = append(warnings, fmt.Sprintf("save client environment metadata: %v", err))
+			return nil, warnings
 		}
 	} else if err := tx.remove(path); err != nil {
 		tx.rollback()
-		return nil, append(warnings, fmt.Sprintf("remove client environment metadata: %v", err))
+		warnings = append(warnings, restoreCodexClientMarketplaces(nativeCleaned)...)
+		warnings = append(warnings, fmt.Sprintf("remove client environment metadata: %v", err))
+		return nil, warnings
 	}
 	if err := tx.finalize(); err != nil {
-		warnings = append(warnings, fmt.Sprintf("cleanup client environment rollback files: %v", err))
+		tx.rollback()
+		return nil, []string{fmt.Sprintf("cleanup client environment rollback files: %v", err)}
 	}
 	return removed, warnings
 }
@@ -615,6 +782,15 @@ func unregisterCodexClientMarketplace(codexHome string) []string {
 	}
 	if err := runCodexPluginCommandForHome(codex, codexHome, "plugin", "marketplace", "remove", "freeinference-companion-local", "--json"); err != nil {
 		warnings = append(warnings, fmt.Sprintf("Codex marketplace cleanup failed for %s", codexHome))
+	}
+	return warnings
+}
+
+func restoreCodexClientMarketplaces(records []ClientIntegration) []string {
+	var warnings []string
+	for _, record := range records {
+		_, _, restoreWarnings := registerCodexMarketplaceForHome(record.ConfigRoot, record.MarketplacePath, nil)
+		warnings = append(warnings, restoreWarnings...)
 	}
 	return warnings
 }

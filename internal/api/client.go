@@ -117,7 +117,7 @@ func NormalizeEndpoint(rawURL string) (*EndpointIdentity, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid base URL: %w", err)
 	}
-	if u.Scheme == "" || u.Host == "" {
+	if u.Scheme == "" || u.Host == "" || strings.HasSuffix(u.Host, ":") {
 		return nil, fmt.Errorf("invalid base URL: must be absolute (scheme://host)")
 	}
 	if u.User != nil {
@@ -125,6 +125,12 @@ func NormalizeEndpoint(rawURL string) (*EndpointIdentity, error) {
 	}
 	if u.Fragment != "" {
 		return nil, fmt.Errorf("invalid base URL: must not have a fragment")
+	}
+	// Preserve exact route matching: accepting an escaped path would make the
+	// textual policy differ from the URL sent to the client and can turn a
+	// near-match into an approved route after URL decoding.
+	if u.RawPath != "" {
+		return nil, fmt.Errorf("invalid base URL: must use an unescaped path")
 	}
 	// Query strings may carry secrets (e.g. ?api_key=...). Reject them so a
 	// credential-bearing URL can never be confirmed as a provider endpoint and
@@ -150,6 +156,7 @@ func NormalizeEndpoint(rawURL string) (*EndpointIdentity, error) {
 		IsFI:       isApprovedCredentialURL(u),
 	}, nil
 }
+
 func isLoopbackHost(host string) bool {
 	if host == "localhost" {
 		return true

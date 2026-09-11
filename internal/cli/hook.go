@@ -261,10 +261,15 @@ func handlePreToolUse(clientType string, _ runtime.ClientKind, stdin io.Reader, 
 	if err := json.Unmarshal(rawCommand, &command); err != nil {
 		return
 	}
+	mgr, cfgErr := config.NewManager()
 	var mode string
-	if cfg, cfgErr := config.Load(); cfgErr == nil {
-		mode = cfg.Attribution.CommitMode
+	if cfgErr == nil {
+		eff, effErr := mgr.Resolve()
+		if effErr == nil && eff != nil && eff.Attribution.CommitMode.Valid {
+			mode = eff.Attribution.CommitMode.Value
+		}
 	}
+	// Unknown, malformed, or invalid effective modes fail closed to off.
 	policy := commitattribution.Policy{Mode: commitattribution.CommitMode(mode), Client: clientType, Model: input.Model}
 	rewritten, changed, _ := commitattribution.Rewrite(command, policy)
 	if !changed {

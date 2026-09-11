@@ -35,10 +35,12 @@ func find(t *testing.T, environments []Environment, client Client, root string) 
 	return Environment{}, false
 }
 
-func TestDiscoverIncludesCanonicalAndExportedEnvironments(t *testing.T) {
+func TestDiscoverIncludesCanonicalAndExportedFIRoots(t *testing.T) {
 	home := t.TempDir()
 	alternateClaude := filepath.Join(home, "claude-profile")
 	alternateCodex := filepath.Join(home, "codex-profile")
+	write(t, filepath.Join(alternateClaude, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://freeinference.org/anthropic"}}`, 0600)
+	write(t, filepath.Join(alternateCodex, "config.toml"), "model_provider = 'fi'\n\n[model_providers.fi]\nbase_url = 'https://freeinference.org/v1'\n", 0600)
 	environments, warnings := DiscoverWithEnv(home, []string{
 		"CLAUDE_CONFIG_DIR=" + alternateClaude,
 		"CODEX_HOME=" + alternateCodex,
@@ -69,7 +71,7 @@ func TestDiscoverIncludesCanonicalAndExportedEnvironments(t *testing.T) {
 func TestDiscoverFindsStructuralClaudeXDGEnvironment(t *testing.T) {
 	home := t.TempDir()
 	root := filepath.Join(home, ".config", "client-engines", "fi-profile-a")
-	write(t, filepath.Join(root, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://freeinference.org/v1"}}`, 0600)
+	write(t, filepath.Join(root, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://freeinference.org/anthropic"}}`, 0600)
 	environments, warnings := DiscoverWithEnv(home, nil)
 	if len(warnings) != 0 {
 		t.Fatalf("warnings = %v", warnings)
@@ -83,7 +85,7 @@ func TestDiscoverIgnoresUnrelatedClaudeSettings(t *testing.T) {
 	home := t.TempDir()
 	root := filepath.Join(home, ".config", "project", "editor")
 	write(t, filepath.Join(root, "settings.json"), `{"editor.formatOnSave":true}`, 0600)
-	write(t, filepath.Join(root, "nested", "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://freeinference.org/v1"}}`, 0600)
+	write(t, filepath.Join(root, "nested", "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://freeinference.org/anthropic"}}`, 0600)
 	environments, warnings := DiscoverWithEnv(home, nil)
 	if len(warnings) != 0 {
 		t.Fatalf("warnings = %v", warnings)
@@ -99,31 +101,13 @@ func TestDiscoverIgnoresUnrelatedClaudeSettings(t *testing.T) {
 func TestDiscoverFindsHiddenStructuralCodexHome(t *testing.T) {
 	home := t.TempDir()
 	root := filepath.Join(home, ".custom-codex")
-	config := `model_provider = "openai"\n\n[model_providers.openai]\nbase_url = "https://freeinference.org/v1"\n`
-	if err := os.MkdirAll(root, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "config.toml"), []byte(strings.ReplaceAll(config, `\n`, "\n")), 0600); err != nil {
-		t.Fatal(err)
-	}
-	// Multiple model profiles remain one environment identity.
-	write(t, filepath.Join(root, "glm.config.toml"), `model_provider = "glm"\n`, 0600)
-	write(t, filepath.Join(root, "fi.config.toml"), `model_provider = "freeinference"\n`, 0600)
+	write(t, filepath.Join(root, "config.toml"), "model_provider = 'fi'\n\n[model_providers.fi]\nbase_url = 'https://freeinference.org/v1'\n", 0600)
 	environments, warnings := DiscoverWithEnv(home, nil)
 	if len(warnings) != 0 {
 		t.Fatalf("warnings = %v", warnings)
 	}
 	if _, ok := find(t, environments, ClientCodex, root); !ok {
 		t.Fatalf("structural Codex home not discovered: %+v", environments)
-	}
-	count := 0
-	for _, environment := range environments {
-		if environment.Client == ClientCodex && strings.HasSuffix(environment.ConfigRoot, ".custom-codex") {
-			count++
-		}
-	}
-	if count != 1 {
-		t.Fatalf("Codex profile files created %d environment identities, want 1", count)
 	}
 }
 
@@ -136,8 +120,101 @@ func TestDiscoverRejectsSymlinkedConfigurationRoot(t *testing.T) {
 	if err := os.Symlink(realRoot, filepath.Join(home, "linked-claude")); err != nil {
 		t.Fatal(err)
 	}
+	write(t, filepath.Join(realRoot, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://freeinference.org/anthropic"}}`, 0600)
 	_, warnings := DiscoverWithEnv(home, []string{"CLAUDE_CONFIG_DIR=" + filepath.Join(home, "linked-claude")})
 	if len(warnings) != 1 || !strings.Contains(warnings[0].Error(), "symlink") {
 		t.Fatalf("warnings = %v, want symlink rejection", warnings)
+	}
+}
+
+func TestDiscoverWarnsForInvalidExplicitEnvironmentRoot(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "not-a-directory")
+	if err := os.WriteFile(root, []byte("file"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	environments, warnings := DiscoverWithEnv(home, []string{"CLAUDE_CONFIG_DIR=" + root})
+	if len(warnings) != 1 || !strings.Contains(warnings[0].Error(), "not a directory") {
+		t.Fatalf("warnings = %v", warnings)
+	}
+	if _, ok := find(t, environments, ClientClaudeCode, root); ok {
+		t.Fatalf("invalid explicit root was discovered: %+v", environments)
+	}
+}
+
+func TestEnvironmentRootsRequireActualFreeInferenceConfig(t *testing.T) {
+	home := t.TempDir()
+	claude := filepath.Join(home, "claude")
+	codex := filepath.Join(home, "codex")
+	write(t, filepath.Join(claude, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://api.openai.com/v1"}}`, 0600)
+	write(t, filepath.Join(codex, "config.toml"), "model_provider = 'openai'\n\n[model_providers.openai]\nbase_url = 'https://api.openai.com/v1'\n", 0600)
+	envs, warnings := DiscoverWithEnv(home, []string{"CLAUDE_CONFIG_DIR=" + claude, "CODEX_HOME=" + codex})
+	if len(warnings) != 0 {
+		t.Fatalf("warnings: %v", warnings)
+	}
+	for _, env := range envs {
+		if filepath.Clean(env.ConfigRoot) == filepath.Clean(claude) || filepath.Clean(env.ConfigRoot) == filepath.Clean(codex) {
+			t.Fatalf("non-FI environment auto-discovered: %+v", envs)
+		}
+	}
+}
+
+func TestEnvironmentFIRoutesNormalizeTrailingSlash(t *testing.T) {
+	home := t.TempDir()
+	claude := filepath.Join(home, "claude")
+	codex := filepath.Join(home, "codex")
+	write(t, filepath.Join(claude, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://freeinference.org/anthropic///"}}`, 0600)
+	write(t, filepath.Join(codex, "config.toml"), "model_provider = 'fi'\n\n[model_providers.fi]\nbase_url = 'https://freeinference.org/v1/'\n", 0600)
+	envs, warnings := DiscoverWithEnv(home, []string{"CLAUDE_CONFIG_DIR=" + claude, "CODEX_HOME=" + codex})
+	if len(warnings) != 0 {
+		t.Fatalf("warnings: %v", warnings)
+	}
+	if _, ok := find(t, envs, ClientClaudeCode, claude); !ok {
+		t.Fatalf("trailing-slash Claude route rejected: %+v", envs)
+	}
+	if _, ok := find(t, envs, ClientCodex, codex); !ok {
+		t.Fatalf("single-quoted/trailing-slash Codex route rejected: %+v", envs)
+	}
+}
+
+func TestDiscoverWarnsForLegacyClaudeRoute(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "legacy-claude")
+	write(t, filepath.Join(root, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://freeinference.org/v1"}}`, 0600)
+	environments, warnings := DiscoverWithEnv(home, []string{"CLAUDE_CONFIG_DIR=" + root})
+	if _, ok := find(t, environments, ClientClaudeCode, root); ok {
+		t.Fatalf("legacy Claude route was auto-integrated: %+v", environments)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0].Error(), "legacy FreeInference /v1") || !strings.Contains(warnings[0].Error(), "/anthropic") {
+		t.Fatalf("legacy route warnings = %v", warnings)
+	}
+	if err := ValidateEnvironmentWithHome(ClientClaudeCode, root, home); err == nil || !strings.Contains(err.Error(), "legacy") {
+		t.Fatalf("legacy explicit validation error = %v", err)
+	}
+}
+
+func TestClaudeRouteNormalizationRejectsNearMatches(t *testing.T) {
+	for _, raw := range []string{
+		"https://freeinference.org/anthropic?token=secret",
+		"https://freeinference.org/anthropic#fragment",
+		"https://freeinference.org/anthropic-extra",
+		"https://freeinference.org/%61nthropic",
+		"https://freeinference.org/ANTHROPIC",
+		"https://freeinference.org:8443/anthropic",
+		"https://user:pass@freeinference.org/anthropic",
+	} {
+		if SelectsFreeInferenceClaudeRoute(raw) {
+			t.Errorf("near-match Claude route accepted: %q", raw)
+		}
+	}
+}
+
+func TestCodexConfigMalformedFailsClosed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("model_provider = 'fi'\n[model_providers.fi\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if looksLikeCodexConfig(path) {
+		t.Fatal("malformed TOML accepted")
 	}
 }

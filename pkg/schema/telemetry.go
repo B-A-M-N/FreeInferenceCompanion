@@ -25,6 +25,11 @@ type ClaudeHookInput struct {
 	Trigger            string `json:"trigger,omitempty"`
 	Reason             string `json:"reason,omitempty"`
 	CustomInstructions string `json:"custom_instructions,omitempty"`
+
+	// PreToolUse fields. ToolInput preserves every unknown field.
+	ToolName  string                     `json:"tool_name,omitempty"`
+	ToolUseID string                     `json:"tool_use_id,omitempty"`
+	ToolInput map[string]json.RawMessage `json:"tool_input,omitempty"`
 }
 
 // ClaudeStatusLineInput is the JSON Claude Code sends to the status line command on stdin.
@@ -120,11 +125,6 @@ type CodexHookInput struct {
 	Prompt         string `json:"prompt,omitempty"`
 	Trigger        string `json:"trigger,omitempty"`
 	Reason         string `json:"reason,omitempty"`
-
-	// PreToolUse fields. ToolInput preserves every unknown field.
-	ToolName  string                     `json:"tool_name,omitempty"`
-	ToolUseID string                     `json:"tool_use_id,omitempty"`
-	ToolInput map[string]json.RawMessage `json:"tool_input,omitempty"`
 }
 
 // ToolHookOutput rewrites one tool invocation. UpdatedInput must contain the

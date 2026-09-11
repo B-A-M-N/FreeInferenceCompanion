@@ -56,11 +56,21 @@ type AttributionConfig struct {
 // ValidCommitAttributionMode reports whether mode is one of the mutually
 // exclusive attribution policies.
 func ValidCommitAttributionMode(mode string) bool {
-	switch strings.ToLower(strings.TrimSpace(mode)) {
+	_, ok := NormalizeCommitAttributionMode(mode)
+	return ok
+}
+
+// NormalizeCommitAttributionMode centralizes whitespace/case canonicalization
+// for every configuration reader and writer. The second return is false for
+// unknown and empty modes; callers must treat unknown modes as disabled.
+func NormalizeCommitAttributionMode(mode string) (string, bool) {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	switch mode {
 	case "off", "append", "standalone":
-		return true
+		return mode, true
+	default:
+		return "", false
 	}
-	return false
 }
 
 type ContextConfig struct {
@@ -310,6 +320,9 @@ func Load() (*Config, error) {
 	if cfg.SchemaVersion != SchemaVersion {
 		return &cfg, fmt.Errorf("unsupported config schema %d", cfg.SchemaVersion)
 	}
+	if normalized, _ := NormalizeCommitAttributionMode(cfg.Attribution.CommitMode); normalized != "" {
+		cfg.Attribution.CommitMode = normalized
+	}
 	if err := Validate(&cfg); err != nil {
 		return &cfg, fmt.Errorf("validate config: %w", err)
 	}
@@ -488,7 +501,7 @@ func SetField(cfg *Config, key, value string) error {
 		}
 		cfg.Provider.AllowInsecureLocalhost = v
 	case "attribution.commit_mode":
-		mode := strings.ToLower(strings.TrimSpace(value))
+		mode, _ := NormalizeCommitAttributionMode(value)
 		if !ValidCommitAttributionMode(mode) {
 			return fmt.Errorf("invalid attribution.commit_mode %q (use off, append, or standalone)", value)
 		}

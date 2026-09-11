@@ -126,7 +126,8 @@ func resolveCodexProviderConfigurationWith(profile string, readDir func(string) 
 		}, errors.New("selected codex provider contains an invalid identifier")
 	}
 	endpoint, endpointErr := api.NormalizeEndpoint(provider.BaseURL)
-	if endpointErr != nil || (endpoint.IsFI && strings.TrimRight(endpoint.RequestURL, "/") != endpoint.Origin+"/v1") {
+	route, _, routeErr := api.NormalizeRoute(provider.BaseURL)
+	if endpointErr != nil || routeErr != nil || (endpoint.IsFI && route != endpoint.Origin+api.CodexRoutePath) {
 		return ClientEvidence{
 			Client:                    ClientCodex,
 			ProviderID:                providerID,

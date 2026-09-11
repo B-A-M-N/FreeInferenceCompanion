@@ -5,6 +5,7 @@ package commitattribution
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -43,42 +44,75 @@ type Policy struct {
 // AttributionFooter is the stable provenance marker.
 const AttributionFooter = "Inference-Provider: FreeInference.org"
 
-// Rewrite parses a POSIX shell program, finds every eligible git commit, and
-// returns a minimally rewritten command. Uncertainty is fail-open.
+const attributionSupportMarker = "Support-FreeInference:"
+
+// Rewrite parses a POSIX shell program, finds every eligible direct git commit,
+// and returns a minimally rewritten command. Uncertainty is fail-open.
 func Rewrite(command string, policy Policy) (string, bool, Reason) {
-	if policy.Mode == ModeOff || strings.TrimSpace(command) == "" {
+	if policy.Mode != ModeAppend && policy.Mode != ModeStandalone {
+		return command, false, ReasonDisabled
+	}
+	if strings.TrimSpace(command) == "" {
 		return command, false, ReasonDisabled
 	}
 	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
 	if err != nil {
 		return command, false, ReasonAmbiguous
 	}
-	changed := false
+	var replacements []wordReplacement
 	var reason Reason
+	containsSubstitution := false
 	syntax.Walk(file, func(node syntax.Node) bool {
-		call, ok := node.(*syntax.CallExpr)
-		if !ok {
-			return true
-		}
-		if !isGitCommitCall(call) {
-			return true
-		}
-		newCommand, didChange, why := rewriteCallExpr(command, call, policy)
-		if didChange {
-			command, changed = newCommand, true
-			reason = why
+		switch node.(type) {
+		case *syntax.CmdSubst, *syntax.ProcSubst:
+			containsSubstitution = true
 			return false
+		}
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || !isGitCommitCall(call) {
+			return true
+		}
+		replacement, why := replacementForCall(command, call, policy)
+		if replacement != nil {
+			replacements = append(replacements, *replacement)
+			return true
 		}
 		if reason == "" {
 			reason = why
 		}
 		return true
 	})
-	return command, changed, reason
+	if containsSubstitution {
+		return command, false, ReasonAmbiguous
+	}
+	if len(replacements) == 0 {
+		return command, false, reason
+	}
+	// Spans are disjoint because shell words are disjoint. Build the result once
+	// so large shell programs do not repeatedly copy the growing command.
+	sort.Slice(replacements, func(i, j int) bool { return replacements[i].start < replacements[j].start })
+	cursor := 0
+	var rewritten strings.Builder
+	rewritten.Grow(len(command))
+	for _, replacement := range replacements {
+		if replacement.start < cursor || replacement.end < replacement.start || replacement.end > len(command) {
+			return command, false, ReasonAmbiguous
+		}
+		rewritten.WriteString(command[cursor:replacement.start])
+		rewritten.WriteString(replacement.text)
+		cursor = replacement.end
+	}
+	rewritten.WriteString(command[cursor:])
+	return rewritten.String(), true, ""
+}
+
+type wordReplacement struct {
+	start, end int
+	text       string
 }
 
 func isGitCommitCall(call *syntax.CallExpr) bool {
-	if len(call.Args) < 3 {
+	if len(call.Assigns) > 0 || len(call.Args) < 3 {
 		return false
 	}
 	if value, ok := literal(call.Args[0]); !ok || value != "git" {
@@ -90,7 +124,7 @@ func isGitCommitCall(call *syntax.CallExpr) bool {
 	return ok && value == "commit"
 }
 
-func rewriteCallExpr(original string, call *syntax.CallExpr, policy Policy) (string, bool, Reason) {
+func replacementForCall(original string, call *syntax.CallExpr, policy Policy) (*wordReplacement, Reason) {
 	args := call.Args[2:]
 	var (
 		messages []*syntax.Word
@@ -125,35 +159,41 @@ func rewriteCallExpr(original string, call *syntax.CallExpr, policy Policy) (str
 		unsafe = true
 	}
 	if unsafe || expect || len(messages) == 0 {
-		return original, false, ReasonAmbiguous
+		return nil, ReasonAmbiguous
 	}
 	last := messages[len(messages)-1]
 	message, ok := literal(last)
 	if !ok {
-		return original, false, ReasonAmbiguous
+		return nil, ReasonAmbiguous
 	}
-	if strings.Contains(message, AttributionFooter) {
-		return original, false, ReasonDuplicate
+	// Detect both the legacy marker and the support line emitted by current
+	// footers so repeated hooks remain idempotent across shell quoting styles.
+	if strings.Contains(message, AttributionFooter) || strings.Contains(message, attributionSupportMarker) {
+		return nil, ReasonDuplicate
 	}
 	if policy.Mode == ModeAppend && !nativeAttributionPresent(message) {
-		return original, false, ReasonMissingNative
+		return nil, ReasonMissingNative
 	}
 	model, modelOK := sanitizeModel(policy.Model)
 	if policy.Model != "" && !modelOK {
-		return original, false, ReasonModelUnavailable
+		return nil, ReasonModelUnavailable
 	}
 	var footer string
 	if !modelOK {
-		footer = "\n\nInference provided via FreeInference.org.\nSupport-FreeInference: https://freeinference.org/"
+		footer = "\n\n" + AttributionFooter + "\nInference provided via FreeInference.org.\nSupport-FreeInference: https://freeinference.org/"
 	} else {
-		footer = fmt.Sprintf("\n\nInference: %s via FreeInference.org\nSupport-FreeInference: https://freeinference.org/", model)
+		footer = fmt.Sprintf("\n\n%s\nInference: %s via FreeInference.org\nSupport-FreeInference: https://freeinference.org/", AttributionFooter, model)
 	}
 	updated := message + strings.TrimRight(footer, "\n") + "\n"
 	newWord, err := syntax.Quote(updated, syntax.LangBash)
 	if err != nil {
-		return original, false, ReasonAmbiguous
+		return nil, ReasonAmbiguous
 	}
-	return replaceWord(original, last, newWord), true, ""
+	start, end := wordPosition(last)
+	if start < 0 || end <= start || end > len(original) {
+		return nil, ReasonAmbiguous
+	}
+	return &wordReplacement{start: start, end: end, text: newWord}, ""
 }
 
 func nativeAttributionPresent(message string) bool {
@@ -180,7 +220,7 @@ func sanitizeModel(model string) (string, bool) {
 		b.WriteRune(r)
 	}
 	out := b.String()
-	if len(out) > 128 {
+	if len(out) > 128 || strings.Contains(out, "Inference-Provider:") || strings.Contains(out, attributionSupportMarker) || strings.Contains(out, "Inference:") {
 		return "", false
 	}
 	return out, true
@@ -213,14 +253,6 @@ func literal(word *syntax.Word) (string, bool) {
 		}
 	}
 	return b.String(), true
-}
-
-func replaceWord(source string, target *syntax.Word, replacement string) string {
-	start, end := wordPosition(target)
-	if start < 0 || end <= start || end > len(source) || source[start:end] == "" {
-		return source
-	}
-	return source[:start] + replacement + source[end:]
 }
 
 func wordPosition(word *syntax.Word) (int, int) {

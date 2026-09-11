@@ -344,7 +344,11 @@ Usage:
     [--no-integration-discovery]
   freeinference update [--manifest <url>] [--platform <key>] [--dry-run] [--force]
     [--no-integration-discovery]
-  freeinference integrations list|discover|add|remove --client <type> --root <path>
+  freeinference integrations list [--json]
+  freeinference integrations discover [--json]
+  freeinference integrations add --client claude-code|codex --root <path>
+  freeinference integrations remove --client claude-code|codex --root <path>
+  freeinference integrations diagnose --client claude-code|codex --root <path> [--model <id>] [--json]
   freeinference attribution status|set [--json]
   freeinference uninstall [--help]
   freeinference context [--client <type>] [--session <id>] [--help]

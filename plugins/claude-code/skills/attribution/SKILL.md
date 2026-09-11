@@ -2,6 +2,7 @@
 name: attribution
 description: Configure FreeInference commit attribution from Claude Code.
 invocation: user
+allowed-tools: Bash
 ---
 
 Run `freeinference attribution status --json`, then present exactly these choices with AskUserQuestion:

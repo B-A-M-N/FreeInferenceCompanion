@@ -457,3 +457,30 @@ func TestAttributionCommitModeDefaultsOffAndValidates(t *testing.T) {
 		t.Fatal("invalid attribution mode accepted")
 	}
 }
+func TestAttributionModeCanonicalizedBeforeValidationAndLoad(t *testing.T) {
+	t.Setenv("FI_CONFIG_DIR", t.TempDir())
+	for raw, want := range map[string]string{" APPEND ": "append", "\tOFF\n": "off", " Standalone ": "standalone"} {
+		cfg := defaultConfig()
+		if err := SetField(&cfg, "attribution.commit_mode", raw); err != nil {
+			t.Fatalf("SetField(%q): %v", raw, err)
+		}
+		if cfg.Attribution.CommitMode != want {
+			t.Fatalf("SetField(%q) stored %q, want %q", raw, cfg.Attribution.CommitMode, want)
+		}
+		if err := Save(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if loaded.Attribution.CommitMode != want {
+			t.Fatalf("loaded %q, want %q", loaded.Attribution.CommitMode, want)
+		}
+	}
+	cfg := defaultConfig()
+	cfg.Attribution.CommitMode = "unexpected"
+	if err := Validate(&cfg); err == nil {
+		t.Fatal("unknown attribution mode accepted")
+	}
+}

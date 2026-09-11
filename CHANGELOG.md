@@ -2,11 +2,21 @@
 
 All notable changes to FreeInference Companion are recorded here.
 
-## 0.1.1 — 2026-09-03
+## 0.1.2 — 2026-09-11
 
-Patch release following the first public release.
+Feature and hardening release following the first public release.
 
-### Fixed
+### Added
+
+- Automatic discovery and explicit registration for multiple Claude Code and
+  Codex configuration roots, with read-only route and model-capability
+  diagnostics.
+- Safe commit attribution for eligible Claude Code commits, including
+  fail-open hook behavior and idempotent provenance footers.
+- Bundled Codex skill payload and native marketplace registration with durable
+  payload-versus-registration status and retry guidance.
+
+### Fixed and hardened
 
 - Corrected the canonical GitHub repository URL in the installer default,
   generated marketplace manifest, release documentation, SBOM, and provenance
@@ -14,6 +24,10 @@ Patch release following the first public release.
 - Made the hosted-runner benchmark gate tolerant of transient filesystem
   contention while retaining a conservative 20 ms CI ceiling for the local
   hook and status-line paths.
+- Enforced client-specific endpoint matching, legacy Claude route migration
+  guidance, loopback proxy attestation binding, and fail-closed catalog checks.
+- Added transactional ownership, rollback, legacy-path cleanup, symlink
+  defenses, and cross-platform installer coverage.
 
 ## 0.1.0 — 2026-09-03
 

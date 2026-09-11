@@ -15,22 +15,40 @@ import (
 )
 
 type transactionEntry struct {
-	target    string
-	backup    string
-	existed   bool
-	committed bool
+	target     string
+	backup     string
+	targetBase string
+	backupBase string
+	parent     *mutationParent
+	existed    bool
+	committed  bool
+}
+
+// stagedArtifact keeps the directory handle used to create a staged target.
+// The handle is passed into the rename so a concurrent ancestor swap cannot
+// redirect staging or commit work between validation and replacement.
+type stagedArtifact struct {
+	path       string
+	parentPath string
+	name       string
+	parent     *mutationParent
 }
 
 // installTransaction replaces files/directories through sibling renames and
 // retains rollback copies until the whole installation has committed.
 type installTransaction struct {
-	entries []transactionEntry
+	entries          []transactionEntry
+	cleanupCommitted bool
 }
 
 // transactionFailureHook is test-only fault injection. It is nil in normal
 // operation and lets installer tests simulate a failure after a sibling rename
 // so rollback behavior is exercised at the live commit boundary.
 var transactionFailureHook func(target string) error
+
+// transactionFinalizeFailureHook is test-only fault injection for the cleanup
+// boundary. It is nil in normal operation.
+var transactionFinalizeFailureHook func(target string) error
 
 func (tx *installTransaction) replace(target, staged string) error {
 	return tx.replaceInternal(target, staged, false)
@@ -44,35 +62,90 @@ func (tx *installTransaction) replaceInternal(target, staged string, allowSymlin
 	if target == "" || staged == "" {
 		return fmt.Errorf("transaction target is empty")
 	}
-	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+	if err := ensureNoSymlinkedAncestors(target); err != nil {
 		return err
 	}
-	entry := transactionEntry{target: target}
-	if info, err := os.Lstat(target); err == nil {
-		if !allowSymlink && info.Mode()&os.ModeSymlink != 0 {
+	targetParent, err := filepath.Abs(filepath.Dir(target))
+	if err != nil {
+		return err
+	}
+	stagedParent, err := filepath.Abs(filepath.Dir(staged))
+	if err != nil || filepath.Clean(targetParent) != filepath.Clean(stagedParent) {
+		return fmt.Errorf("transaction staged path must be a sibling of target")
+	}
+	parent, err := openMutationParent(targetParent)
+	if err != nil {
+		return err
+	}
+	return tx.replaceWithParent(target, filepath.Base(staged), parent, allowSymlink)
+}
+
+func (tx *installTransaction) replaceStaged(target string, staged *stagedArtifact, allowSymlink bool) error {
+	if staged == nil || staged.parent == nil || staged.name == "" {
+		return fmt.Errorf("transaction staged artifact is empty")
+	}
+	targetParent, err := filepath.Abs(filepath.Dir(target))
+	if err != nil || filepath.Clean(targetParent) != filepath.Clean(staged.parentPath) {
+		_ = staged.parent.remove(staged.name)
+		staged.parent.close()
+		return fmt.Errorf("transaction staged path must be a sibling of target")
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = staged.parent.remove(staged.name)
+			staged.parent.close()
+		}
+	}()
+	if err := tx.replaceWithParent(target, staged.name, staged.parent, allowSymlink); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
+func (tx *installTransaction) replaceWithParent(target, stagedBase string, parent *mutationParent, allowSymlink bool) error {
+	keepParent := false
+	defer func() {
+		if !keepParent {
+			parent.close()
+		}
+	}()
+	targetBase := filepath.Base(target)
+	targetParent, err := filepath.Abs(filepath.Dir(target))
+	if err != nil {
+		return err
+	}
+	info, err := parent.lstat(targetBase)
+	if err != nil {
+		return err
+	}
+	entry := transactionEntry{target: target, targetBase: targetBase, parent: parent}
+	if info.exists {
+		if !allowSymlink && info.symlink {
 			return fmt.Errorf("refusing to replace symlink %s", target)
 		}
-		backup, err := newSiblingPath(filepath.Dir(target), ".freeinference-rollback-*")
+		backupBase, err := parent.createTemporaryFile(".freeinference-rollback-")
 		if err != nil {
 			return err
 		}
-		if err := os.Rename(target, backup); err != nil {
+		backup := filepath.Join(targetParent, backupBase)
+		entry.backup, entry.backupBase = backup, filepath.Base(backup)
+		if err := parent.rename(targetBase, entry.backupBase); err != nil {
 			_ = os.Remove(backup)
 			return fmt.Errorf("stage existing %s: %w", target, err)
 		}
-		entry.backup = backup
 		entry.existed = true
-	} else if !os.IsNotExist(err) {
-		return err
 	}
-	if err := os.Rename(staged, target); err != nil {
+	if err := parent.rename(stagedBase, targetBase); err != nil {
 		if entry.existed {
-			_ = os.Rename(entry.backup, target)
+			_ = parent.rename(entry.backupBase, targetBase)
 		}
 		return fmt.Errorf("commit %s: %w", target, err)
 	}
 	entry.committed = true
 	tx.entries = append(tx.entries, entry)
+	keepParent = true
 	if transactionFailureHook != nil {
 		if err := transactionFailureHook(target); err != nil {
 			return err
@@ -90,56 +163,117 @@ func (tx *installTransaction) removeAllowSymlink(target string) error {
 }
 
 func (tx *installTransaction) removeInternal(target string, allowSymlink bool) error {
-	info, err := os.Lstat(target)
-	if os.IsNotExist(err) {
+	if err := ensureNoSymlinkedAncestors(target); err != nil {
+		return err
+	}
+	parentPath, err := filepath.Abs(filepath.Dir(target))
+	if err != nil {
+		return err
+	}
+	parent, err := openMutationParent(parentPath)
+	if err != nil {
+		return err
+	}
+	keepParent := false
+	defer func() {
+		if !keepParent {
+			parent.close()
+		}
+	}()
+	targetBase := filepath.Base(target)
+	info, err := parent.lstat(targetBase)
+	if err != nil {
+		return err
+	}
+	if !info.exists {
 		return nil
 	}
-	if err != nil {
-		return err
-	}
-	if !allowSymlink && info.Mode()&os.ModeSymlink != 0 {
+	if !allowSymlink && info.symlink {
 		return fmt.Errorf("refusing to remove symlink %s", target)
 	}
-	backup, err := newSiblingPath(filepath.Dir(target), ".freeinference-uninstall-*")
+	backup, err := newSiblingPath(parentPath, ".freeinference-uninstall-*")
 	if err != nil {
 		return err
 	}
-	if err := os.Rename(target, backup); err != nil {
+	backupBase := filepath.Base(backup)
+	if err := parent.rename(targetBase, backupBase); err != nil {
 		_ = os.Remove(backup)
 		return err
 	}
-	tx.entries = append(tx.entries, transactionEntry{target: target, backup: backup, existed: true, committed: true})
+	tx.entries = append(tx.entries, transactionEntry{target: target, backup: backup, targetBase: targetBase, backupBase: backupBase, parent: parent, existed: true, committed: true})
+	keepParent = true
 	return nil
 }
 
 func (tx *installTransaction) rollback() {
+	if tx.cleanupCommitted {
+		return
+	}
 	for i := len(tx.entries) - 1; i >= 0; i-- {
 		entry := tx.entries[i]
 		if entry.committed {
-			_ = removePath(entry.target)
+			if entry.parent != nil {
+				_ = entry.parent.remove(entry.targetBase)
+			} else {
+				_ = removePath(entry.target)
+			}
 		}
 		if entry.existed {
-			_ = os.Rename(entry.backup, entry.target)
+			if entry.parent != nil {
+				_ = entry.parent.rename(entry.backupBase, entry.targetBase)
+			} else {
+				_ = os.Rename(entry.backup, entry.target)
+			}
+		}
+		if entry.parent != nil {
+			entry.parent.close()
 		}
 	}
 	tx.entries = nil
 }
 
+// finalize removes rollback copies. Once it returns, the transaction is
+// permanently committed and rollback must no longer be attempted.
 func (tx *installTransaction) finalize() error {
 	var firstErr error
 	for _, entry := range tx.entries {
 		if entry.backup == "" {
 			continue
 		}
-		if err := removePath(entry.backup); err != nil && !os.IsNotExist(err) && firstErr == nil {
-			firstErr = err
+		if transactionFinalizeFailureHook != nil {
+			if err := transactionFinalizeFailureHook(entry.target); err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+		}
+		var err error
+		if entry.parent != nil {
+			err = entry.parent.remove(entry.backupBase)
+		} else {
+			err = removePath(entry.backup)
+		}
+		if err != nil && !os.IsNotExist(err) {
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	for _, entry := range tx.entries {
+		if entry.parent != nil {
+			entry.parent.close()
 		}
 	}
 	tx.entries = nil
+	tx.cleanupCommitted = true
 	return firstErr
 }
 
 func newSiblingPath(dir, pattern string) (string, error) {
+	if err := ensureNoSymlinkedAncestors(filepath.Join(dir, "placeholder")); err != nil {
+		return "", err
+	}
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", err
 	}
@@ -170,19 +304,34 @@ func stageFile(src, target string) (string, error) {
 	return staged, nil
 }
 
-func stageDirectory(src, target string) (string, error) {
-	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-		return "", err
-	}
-	staged, err := os.MkdirTemp(filepath.Dir(target), ".freeinference-stage-*")
+func stageDirectory(src, target string) (*stagedArtifact, error) {
+	parentPath, err := filepath.Abs(filepath.Dir(target))
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	if err := copyDir(staged, src); err != nil {
-		_ = os.RemoveAll(staged)
-		return "", err
+	parent, err := openMutationParent(parentPath)
+	if err != nil {
+		return nil, err
 	}
-	return staged, nil
+	stageName, err := parent.createStageDirectory(".freeinference-stage-")
+	if err != nil {
+		parent.close()
+		return nil, err
+	}
+	cleanup := func(err error) (*stagedArtifact, error) {
+		_ = parent.remove(stageName)
+		parent.close()
+		return nil, err
+	}
+	if err := parent.copyTree(stageName, src); err != nil {
+		return cleanup(err)
+	}
+	return &stagedArtifact{
+		path:       filepath.Join(parentPath, stageName),
+		parentPath: parentPath,
+		name:       stageName,
+		parent:     parent,
+	}, nil
 }
 
 func removePath(path string) error {

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -8,6 +9,48 @@ import (
 	"github.com/b-a-m-n/freeinference-companion/internal/config"
 	"github.com/b-a-m-n/freeinference-companion/internal/runtime"
 )
+
+func TestHandlePreToolUseUsesEffectiveAttributionResolution(t *testing.T) {
+	input := map[string]any{
+		"tool_name": "Bash",
+		"tool_input": map[string]any{
+			"command": `git commit -m "fix"`,
+		},
+	}
+	raw, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := func(env string) string {
+		t.Setenv("FI_CONFIG_DIR", t.TempDir())
+		cfg, err := config.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.Attribution.CommitMode = "standalone"
+		if err := config.Save(cfg); err != nil {
+			t.Fatal(err)
+		}
+		// t.Setenv registers cleanup for every branch, including the disabled
+		// case; never unset process environment state without restoration.
+		t.Setenv("FI_ATTRIBUTION_COMMIT_MODE", env)
+		var stdout strings.Builder
+		handlePreToolUse("claude-code", runtime.ClientClaudeCode, strings.NewReader(string(raw)), &stdout, runtime.Activation{Active: true})
+		return stdout.String()
+	}
+	if run("") == "" {
+		t.Fatal("config standalone mode was ignored")
+	}
+	if run("standalone") == "" {
+		t.Fatal("environment standalone override ignored")
+	}
+	if run("OFF") != "" {
+		t.Fatal("case-insensitive environment off enabled attribution")
+	}
+	if run("invalid") != "" {
+		t.Fatal("invalid environment enabled attribution")
+	}
+}
 
 func TestHandlePreToolUsePreservesAdditionalInputAndIsStateless(t *testing.T) {
 	input := map[string]any{
@@ -58,25 +101,22 @@ func TestHandlePreToolUsePreservesAdditionalInputAndIsStateless(t *testing.T) {
 	if !strings.Contains(command, "Support-FreeInference") {
 		t.Fatalf("attribution missing: %s", command)
 	}
-	var extra struct {
-		Description     string         `json:"description"`
-		Timeout         int            `json:"timeout"`
-		RunInBackground bool           `json:"run_in_background"`
-		Future          map[string]any `json:"future"`
+	var inputPayload struct {
+		ToolInput map[string]json.RawMessage `json:"tool_input"`
 	}
-	fixtureToolInput, err := json.Marshal(input["tool_input"])
-	if err != nil {
+	if err := json.Unmarshal(raw, &inputPayload); err != nil {
 		t.Fatal(err)
 	}
-	if err := json.Unmarshal(fixtureToolInput, &extra); err != nil {
-		t.Fatal(err)
-	}
-	for _, key := range []string{"description", "timeout", "run_in_background", "future"} {
-		if _, ok := output.UpdatedInput[key]; !ok {
-			t.Fatalf("updatedInput lost field %s: %s", key, stdout.String())
+	for key, want := range inputPayload.ToolInput {
+		if key == "command" {
+			continue
 		}
-	}
-	if extra.Description != "commit work" || extra.Timeout != 30 || extra.RunInBackground || extra.Future["keep"] != true {
-		t.Fatalf("input fixture lost fields: %#v", extra)
+		got, ok := output.UpdatedInput[key]
+		if !ok {
+			t.Fatalf("updatedInput dropped %q", key)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("updatedInput changed %q: got %s want %s", key, got, want)
+		}
 	}
 }

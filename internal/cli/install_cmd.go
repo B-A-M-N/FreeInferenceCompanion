@@ -143,7 +143,8 @@ func cmdUninstall(rest []string, stdout, stderr io.Writer) int {
 
 const helpInstall = `Usage: freeinference install [--manifest <url>] [--platform <key>] [--dry-run] [--no-plugin] [--force] [--no-integration-discovery] [--help]
 
-Download and install the FreeInference Companion CLI binary and Claude Code plugin.
+Download and install the FreeInference Companion CLI binary plus the Claude Code
+and skill-only Codex plugin payloads.
 
 The installer:
   1. Fetches the latest marketplace manifest
@@ -151,9 +152,14 @@ The installer:
   3. Verifies the SHA-256 checksum
   4. Extracts the binary to ~/.local/freeinference/bin/
   5. Symlinks to ~/.local/bin/freeinference (or adds to PATH)
-  6. Extracts the Claude Code plugin to ~/.claude/plugins/
+  6. Extracts the Claude Code plugin to ~/.claude/plugins/ and the Codex
+     skill-only payload to ~/.codex/plugins/
+  7. Registers the Codex payload through its native marketplace manager when
+     the Codex CLI is available; the result is recorded in core.json
 
-Codex uses its marketplace flow; see docs/codex.md.
+Codex native plugin registration can require a new Codex session before skills
+appear. A missing Codex CLI leaves the payload installed but reports the
+registration as incomplete; rerun install/update after Codex is available.
 
 Flags:
   --manifest <url>     URL of the marketplace.json file (default: GitHub latest release)
@@ -175,7 +181,9 @@ The updater:
   1. Checks the manifest for a newer version
   2. Backs up the current binary before replacing
   3. Downloads and verifies the new release
-  4. Replaces the binary and updates the Claude Code plugin
+  4. Replaces the binary and updates the Claude Code and Codex payloads
+  5. Reconciles native Codex registration and reports payload versus native
+     registration status
 
 Flags:
   --manifest <url>     URL of the marketplace.json file
