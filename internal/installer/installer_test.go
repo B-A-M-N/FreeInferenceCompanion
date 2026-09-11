@@ -107,12 +107,21 @@ func createTestZIP(t *testing.T, version string) ([]byte, string) {
 	f, _ = w.Create("plugins/claude-code/package.json")
 	f.Write([]byte(`{"name":"freeinference-companion"}`))
 
-	// Current Codex payload is skill-only and bundled in the checksummed
-	// platform archive.
+	// Codex lifecycle payload is bundled in the checksummed platform archive.
 	f, _ = w.Create("plugins/codex/.codex-plugin/plugin.json")
 	f.Write([]byte(`{"name":"freeinference-companion"}`))
+	f, _ = w.Create("plugins/codex/hooks/hooks.json")
+	f.Write([]byte(`{"hooks":{"SessionStart":[{"matcher":".*","hooks":[{"type":"command","command":"\"${PLUGIN_ROOT}/scripts/run-hook.sh\" SessionStart"}]}]}}`))
+	codexHook := &zip.FileHeader{Name: "plugins/codex/scripts/run-hook.sh", Method: zip.Deflate}
+	codexHook.SetMode(0755)
+	f, _ = w.CreateHeader(codexHook)
+	f.Write([]byte("#!/usr/bin/env bash\nexit 0\n"))
 	f, _ = w.Create("plugins/codex/skills/attribution/SKILL.md")
 	f.Write([]byte("attribution skill\n"))
+	codexBinary := &zip.FileHeader{Name: "plugins/codex/bin/linux-amd64/freeinference", Method: zip.Deflate}
+	codexBinary.SetMode(0755)
+	f, _ = w.CreateHeader(codexBinary)
+	f.Write([]byte("mock-codex-binary-" + version))
 
 	w.Close()
 
@@ -575,7 +584,7 @@ func TestValidateReleaseLayoutRequiresExecutableHook(t *testing.T) {
 	if err := os.Chmod(filepath.Join(root, "plugins", "claude-code", "scripts", "run-hook.sh"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateReleaseLayout(root, false, true); err == nil {
+	if err := validateReleaseLayout(root, false, true, "linux-amd64"); err == nil {
 		t.Fatal("non-executable plugin runner passed release validation")
 	}
 }

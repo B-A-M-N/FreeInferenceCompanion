@@ -38,7 +38,7 @@ type Paths struct {
 	CodexPluginPath string
 	// CoreClaudePluginPath is the installer-owned verified Claude artifact.
 	CoreClaudePluginPath string
-	// CoreCodexPluginPath is the installer-owned verified skill-only Codex artifact.
+	// CoreCodexPluginPath is the installer-owned verified Codex lifecycle artifact.
 	CoreCodexPluginPath string
 	// Home records the home directory that produced these canonical paths.
 	Home         string

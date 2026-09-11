@@ -157,7 +157,7 @@ func cmdStatus(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 	// No usable stdin payload — in compact/status-line mode, output zero
 	// bytes. An empty status line is correct when there is nothing to say.
 	// In interactive mode (no --compact), fall through to resolveSession.
-	if compact && !historical {
+	if compact && !historical && clientType != schema.ClientCodex {
 		return 0
 	}
 
@@ -167,13 +167,22 @@ func cmdStatus(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 		return 1
 	}
 	if resolved == nil {
-		// Codex's marketplace integration is intentionally skill-only: it does
-		// not receive lifecycle events from Codex, so a fresh Codex process can
-		// have verified provider configuration without a Companion snapshot.
-		// Show that configuration boundary explicitly instead of reducing it to
-		// the unhelpful generic "no session" response. This is configuration
-		// evidence, not a fabricated session or telemetry record.
 		if clientType == schema.ClientCodex && activation.Active && !historical {
+			if snap, usageErr := latestCodexSnapshot(activation); usageErr == nil {
+				if aid, aidErr := activationID(activation); aidErr == nil {
+					gs := loadGlobal(paths)
+					if jsonOut {
+						statusJSON(stdout, snap, gs, reveal, aid, &activation.Active,
+							string(schema.ClientCodex), snap.Session.ID, snap.Model.ID, snap.Provider.Name)
+						return 0
+					}
+					vm := buildView(snap, gs, aid, activation.Active, schema.ClientCodex, snap.Session.ID)
+					if rendered := renderStatusLevel(vm, renderConfigWith(args), level); rendered != "" {
+						fmt.Fprintln(stdout, rendered)
+					}
+					return 0
+				}
+			}
 			if jsonOut {
 				codexConfiguredStatusJSON(stdout, activation)
 				return 0
@@ -187,6 +196,11 @@ func cmdStatus(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 		}
 		fmt.Fprintln(stdout, "FI: no session")
 		return 0
+	}
+	if resolved.Client == schema.ClientCodex {
+		if usage, usageErr := latestCodexUsage(); usageErr == nil {
+			_ = applyCodexUsage(resolved.Snap, usage, activation)
+		}
 	}
 
 	gs := loadGlobal(paths)
@@ -241,10 +255,8 @@ func cmdStatus(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 	return 0
 }
 
-// printCodexConfiguredStatus reports the useful Codex state that can be
-// established before a lifecycle snapshot exists. Codex owns its TUI footer
-// and does not expose Claude-equivalent context/cache telemetry to this
-// companion, so unsupported fields remain explicitly unavailable.
+// printCodexConfiguredStatus reports the useful Codex configuration state when
+// no completed rollout usage record is available yet.
 func printCodexConfiguredStatus(stdout io.Writer, activation runtime.Activation, level string) {
 	provider := activation.ProviderInfo()
 	selection := secure.SafeField(activation.Evidence.ProviderID)
@@ -257,7 +269,7 @@ func printCodexConfiguredStatus(stdout io.Writer, activation runtime.Activation,
 	}
 
 	if level == "summary" {
-		fmt.Fprintf(stdout, "FI codex | provider %s | context unavailable | cache unavailable\n", secure.SafeField(provider.Name))
+		fmt.Fprintf(stdout, "FI codex | provider %s | context pending | cache pending\n", secure.SafeField(provider.Name))
 		return
 	}
 
@@ -265,16 +277,16 @@ func printCodexConfiguredStatus(stdout io.Writer, activation runtime.Activation,
 	fmt.Fprintln(stdout, "Client:   codex")
 	fmt.Fprintf(stdout, "Provider: %s (verified from Codex configuration)\n", secure.SafeField(provider.Name))
 	fmt.Fprintf(stdout, "Selection: %s (%s)\n", selection, selectionSource)
-	fmt.Fprintln(stdout, "Session:  no local Codex session (plugin is skill-only)")
-	fmt.Fprintln(stdout, "Model:    unavailable (Codex does not expose the active model to the Companion)")
+	fmt.Fprintln(stdout, "Session:  no completed Codex rollout usage yet")
+	fmt.Fprintln(stdout, "Model:    pending rollout telemetry")
 	fmt.Fprintln(stdout)
-	fmt.Fprintln(stdout, "Live Context: unavailable (Codex does not expose live token telemetry)")
-	fmt.Fprintln(stdout, "Pressure: unavailable (no Codex lifecycle telemetry)")
-	fmt.Fprintln(stdout, "Cache Analysis: unavailable (Codex does not expose cache telemetry)")
+	fmt.Fprintln(stdout, "Live Context: pending (waiting for Codex token usage)")
+	fmt.Fprintln(stdout, "Pressure: pending (waiting for Codex token usage)")
+	fmt.Fprintln(stdout, "Cache Analysis: pending (waiting for Codex token usage)")
 	if level == "detailed" {
 		fmt.Fprintln(stdout)
-		fmt.Fprintln(stdout, "Use the native Codex footer for model, remaining context, and current directory.")
-		fmt.Fprintln(stdout, "Use `freeinference context --client codex` and `freeinference cache --client codex` for the explicit availability boundary.")
+		fmt.Fprintln(stdout, "The native Codex footer remains available for model, remaining context, and current directory.")
+		fmt.Fprintln(stdout, "After the first completed turn, rerun this command for rollout-backed context and cache reporting.")
 	}
 }
 
@@ -283,7 +295,7 @@ func codexConfiguredStatusJSON(stdout io.Writer, activation runtime.Activation) 
 	obj := map[string]any{
 		"client":             string(schema.ClientCodex),
 		"session_id":         "",
-		"session_state":      "unavailable",
+		"session_state":      "pending_rollout",
 		"provider":           secure.SafeField(provider.Name),
 		"provider_confirmed": provider.Confirmed,
 		"provider_source":    secure.SafeField(provider.Source),
@@ -291,11 +303,11 @@ func codexConfiguredStatusJSON(stdout io.Writer, activation runtime.Activation) 
 		"selection_verified": activation.Evidence.ProviderSelectionVerified,
 		"selection_source":   secure.SafeField(activation.Evidence.ProviderSelectionSource),
 		"model":              "",
-		"context":            map[string]any{"availability": "unavailable", "reason": "client_telemetry_unavailable"},
-		"cache":              map[string]any{"availability": "unavailable", "reason": "client_telemetry_unavailable"},
-		"pressure":           "unavailable",
+		"context":            map[string]any{"availability": "pending", "reason": "no_completed_rollout_usage"},
+		"cache":              map[string]any{"availability": "pending", "reason": "no_completed_rollout_usage"},
+		"pressure":           "pending",
 		"active":             true,
-		"codex_plugin_mode":  "skill-only",
+		"codex_plugin_mode":  "lifecycle-and-rollout",
 		"native_footer_owns": []string{"model-with-reasoning", "context-remaining", "current-dir"},
 	}
 	enc := json.NewEncoder(stdout)
@@ -337,12 +349,7 @@ func renderStatusLevel(vm interface {
 func statusJSON(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalState, reveal bool,
 	activationID string, active *bool, client, sessionID, model, providerName string, historical ...bool) {
 	var ctx map[string]any
-	if client == string(schema.ClientCodex) || (snap != nil && snap.Client.Type == schema.ClientCodex) {
-		ctx = map[string]any{
-			"availability": "unavailable",
-			"reason":       "client_telemetry_unavailable",
-		}
-	} else if snap != nil && snap.LiveContext != nil {
+	if snap != nil && snap.LiveContext != nil {
 		lc := snap.LiveContext
 		ctx = map[string]any{
 			"used_pct":              lc.UsedPercentage,
@@ -358,13 +365,15 @@ func statusJSON(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalState,
 		if lc.TotalOutputTokens != nil {
 			ctx["total_output_tokens"] = *lc.TotalOutputTokens
 		}
+	} else if client == string(schema.ClientCodex) || (snap != nil && snap.Client.Type == schema.ClientCodex) {
+		ctx = map[string]any{
+			"availability": "unavailable",
+			"reason":       "client_telemetry_unavailable",
+		}
 	}
 
 	cacheObj := map[string]any{}
-	if client == string(schema.ClientCodex) || (snap != nil && snap.Client.Type == schema.ClientCodex) {
-		cacheObj["availability"] = "unavailable"
-		cacheObj["reason"] = "client_telemetry_unavailable"
-	} else if snap != nil && snap.CacheAnalysis != nil {
+	if snap != nil && snap.CacheAnalysis != nil {
 		ca := snap.CacheAnalysis
 		cacheObj["observed_samples"] = ca.ObservationCount
 		cacheObj["analyzed_samples"] = ca.AnalysisWindowCount
@@ -383,6 +392,9 @@ func statusJSON(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalState,
 		if ca.FreshInputShare != nil {
 			cacheObj["fresh_share"] = *ca.FreshInputShare
 		}
+	} else if client == string(schema.ClientCodex) || (snap != nil && snap.Client.Type == schema.ClientCodex) {
+		cacheObj["availability"] = "unavailable"
+		cacheObj["reason"] = "client_telemetry_unavailable"
 	}
 
 	pressure := ""
@@ -532,9 +544,7 @@ func printFullStatus(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalS
 	}
 	fmt.Fprintln(stdout)
 
-	if snap.Client.Type == schema.ClientCodex {
-		fmt.Fprintln(stdout, "Live Context: unavailable (Codex does not expose live token telemetry)")
-	} else if snap.LiveContext != nil {
+	if snap.LiveContext != nil {
 		lc := snap.LiveContext
 		fmt.Fprintf(stdout, "Live Context (from %s at %s):\n", lc.Source, lc.ObservedAt.Format(time.RFC3339))
 		if lc.TotalTokenSemantics != "" {
@@ -583,9 +593,7 @@ func printFullStatus(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalS
 	}
 	fmt.Fprintln(stdout)
 
-	if snap.Client.Type == schema.ClientCodex {
-		fmt.Fprintln(stdout, "Cache Analysis: unavailable (Codex does not expose cache telemetry)")
-	} else if snap.CacheAnalysis != nil && (snap.CacheAnalysis.ObservationCount > 0 || snap.CacheAnalysis.RequestSamples > 0) {
+	if snap.CacheAnalysis != nil && (snap.CacheAnalysis.ObservationCount > 0 || snap.CacheAnalysis.RequestSamples > 0) {
 		fmt.Fprintf(stdout, "Cache Analysis (%d observed, %d analyzed, %d usable):\n",
 			snap.CacheAnalysis.ObservationCount, snap.CacheAnalysis.AnalysisWindowCount, snap.CacheAnalysis.UsableSampleCount)
 		fmt.Fprintf(stdout, "  Availability: %s\n", snap.CacheAnalysis.Availability)
@@ -670,30 +678,41 @@ func printFullStatus(stdout io.Writer, snap *schema.Snapshot, gs *schema.GlobalS
 	}
 }
 
-// cmdContext implements `freeinference context`. Missing Claude metrics render
-// as "unknown"; unsupported Codex metrics render as "unavailable".
+// cmdContext implements `freeinference context`. Codex context is sourced from
+// the latest local rollout token_count event when no lifecycle snapshot exists.
 func cmdContext(paths state.Paths, args []string, _ io.Reader, stdout, stderr io.Writer) int {
 	clientType, sessionID, _, _, _, err := parseClientSessionFlags(args)
 	if err != nil {
 		fmt.Fprintf(stderr, "usage error: %v\n", err)
 		return 2
 	}
+	var snap *schema.Snapshot
 	if clientType == schema.ClientCodex {
-		return printCodexContextUnavailable(stdout)
-	}
-
-	resolved, err := resolveSession(paths, clientType, sessionID, stdout)
-	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
-	}
-	if resolved == nil {
-		fmt.Fprintln(stdout, "FI: no session")
-		return 0
-	}
-	snap := resolved.Snap
-	if resolved.Client == schema.ClientCodex {
-		return printCodexContextUnavailable(stdout)
+		activation := activationForCLICommand("context", args)
+		var usageErr error
+		snap, usageErr = latestCodexSnapshot(activation)
+		if usageErr != nil {
+			return printCodexContextUnavailable(stdout)
+		}
+	} else {
+		resolved, resolveErr := resolveSession(paths, clientType, sessionID, stdout)
+		if resolveErr != nil {
+			fmt.Fprintf(stderr, "error: %v\n", resolveErr)
+			return 1
+		}
+		if resolved == nil {
+			fmt.Fprintln(stdout, "FI: no session")
+			return 0
+		}
+		snap = resolved.Snap
+		if resolved.Client == schema.ClientCodex {
+			activation := activationForCLICommand("context", args)
+			if usage, usageErr := latestCodexUsage(); usageErr == nil {
+				_ = applyCodexUsage(snap, usage, activation)
+			} else {
+				return printCodexContextUnavailable(stdout)
+			}
+		}
 	}
 
 	var usedPct *float64
@@ -734,7 +753,7 @@ func printCodexContextUnavailable(stdout io.Writer) int {
 	fmt.Fprintln(stdout, "Context:    unavailable")
 	fmt.Fprintln(stdout, "Limit:      unavailable")
 	fmt.Fprintln(stdout, "State:      unavailable")
-	fmt.Fprintln(stdout, "Suggestion: Codex does not expose live token or context telemetry.")
+	fmt.Fprintln(stdout, "Suggestion: no completed Codex rollout token usage is available yet.")
 	return 0
 }
 

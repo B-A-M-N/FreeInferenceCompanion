@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/adapters"
@@ -54,7 +55,10 @@ func TestVersionConsistency(t *testing.T) {
 		if err := json.Unmarshal(data, &manifest); err != nil {
 			t.Fatalf("parse %s: %v", err, p)
 		}
-		if manifest.Version != want {
+		// Codex local development manifests may carry the documented cachebuster
+		// suffix. Release packaging strips it on the staged copy.
+		manifestBase := strings.SplitN(manifest.Version, "+", 2)[0]
+		if manifestBase != want {
 			t.Errorf("%s version = %q, want %q", filepath.Base(filepath.Dir(p)), manifest.Version, want)
 		}
 	}

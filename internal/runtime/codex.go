@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/api"
+	"github.com/b-a-m-n/freeinference-companion/internal/clientenv"
 )
 
 const maxCodexConfigBytes = 1 << 20
@@ -127,7 +128,7 @@ func resolveCodexProviderConfigurationWith(profile string, readDir func(string) 
 	}
 	endpoint, endpointErr := api.NormalizeEndpoint(provider.BaseURL)
 	route, _, routeErr := api.NormalizeRoute(provider.BaseURL)
-	if endpointErr != nil || routeErr != nil || (endpoint.IsFI && route != endpoint.Origin+api.CodexRoutePath) {
+	if endpointErr != nil || routeErr != nil {
 		return ClientEvidence{
 			Client:                    ClientCodex,
 			ProviderID:                providerID,
@@ -135,13 +136,59 @@ func resolveCodexProviderConfigurationWith(profile string, readDir func(string) 
 			ProviderSelectionSource:   selectionSource,
 		}, errors.New("selected Codex provider is not an approved FreeInference /v1 endpoint")
 	}
+	if endpoint.IsFI && route != endpoint.Origin+api.CodexRoutePath {
+		return ClientEvidence{
+			Client:                    ClientCodex,
+			ProviderID:                providerID,
+			ProviderSelectionVerified: false,
+			ProviderSelectionSource:   selectionSource,
+		}, errors.New("selected Codex provider is not an approved FreeInference /v1 endpoint")
+	}
+	if !endpoint.IsFI {
+		// HarvardCodex and other supported integrations may use a loopback
+		// compatibility gateway. A local URL is never enough by itself: require
+		// the installer-owned attestation that binds this exact /v1 route to the
+		// approved FreeInference upstream.
+		if isLoopbackEndpoint(provider.BaseURL) {
+			userHome, homeErr := os.UserHomeDir()
+			attestation, attestationErr := clientenv.LoadCodexProxyAttestation(userHome, home)
+			if homeErr != nil || attestationErr != nil || attestation == nil {
+				return ClientEvidence{
+					Client:                    ClientCodex,
+					ProviderID:                providerID,
+					ProviderSelectionVerified: false,
+					ProviderSelectionSource:   selectionSource,
+				}, errors.New("loopback Codex route requires an explicit FreeInference proxy attestation")
+			}
+			proxyState, _, verifyErr := clientenv.VerifyCodexConfigRoute(userHome, home)
+			if verifyErr != nil || proxyState != clientenv.CodexRouteVerifiedProxy {
+				return ClientEvidence{
+					Client:                    ClientCodex,
+					ProviderID:                providerID,
+					ProviderSelectionVerified: false,
+					ProviderSelectionSource:   selectionSource,
+				}, errors.New("loopback Codex route proxy attestation does not match the selected provider")
+			}
+			upstream, upstreamErr := api.NormalizeEndpoint(attestation.UpstreamURL)
+			upstreamRoute, _, upstreamRouteErr := api.NormalizeRoute(attestation.UpstreamURL)
+			if upstreamErr != nil || upstreamRouteErr != nil || !upstream.IsFI || upstreamRoute != upstream.Origin+api.CodexRoutePath {
+				return ClientEvidence{
+					Client:                    ClientCodex,
+					ProviderID:                providerID,
+					ProviderSelectionVerified: false,
+					ProviderSelectionSource:   selectionSource,
+				}, errors.New("codex proxy attestation does not name an approved FreeInference /v1 endpoint")
+			}
+			endpoint = upstream
+		}
+	}
 
 	credentialSource := CredentialSource(strings.TrimSpace(provider.EnvKey))
 	credentialValue := os.Getenv(string(credentialSource))
 	return ClientEvidence{
 		Client:                    ClientCodex,
 		EndpointSource:            "codex:model_providers." + providerID + ".base_url",
-		EndpointURL:               provider.BaseURL,
+		EndpointURL:               endpoint.RequestURL,
 		CredentialSource:          credentialSource,
 		CredentialValue:           credentialValue,
 		ProviderID:                providerID,

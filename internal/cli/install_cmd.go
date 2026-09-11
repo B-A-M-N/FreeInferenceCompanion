@@ -144,7 +144,7 @@ func cmdUninstall(rest []string, stdout, stderr io.Writer) int {
 const helpInstall = `Usage: freeinference install [--manifest <url>] [--platform <key>] [--dry-run] [--no-plugin] [--force] [--no-integration-discovery] [--help]
 
 Download and install the FreeInference Companion CLI binary plus the Claude Code
-and skill-only Codex plugin payloads.
+and lifecycle-enabled Codex plugin payloads.
 
 The installer:
   1. Fetches the latest marketplace manifest
@@ -153,7 +153,7 @@ The installer:
   4. Extracts the binary to ~/.local/freeinference/bin/
   5. Symlinks to ~/.local/bin/freeinference (or adds to PATH)
   6. Extracts the Claude Code plugin to ~/.claude/plugins/ and the Codex
-     skill-only payload to ~/.codex/plugins/
+     hooks, runner, skills, and bundled binary to ~/.codex/plugins/
   7. Registers the Codex payload through its native marketplace manager when
      the Codex CLI is available; the result is recorded in core.json
 

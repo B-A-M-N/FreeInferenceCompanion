@@ -604,7 +604,7 @@ func BuildViewModel(version string, snap *schema.Snapshot, gs *schema.GlobalStat
 		}
 	}
 
-	if snap.Client.Type != schema.ClientCodex && snap.LiveContext != nil {
+	if snap.LiveContext != nil {
 		lc := snap.LiveContext
 		vm.ContextWindowSize = lc.ContextWindowSize
 		vm.ContextUsedPct = lc.UsedPercentage
@@ -629,7 +629,7 @@ func BuildViewModel(version string, snap *schema.Snapshot, gs *schema.GlobalStat
 	// LiveContext, once again further down). Aside from being dead work, the
 	// duplication masked future edits that touched only one of the two
 	// blocks.
-	if snap.Client.Type != schema.ClientCodex && snap.CacheAnalysis != nil {
+	if snap.CacheAnalysis != nil {
 		vm.CacheReadShare = snap.CacheAnalysis.CacheReadShare
 		vm.CacheTrend = snap.CacheAnalysis.Trend
 		vm.CacheAnalysisRequestSamples = snap.CacheAnalysis.RequestSamples
@@ -786,7 +786,7 @@ func (vm *ViewModel) Line(config RenderConfig) string {
 	ctxStr := config.colorize("ctx —", ColorGray)
 	if vm.ContextUsedPct != nil {
 		pct := *vm.ContextUsedPct
-		ctxStr = fmt.Sprintf("ctx %.0f%%", pct)
+		ctxStr = fmt.Sprintf("ctx %.0f%%", math.Round(pct))
 		switch {
 		case pct >= 90:
 			ctxStr = config.colorize(ctxStr, ColorCrimson)
@@ -937,9 +937,9 @@ func (vm *ViewModel) Expanded(config RenderConfig) string {
 		context = fmt.Sprintf("%s / %s", FormatTokenCount(*vm.ContextUsedTokens), FormatTokenCount(*vm.ContextWindowSize))
 		if vm.ContextUsedPct != nil {
 			pct := *vm.ContextUsedPct
-			context += fmt.Sprintf(" · %.0f%%", pct)
+			context += fmt.Sprintf(" · %.0f%%", math.Round(pct))
 			// Color the percentage
-			pctStr := fmt.Sprintf("%.0f%%", pct)
+			pctStr := fmt.Sprintf("%.0f%%", math.Round(pct))
 			switch {
 			case pct >= 90:
 				pctStr = config.colorize(pctStr, ColorCrimson)
@@ -953,7 +953,7 @@ func (vm *ViewModel) Expanded(config RenderConfig) string {
 			context = strings.Replace(context, fmt.Sprintf("%.0f%%", pct), pctStr, 1)
 		}
 	} else if vm.ContextUsedPct != nil {
-		context = fmt.Sprintf("%.0f%% used", *vm.ContextUsedPct)
+		context = fmt.Sprintf("%.0f%% used", math.Round(*vm.ContextUsedPct))
 	}
 	fmt.Fprintf(&b, "%s%s%s %s\n", bullet, config.colorize("Context", ColorWhite), sep, context)
 

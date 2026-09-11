@@ -9,14 +9,15 @@ Local observability and diagnostics for [FreeInference](https://freeinference.or
 users of Claude Code and Codex.
 
 FreeInference Companion turns the lifecycle and status data exposed by Claude
-Code, plus explicit local diagnostics requested from Codex, into useful local
-diagnostics. Claude uses local lifecycle hooks; the Codex plugin is skill-only.
+Code and Codex into useful local diagnostics. Both plugins use local lifecycle
+hooks; Codex additionally reads its bounded local rollout records for the
+context and cache counters its native footer does not expose as hook fields.
 
 <div align="center">
   <img src="docs/images/claude-code-native.png" alt="Native Claude Code session using FreeInference with the Companion status line showing model, cache, context, and health" width="49%">
   <img src="docs/images/codex-native.png" alt="Native Codex session using FreeInference with the Companion diagnostics and native Codex footer" width="49%">
 </div>
-<p align="center"><em>Claude Code: real FreeInference-backed turn with the Companion status line · Codex: real FreeInference-backed turn with the native footer and explicit Companion diagnostics.</em></p>
+<p align="center"><em>Claude Code: real FreeInference-backed turn with the Companion status line · Codex: real FreeInference-backed turn with its native footer plus the Companion rich line.</em></p>
 
 *The screenshots are native client windows captured from isolated runs of the
 shipped binary and plugin flow. Each shows a real deterministic proof turn;
@@ -38,14 +39,13 @@ cache observations, context pressure, and freshness:
 ```text
 ordinary Claude/Codex session       (no FreeInference output)
 verified FreeInference Claude       FI qwen3.6-35b | cache 0% | fresh 23K | ctx 12% | OK
-verified FreeInference Codex        native Codex footer + local diagnostics
+verified FreeInference Codex        native Codex footer + FI model/cache/context line
 ```
 
-Codex keeps ownership of its native footer and does not expose the same live
-context and cache fields as Claude Code. Its Companion plugin is skill-only:
-it provides user-requested diagnostic commands and setup guidance; it does not
-install lifecycle hooks. Unavailable values remain unavailable instead of
-being guessed.
+Codex keeps ownership of its native footer. The Companion plugin records its
+lifecycle events and reads only bounded local rollout metadata for the rich
+model/cache/context line; it never scrapes the screen or intercepts prompts.
+Before Codex has completed a turn, those counters remain explicitly pending.
 
 The important diagnostics are surfaced inside the native clients as skills:
 
@@ -89,7 +89,10 @@ traffic direct and keeping optional network behavior under the user's control.
 - Cached model health and public service status.
 - Validated account-budget projection when authoritative usage data exists.
 - Sanitized failure summaries and support reports.
-- Claude status-line integration and Codex's native footer configuration.
+- Claude status-line integration, Codex lifecycle recording, and Codex's native
+  footer configuration.
+- Rollout-backed Codex context and cache reporting, rendered through the CLI
+  and an optional tmux status segment alongside the native footer.
 - Multi-environment Claude/Codex installation and ownership-safe reconciliation.
 - Optional, default-off inference attribution for already-authorized agent commits.
 
@@ -127,9 +130,9 @@ codex plugin list --json
 Alternate Claude/Codex configuration roots are reconciled only when their selected route proves FreeInference. For arbitrary roots, see [Installation](docs/INSTALL.md#additional-client-environments). `install --no-integration-discovery` restricts fan-out to canonical roots.
 
 Configure the provider and profiles using [Codex with
-FreeInference](docs/codex.md). The Codex package is skill-only and uses Codex's
-native marketplace manager; it does not install lifecycle hooks or sit in the
-inference path.
+FreeInference](docs/codex.md). The Codex package uses Codex's native marketplace
+manager and installs local lifecycle hooks plus diagnostic skills; it does not
+sit in the inference path.
 
 ### Manual or source installation
 
@@ -143,8 +146,8 @@ Keep API keys in the environment or a secrets manager, never in a config file.
 
 The Companion is deliberately outside the inference path. It:
 
-- records bounded Claude lifecycle events and client-provided status metrics
-  locally; Codex state is available only through explicit CLI/skill commands;
+- records bounded Claude/Codex lifecycle events and client-provided status
+  metrics locally; Codex usage counters come from its local rollout records;
 - shows context pressure and rolling cache-pattern diagnostics where the
   client exposes enough information;
 - keeps provider metadata and public-status results cached and timestamped;

@@ -2,10 +2,9 @@
 
 FreeInference Companion is a local observer around Claude Code and Codex. The
 client continues to send inference traffic directly to FreeInference (or to an
-explicitly declared local compatibility proxy). Claude Code exposes lifecycle
-and status-line data that the Companion records locally; Codex contributes no
-automatic lifecycle hooks in this release and uses explicit CLI/skill
-diagnostics instead.
+explicitly declared local compatibility proxy). Claude Code and Codex expose
+lifecycle data that the Companion records locally; Codex additionally
+contributes bounded local rollout usage records.
 
 ## Shape of the system
 
@@ -15,7 +14,7 @@ freeinference CLI (static Go binary)
   ├── cached provider metadata with isolated refresh workers
   ├── advisory analysis and normalized renderers
   ├── Claude Code plugin hook runner
-  └── Codex skill-only marketplace plugin
+  └── Codex marketplace plugin (hooks, runner, skills, rollout reader)
 ```
 
 Claude's automatic path is deliberately boring:
@@ -25,9 +24,10 @@ Claude's automatic path is deliberately boring:
 3. The state layer writes a bounded local snapshot under a cross-process lock.
 4. The renderer reads local state and emits a status line, JSON, or report.
 
-Codex's plugin path is explicit: a user invokes a skill, and that skill runs a
-local CLI command. The plugin installs no hooks and does not scrape the Codex
-screen. Codex context and cache telemetry therefore remain unavailable.
+Codex's hook path records lifecycle state, while its skills run local CLI
+commands for explicit diagnostics. The rollout reader extracts only bounded
+safe metadata and token counters from Codex's local JSONL files; it does not
+scrape the Codex screen. Codex's native footer remains independently owned.
 
 No inference request is needed for that path. An explicitly enabled detached
 refresh may update stale model, health, account-usage, or public-status caches;

@@ -108,8 +108,8 @@ type WorkspaceStatus struct {
 // ============================================================
 
 // CodexHookInput is the flat JSON object Codex sends to hook scripts on stdin.
-// Codex hooks expose session, model, prompt, and lifecycle information.
-// Codex does NOT provide live token/context snapshots.
+// Codex hooks expose session, model, prompt, and lifecycle information. Live
+// token/context counters are read separately from Codex's local rollout JSONL.
 type CodexHookInput struct {
 	// Common fields
 	SessionID      string  `json:"session_id"`
@@ -171,7 +171,8 @@ type CodexWarningOutput struct {
 //   - Account usage is optional and capability-negotiated; it remains absent
 //     unless a schema-valid, provider-authoritative response is received
 //   - observed_session_usage fields are null until sufficient samples collected
-//   - Codex does not expose any live token/context snapshot
+//   - Codex hook input does not expose live token/context snapshots; the
+//     rollout reader supplies bounded local usage when a token_count event exists
 //
 // Field rules:
 //   - null = not exposed / not collected yet

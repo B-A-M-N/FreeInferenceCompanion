@@ -1,10 +1,9 @@
 # Observability and network behavior
 
-FreeInference Companion records Claude Code’s existing lifecycle/status data
-locally. Codex has no lifecycle hooks in this release; its skill-only plugin
-runs explicit local diagnostics. Neither path observes by sending extra
-inference requests, proxying traffic, scraping prompts/transcripts, or running
-a daemon.
+FreeInference Companion records Claude Code and Codex lifecycle data locally.
+Codex usage metrics additionally come from a bounded read of its local rollout
+JSONL records. Neither path observes by sending extra inference requests,
+proxying traffic, scraping prompts/transcripts, or running a daemon.
 
 Normal Claude hook/status-line operation and Codex plugin installation are
 local-only. In particular, installing or using either plugin does not make an

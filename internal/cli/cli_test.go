@@ -435,6 +435,48 @@ func TestCodexFooterCommandIsReversible(t *testing.T) {
 	}
 }
 
+func TestCodexFooterRenderUsesRolloutTelemetry(t *testing.T) {
+	home := t.TempDir()
+	codexHome := filepath.Join(home, ".harvardcodex")
+	rollout := filepath.Join(codexHome, "sessions", "2026", "09", "11", "rollout-live.jsonl")
+	if err := os.MkdirAll(filepath.Dir(rollout), 0700); err != nil {
+		t.Fatal(err)
+	}
+	config := `model_provider = "freeinference"
+
+[model_providers.freeinference]
+base_url = "https://freeinference.org/v1"
+env_key = "FREEINFERENCE_API_KEY"
+`
+	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	rolloutData := `{"timestamp":"2026-09-11T19:10:00Z","type":"session_meta","payload":{"session_id":"codex-live-test"}}
+{"timestamp":"2026-09-11T19:10:01Z","type":"turn_context","payload":{"model":"deepseek-v4-flash"}}
+{"timestamp":"2026-09-11T19:10:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1000,"cached_input_tokens":700,"cache_write_input_tokens":100,"output_tokens":25},"total_token_usage":{"input_tokens":1000,"cached_input_tokens":700,"cache_write_input_tokens":100,"output_tokens":25},"model_context_window":8000}}}
+`
+	if err := os.WriteFile(rollout, []byte(rolloutData), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Setenv("FREEINFERENCE_API_KEY", "test-codex-key")
+	t.Setenv("FREEINFERENCE_BASE_URL", "")
+	t.Setenv("FI_CACHE_DIR", filepath.Join(home, "cache"))
+	t.Setenv("NO_COLOR", "1")
+
+	var out, errOut strings.Builder
+	if code := Run([]string{"freeinference", "codex-footer", "render", "--color=never"}, strings.NewReader(""), &out, &errOut); code != 0 {
+		t.Fatalf("render exit=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	line := out.String()
+	for _, want := range []string{"FI deepseek-v4-flash", "cache 70%", "fresh 200", "ctx 13%"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("render output %q missing %q", line, want)
+		}
+	}
+}
+
 func TestHistoricalSnapshotRemainsInspectableWhenInactive(t *testing.T) {
 	cacheDir := t.TempDir()
 	t.Setenv("FI_CACHE_DIR", cacheDir)
@@ -461,7 +503,7 @@ func TestHistoricalSnapshotRemainsInspectableWhenInactive(t *testing.T) {
 	}
 }
 
-func TestCodexStatusJSONReportsTelemetryUnavailable(t *testing.T) {
+func TestCodexStatusJSONReportsRolloutTelemetry(t *testing.T) {
 	input := minimalSnapshot("codex-json")
 	input.Client.Type = schema.ClientCodex
 	input.Provider = schema.ProviderInfo{Name: schema.ProviderFreeInference, Confirmed: true}
@@ -475,15 +517,17 @@ func TestCodexStatusJSONReportsTelemetryUnavailable(t *testing.T) {
 	if err := json.Unmarshal([]byte(out.String()), &decoded); err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{"context", "cache"} {
-		section, ok := decoded[field].(map[string]any)
-		if !ok || section["availability"] != "unavailable" || section["reason"] != "client_telemetry_unavailable" {
-			t.Errorf("%s = %#v, want explicit unavailable telemetry", field, decoded[field])
-		}
+	context, ok := decoded["context"].(map[string]any)
+	if !ok || context["used_pct"] != 42.0 {
+		t.Errorf("context = %#v, want reported context telemetry", decoded["context"])
+	}
+	cache, ok := decoded["cache"].(map[string]any)
+	if !ok || cache["observed_samples"] != 4.0 {
+		t.Errorf("cache = %#v, want reported cache telemetry", decoded["cache"])
 	}
 }
 
-func TestCodexStatusWithoutSessionShowsVerifiedConfiguration(t *testing.T) {
+func TestCodexStatusWithoutSessionShowsPendingRollout(t *testing.T) {
 	codexHome := t.TempDir()
 	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(`model_provider = "freeinference"
 
@@ -508,9 +552,9 @@ wire_api = "responses"
 	for _, want := range []string{
 		"Client:   codex",
 		"Provider: freeinference (verified from Codex configuration)",
-		"Session:  no local Codex session (plugin is skill-only)",
-		"Live Context: unavailable",
-		"Cache Analysis: unavailable",
+		"Session:  no completed Codex rollout usage yet",
+		"Live Context: pending",
+		"Cache Analysis: pending",
 	} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("status output missing %q:\n%s", want, out.String())
@@ -521,7 +565,7 @@ wire_api = "responses"
 	}
 }
 
-func TestCodexStatusWithoutSessionJSONPreservesAvailabilityBoundary(t *testing.T) {
+func TestCodexStatusWithoutSessionJSONPreservesPendingBoundary(t *testing.T) {
 	codexHome := t.TempDir()
 	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(`model_provider = "freeinference"
 
@@ -550,8 +594,8 @@ env_key = "FREEINFERENCE_API_KEY"
 	}
 	for _, field := range []string{"context", "cache"} {
 		section, ok := decoded[field].(map[string]any)
-		if !ok || section["availability"] != "unavailable" || section["reason"] != "client_telemetry_unavailable" {
-			t.Errorf("%s = %#v, want explicit unavailable telemetry", field, decoded[field])
+		if !ok || section["availability"] != "pending" || section["reason"] != "no_completed_rollout_usage" {
+			t.Errorf("%s = %#v, want pending rollout telemetry", field, decoded[field])
 		}
 	}
 }

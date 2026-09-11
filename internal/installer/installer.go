@@ -373,7 +373,7 @@ func findBinary(root string) string {
 	return ""
 }
 
-func validateReleaseLayout(root string, needBinary, needPlugins bool) error {
+func validateReleaseLayout(root string, needBinary, needPlugins bool, platform PlatformKey) error {
 	if needBinary && findBinary(root) == "" {
 		return errors.New("release archive does not contain a regular freeinference binary")
 	}
@@ -392,8 +392,9 @@ func validateReleaseLayout(root string, needBinary, needPlugins bool) error {
 		}
 	}
 	// Codex is optional for older release archives. When present, validate its
-	// manifest and skill tree so canonical Codex installation cannot consume an
-	// arbitrary directory from an otherwise valid archive.
+	// manifest, skill tree, lifecycle hook payload, and platform-bundled binary
+	// so canonical Codex installation cannot consume an arbitrary directory from
+	// an otherwise valid archive.
 	codexBase := filepath.Join(root, "plugins", "codex")
 	baseInfo, err := os.Lstat(codexBase)
 	if os.IsNotExist(err) {
@@ -419,6 +420,25 @@ func validateReleaseLayout(root string, needBinary, needPlugins bool) error {
 	skillsInfo, err := os.Lstat(filepath.Join(codexBase, "skills"))
 	if err != nil || !skillsInfo.IsDir() {
 		return errors.New("release archive is missing Codex plugin skills")
+	}
+	for _, required := range []string{"hooks/hooks.json", "scripts/run-hook.sh"} {
+		path := filepath.Join(codexBase, required)
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() {
+			return fmt.Errorf("release archive is missing Codex plugin file %s", required)
+		}
+		if required == "scripts/run-hook.sh" && info.Mode()&0111 == 0 {
+			return errors.New("release archive Codex hook runner is not executable")
+		}
+	}
+	platformKey := string(platform)
+	if platformKey == "" {
+		platformKey = runtime.GOOS + "-" + runtime.GOARCH
+	}
+	codexBinary := filepath.Join(codexBase, "bin", platformKey, "freeinference")
+	info, err := os.Lstat(codexBinary)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&0111 == 0 {
+		return errors.New("release archive is missing an executable platform Codex binary")
 	}
 	return nil
 }

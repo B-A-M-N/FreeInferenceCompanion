@@ -70,10 +70,13 @@ func TestClaudeCodePluginJSONRequiredFields(t *testing.T) {
 		t.Fatalf("parse plugin.json: %v", err)
 	}
 
-	for _, key := range []string{"name", "version", "description", "author", "hooks", "skills"} {
+	for _, key := range []string{"name", "version", "description", "author", "skills"} {
 		if _, ok := parsed[key]; !ok {
 			t.Errorf("plugin.json missing required field: %s", key)
 		}
+	}
+	if _, ok := parsed["hooks"]; ok {
+		t.Error("plugin.json must not reference hooks/hooks.json; Claude Code auto-loads the standard hooks file")
 	}
 	// Author must have a name.
 	if author, ok := parsed["author"].(map[string]any); !ok {
@@ -790,12 +793,91 @@ func TestClaudeCodeHookCreatesSessionState(t *testing.T) {
 	}
 }
 
-func TestCodexPluginIsSkillOnly(t *testing.T) {
+func TestCodexPluginIncludesLifecyclePayload(t *testing.T) {
 	plug := pluginDir("freeinference-companion")
-	for _, name := range []string{"hooks", "scripts", "bin"} {
-		if _, err := os.Stat(filepath.Join(plug, name)); !os.IsNotExist(err) {
-			t.Errorf("Codex skill-only plugin unexpectedly contains %s: %v", name, err)
+	hooksPath := filepath.Join(plug, "hooks", "hooks.json")
+	data, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatalf("read Codex hooks.json: %v", err)
+	}
+	var definition struct {
+		Hooks map[string][]struct {
+			Matcher string `json:"matcher"`
+			Hooks   []struct {
+				Type    string `json:"type"`
+				Command string `json:"command"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(data, &definition); err != nil {
+		t.Fatalf("parse Codex hooks.json: %v", err)
+	}
+	wantEvents := []string{"SessionStart", "SessionEnd", "UserPromptSubmit", "PreCompact", "PostCompact", "Stop"}
+	for _, event := range wantEvents {
+		groups, ok := definition.Hooks[event]
+		if !ok || len(groups) == 0 || len(groups[0].Hooks) == 0 {
+			t.Errorf("Codex hooks.json missing usable %s hook", event)
+			continue
 		}
+		if groups[0].Matcher != ".*" {
+			t.Errorf("Codex %s matcher = %q, want .*", event, groups[0].Matcher)
+		}
+		hook := groups[0].Hooks[0]
+		if hook.Type != "command" || !strings.Contains(hook.Command, "${PLUGIN_ROOT}/scripts/run-hook.sh") {
+			t.Errorf("Codex %s hook = %+v", event, hook)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(plug, "scripts", "run-hook.sh")); err != nil {
+		t.Fatalf("Codex hook runner missing: %v", err)
+	}
+	info, err := os.Stat(filepath.Join(plug, "scripts", "run-hook.sh"))
+	if err != nil || info.Mode().Perm()&0111 == 0 {
+		t.Fatalf("Codex hook runner must be executable: %v", err)
+	}
+}
+
+func TestCodexHookCreatesSessionState(t *testing.T) {
+	bin := buildTestBinary(t)
+	bundle := bundledPluginFixture(t, "freeinference-companion", bin)
+	tmpHome := t.TempDir()
+	cacheDir := filepath.Join(tmpHome, "cache")
+	codexHome := filepath.Join(tmpHome, "codex")
+	if err := os.MkdirAll(codexHome, 0700); err != nil {
+		t.Fatal(err)
+	}
+	config := `model_provider = "freeinference"
+
+[model_providers.freeinference]
+base_url = "https://freeinference.org/v1"
+env_key = "CODEX_FI_KEY"
+`
+	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	env := append(os.Environ(),
+		"HOME="+tmpHome,
+		"CODEX_HOME="+codexHome,
+		"CODEX_FI_KEY=test-key-codex",
+		"FI_CACHE_DIR="+cacheDir,
+		"FI_DISABLED=",
+		"FI_NO_BACKGROUND=1",
+		"FI_AUTO_REFRESH=0",
+		"FREEINFERENCE_BASE_URL=",
+		"FREEINFERENCE_API_KEY=",
+		"PATH=/usr/bin:/bin",
+		"PLUGIN_ROOT="+bundle,
+	)
+	payload := `{"session_id":"codex-session-123","hook_event_name":"SessionStart","model":"deepseek-v4-flash","source":"startup"}`
+	stdout, _, exitCode := runHook(t, filepath.Join(pluginDir("freeinference-companion"), "scripts", "run-hook.sh"), "SessionStart", env, payload)
+	if exitCode != 0 || stdout != "" {
+		t.Fatalf("Codex hook result: exit=%d stdout=%q", exitCode, stdout)
+	}
+	sessionsOut, errOut, exitCode := runFI(t, bin, tmpHome, cacheDir, "sessions", "--json", "--include-identifiers")
+	if exitCode != 0 {
+		t.Fatalf("freeinference sessions exited %d; stderr: %s", exitCode, errOut)
+	}
+	if !strings.Contains(sessionsOut, "codex-session-123") {
+		t.Fatalf("sessions output does not contain Codex session ID:\n%s", sessionsOut)
 	}
 }
 

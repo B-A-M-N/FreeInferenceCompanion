@@ -104,12 +104,13 @@ Claude Code configuration, not a Codex profile.
 ## 4. Optional: FreeInference Companion plugin
 
 The companion plugin is separate from the model-provider configuration above.
-It is intentionally skill-only: it provides user-requested provider
-diagnostics, model-discovery guidance, and setup help without installing
-lifecycle hooks, proxying prompts, rewriting requests, or adding inference
-calls. Metadata refresh is disabled by default; `FI_AUTO_REFRESH=1` is an
-explicit opt-in for throttled, detached refresh work from the CLI's supported
-lifecycle paths (Codex itself does not install those hooks).
+It installs standard local Codex lifecycle hooks, diagnostic skills, and a
+bounded rollout reader. The hooks record only sanitized lifecycle metadata;
+the rollout reader extracts model, session, context-window, input/cache, and
+output counters from Codex's local JSONL records. It does not proxy prompts,
+rewrite requests, scrape the screen, or add inference calls. Metadata refresh
+is disabled by default; `FI_AUTO_REFRESH=1` is an explicit opt-in for
+throttled, detached refresh work.
 
 Install it through Codex's supported marketplace flow:
 
@@ -140,8 +141,18 @@ freeinference codex-footer uninstall
 ```
 
 This is native Codex rendering, not scraped screen telemetry. The companion
-does not treat `context-remaining` as a hook field or as live plugin context
-usage.
+does not treat `context-remaining` as a hook field. Its rich line uses the
+latest bounded local rollout record instead.
+
+To show the rich line beside Codex's native footer in a tmux terminal, the
+HarvardCodex launcher can install a status-right segment backed by:
+
+```bash
+freeinference codex-footer render --color=never
+```
+
+The command is local-only and returns no line until a completed rollout usage
+record exists.
 
 The stateless service command is available regardless of provider activation:
 
@@ -154,15 +165,17 @@ It makes only an unauthenticated GET to `https://status.freeinference.org/api/st
 
 Codex provider/session boundaries are intentional:
 
-- Supported: explicit local session inspection, provider configuration
-  diagnostics, model discovery, native Codex footer configuration, `doctor`,
-  `dashboard`, and public `fi-status`.
-- Unsupported: live context percentage, cache read/write counts, and
-  compaction effectiveness.
+- Supported: lifecycle session recording, rollout-backed context percentage,
+  cache read/write counts, provider configuration diagnostics, model discovery,
+  native Codex footer configuration, `doctor`, `dashboard`, and public
+  `fi-status`.
+- Still unavailable: server-side cache policy and compaction effectiveness;
+  those require provider-side evidence that local rollout records do not
+  contain.
 
 `freeinference context --client codex` and `freeinference cache --client codex`
-therefore report `unavailable`; they do not infer zeros from absent Codex
-telemetry.
+read the latest local rollout counters; before the first completed turn they
+report an explicit pending/unavailable state rather than inferring zeros.
 
 When Codex does not expose its active profile to child commands, provider
 selection is reported as unverified. The companion remains fail-closed rather
@@ -195,17 +208,12 @@ After installation, these skills are available in the Codex TUI:
 - `$freeinference-sessions`
 - `$freeinference-refresh`
 
-Codex does not expose an arbitrary script-backed FreeInference status line,
-live context-window counts, or cache-token metrics through this package.
-Accordingly, unavailable values are reported as `unavailable` rather than
-invented. Use `freeinference models`,
-`freeinference doctor`, or `freeinference status --client codex` when you
-explicitly want the available local/provider state. Codex-unavailable values
-are reported as `unavailable`, not `unknown` or zero. `$freeinference-status`
-also presents the verified provider configuration and this explicit
-availability boundary by running the local `status`, `context`, and `cache`
-commands together. It does not create a session record or make a provider
-request.
+Codex's native footer still does not accept an arbitrary script-backed status
+line. The Companion therefore preserves that footer and exposes the rich line
+through `freeinference codex-footer render`, `freeinference status`, and the
+optional tmux launcher integration. The line uses bounded local rollout data;
+it does not create a provider request. `$freeinference-status` presents the
+same rollout-backed status, context, and cache diagnostics together.
 
 For interactive reports, choose the amount of detail explicitly:
 
@@ -217,8 +225,9 @@ freeinference status --client codex --level detailed
 
 Set the usual level once with `freeinference config set reporting.level
 standard`; `FI_REPORTING_LEVEL` is a non-persistent override. These levels
-describe only local companion state—Codex-unavailable context and cache
-telemetry remains `unavailable`.
+describe only local companion state. Codex context/cache telemetry is marked
+with its rollout source and remains pending until a completed usage event is
+present.
 
 ## References
 

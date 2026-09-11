@@ -64,8 +64,8 @@ Route matching is exact by client: Claude uses `https://freeinference.org/anthro
 | `freeinference sessions [--include-identifiers] [--json]` | List locally retained sessions |
 | `freeinference snapshot --json [--client <type>] [--session <id>]` | Print a machine-readable local session view |
 | `freeinference render --mode line\|standard\|expanded [--client <type>] [--session <id>]` | Render a local panel or footer view |
-| `freeinference context [--client <type>] [--session <id>]` | Show local context pressure; Codex reports unavailable |
-| `freeinference cache [--client <type>] [--session <id>] [--json]` | Show local cache classification; Codex reports unavailable |
+| `freeinference context [--client <type>] [--session <id>]` | Show local context pressure; Codex uses its latest local rollout usage |
+| `freeinference cache [--client <type>] [--session <id>] [--json]` | Show local cache classification; Codex uses bounded rollout counters |
 | `freeinference report [--client <type>] [--session <id>] [--format markdown\|json]` | Generate a sanitized local support report |
 | `freeinference failures [--client <type>] [--session <id>] [--model <name>] [--since <duration\|timestamp>] [--json]` | Aggregate retained local failure incidents |
 | `freeinference models [--model <name>] [--refresh]` | List the cached model catalog; `--refresh` makes one catalog request |

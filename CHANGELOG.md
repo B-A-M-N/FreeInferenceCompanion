@@ -2,6 +2,26 @@
 
 All notable changes to FreeInference Companion are recorded here.
 
+## 0.1.3 — 2026-09-11
+
+Codex observability and install parity release.
+
+### Added
+
+- Lifecycle-enabled Codex plugin payload with standard hooks, an executable
+  runner, and platform-bundled binaries.
+- Bounded local Codex rollout parsing for model, context-window, fresh-input,
+  cache-read/cache-write, and output counters.
+- Rich Codex status/render/report/context/cache surfaces, including
+  `codex-footer render` for tmux status segments alongside the native footer.
+
+### Fixed
+
+- Codex installs no longer ship as skill-only or report rollout-backed metrics
+  as permanently unavailable.
+- Installer, doctor, package-smoke, and plugin-clean-install checks now verify
+  the complete Codex hooks/runner/binary payload.
+
 ## 0.1.2 — 2026-09-11
 
 Feature and hardening release following the first public release.

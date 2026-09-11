@@ -31,6 +31,13 @@ type CodexProxyAttestation struct {
 // callers that need explicit cleanup or diagnostics.
 func CodexProxyAttestationPath(home, root string) string { return codexProxyPath(home, root) }
 
+// LoadCodexProxyAttestation returns the explicit upstream declaration for a
+// loopback Codex environment. Callers must still validate the selected route
+// with VerifyCodexConfigRoute before using the declaration for activation.
+func LoadCodexProxyAttestation(home, root string) (*CodexProxyAttestation, error) {
+	return loadCodexProxyAttestation(home, root)
+}
+
 func codexProxyPath(home, root string) string {
 	id, err := canonicalRootPath(root)
 	if err != nil {
