@@ -70,6 +70,29 @@ hooks, proxy inference traffic, or make background API requests by default.
 Use `FI_AUTO_REFRESH=1` only when you explicitly want stale metadata refresh;
 those refreshes are throttled, coalesced, and circuit-breaker protected.
 
+## Additional client environments
+
+`freeinference install` targets canonical `~/.claude` and `~/.codex`, then
+reconciles alternate Claude/Codex environments whose selected configuration
+routes to an approved FreeInference `/v1` endpoint. Bounded discovery examines
+`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, immediate hidden Codex homes under `$HOME`,
+and `$XDG_CONFIG_HOME` to two directory levels. It does not crawl projects,
+backups, or arbitrary launcher scripts.
+
+For a root discovery cannot infer, register it explicitly:
+
+```bash
+freeinference integrations add --client claude-code --root /path/to/profile
+freeinference integrations add --client codex --root /path/to/codex-home
+freeinference integrations list
+freeinference integrations remove --client codex --root /path/to/codex-home
+```
+
+Use `freeinference install --no-integration-discovery` to restrict fan-out to
+canonical roots. Existing unowned Companion directories are never overwritten.
+Already-installed profiles are upgraded on later installs, including when the
+core release version is unchanged.
+
 ## HarvardClaude and other local proxies
 
 If a launcher routes Claude through a local compatibility proxy, load the

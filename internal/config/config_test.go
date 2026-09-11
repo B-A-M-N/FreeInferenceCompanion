@@ -433,3 +433,27 @@ func TestZeroValuePersisted(t *testing.T) {
 		t.Errorf("diagnostic_probes should be false")
 	}
 }
+
+func TestAttributionCommitModeDefaultsOffAndValidates(t *testing.T) {
+	t.Setenv("FI_CONFIG_DIR", t.TempDir())
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Attribution.CommitMode != "off" {
+		t.Fatalf("default mode = %q", cfg.Attribution.CommitMode)
+	}
+	if err := SetField(cfg, "attribution.commit_mode", "append"); err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load()
+	if err != nil || loaded.Attribution.CommitMode != "append" {
+		t.Fatalf("loaded=%+v err=%v", loaded, err)
+	}
+	if err := SetField(cfg, "attribution.commit_mode", "always"); err == nil {
+		t.Fatal("invalid attribution mode accepted")
+	}
+}

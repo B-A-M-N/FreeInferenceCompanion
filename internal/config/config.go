@@ -36,14 +36,31 @@ const (
 )
 
 type Config struct {
-	SchemaVersion int             `json:"schema_version"`
-	Context       ContextConfig   `json:"context"`
-	Cache         CacheConfig     `json:"cache"`
-	Refresh       RefreshConfig   `json:"refresh"`
-	Reporting     ReportingConfig `json:"reporting"`
-	Provider      ProviderConfig  `json:"provider"`
-	Privacy       PrivacyConfig   `json:"privacy"`
-	Tracing       TracingConfig   `json:"tracing"`
+	SchemaVersion int               `json:"schema_version"`
+	Context       ContextConfig     `json:"context"`
+	Cache         CacheConfig       `json:"cache"`
+	Refresh       RefreshConfig     `json:"refresh"`
+	Reporting     ReportingConfig   `json:"reporting"`
+	Provider      ProviderConfig    `json:"provider"`
+	Privacy       PrivacyConfig     `json:"privacy"`
+	Tracing       TracingConfig     `json:"tracing"`
+	Attribution   AttributionConfig `json:"attribution"`
+}
+
+// AttributionConfig controls optional provenance appended to already
+// authorized agent commits. It never originates commits.
+type AttributionConfig struct {
+	CommitMode string `json:"commit_mode"`
+}
+
+// ValidCommitAttributionMode reports whether mode is one of the mutually
+// exclusive attribution policies.
+func ValidCommitAttributionMode(mode string) bool {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "off", "append", "standalone":
+		return true
+	}
+	return false
 }
 
 type ContextConfig struct {
@@ -121,6 +138,8 @@ func defaultConfig() Config {
 		// Non-Companion launches are unaffected because the launcher is the only
 		// component that injects the header.
 		Tracing: TracingConfig{Enabled: true},
+		// Git attribution must never change behavior unless explicitly enabled.
+		Attribution: AttributionConfig{CommitMode: "off"},
 	}
 }
 
@@ -154,6 +173,9 @@ type EffectiveConfig struct {
 	}
 	Tracing struct {
 		Enabled EffectiveValue[bool]
+	}
+	Attribution struct {
+		CommitMode EffectiveValue[string]
 	}
 	Invalid   []string `json:"invalid,omitempty"`
 	LoadError string   `json:"load_error,omitempty"`
@@ -465,6 +487,12 @@ func SetField(cfg *Config, key, value string) error {
 			return err
 		}
 		cfg.Provider.AllowInsecureLocalhost = v
+	case "attribution.commit_mode":
+		mode := strings.ToLower(strings.TrimSpace(value))
+		if !ValidCommitAttributionMode(mode) {
+			return fmt.Errorf("invalid attribution.commit_mode %q (use off, append, or standalone)", value)
+		}
+		cfg.Attribution.CommitMode = mode
 	default:
 		return fmt.Errorf("unknown config key: %s", key)
 	}
@@ -505,6 +533,9 @@ func Validate(cfg *Config) error {
 	}
 	if !ValidReportingLevel(cfg.Reporting.Level) {
 		return fmt.Errorf("reporting.level must be summary, standard, or detailed")
+	}
+	if !ValidCommitAttributionMode(cfg.Attribution.CommitMode) {
+		return fmt.Errorf("attribution.commit_mode must be off, append, or standalone")
 	}
 	return nil
 }
@@ -645,6 +676,12 @@ func (m *Manager) Resolve() (*EffectiveConfig, error) {
 	eff.Privacy.DiagnosticProbes = resolveBool("FI_DIAGNOSTIC_PROBES", cfg.Privacy.DiagnosticProbes, cfgLoaded, resolveSrc, envBool, nil)
 	eff.Tracing.Enabled = resolveBool("FI_TRACING", cfg.Tracing.Enabled, cfgLoaded, resolveSrc, envBool, nil)
 	eff.Provider.AllowInsecureLocalhost = resolveBool("FI_ALLOW_INSECURE_LOCALHOST", cfg.Provider.AllowInsecureLocalhost, cfgLoaded, resolveSrc, envBool, nil)
+	eff.Attribution.CommitMode = resolveString("FI_ATTRIBUTION_COMMIT_MODE", cfg.Attribution.CommitMode, resolveSrc, envString, func(v string) error {
+		if !ValidCommitAttributionMode(v) {
+			return fmt.Errorf("must be off, append, or standalone, got %q", v)
+		}
+		return nil
+	})
 
 	validateEffective(eff)
 	if loadErr != nil {

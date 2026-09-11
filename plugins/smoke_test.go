@@ -360,6 +360,7 @@ func TestClaudeCodeHookEventsMatchExpected(t *testing.T) {
 		"PreCompact":       true,
 		"PostCompact":      true,
 		"PostModelSwitch":  true,
+		"PreToolUse":       true,
 		"Stop":             true,
 		"StopFailure":      true,
 	}

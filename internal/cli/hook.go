@@ -8,6 +8,8 @@ import (
 
 	"github.com/b-a-m-n/freeinference-companion/internal/adapters"
 	"github.com/b-a-m-n/freeinference-companion/internal/background"
+	"github.com/b-a-m-n/freeinference-companion/internal/commitattribution"
+	"github.com/b-a-m-n/freeinference-companion/internal/config"
 	"github.com/b-a-m-n/freeinference-companion/internal/runtime"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
 	"github.com/b-a-m-n/freeinference-companion/internal/tracing"
@@ -47,6 +49,14 @@ func runHook(args []string, stdin io.Reader, stdout io.Writer, _ io.Writer) {
 	// or the network and must be skipped when inactive.
 	activation := runtime.EvaluateForClient(client)
 	if !activation.Active {
+		return
+	}
+
+	// PreToolUse is special: it fires for every Bash command and must not
+	// initialize cache/session state, particularly because attribution is
+	// default-off. Process it before any state filesystem work.
+	if eventName == "PreToolUse" {
+		handlePreToolUse(clientType, client, stdin, stdout, activation)
 		return
 	}
 
@@ -223,4 +233,52 @@ func maybeRequestDetachedRefreshWith(paths state.Paths, activation runtime.Activ
 
 func automaticRefreshEnabled() bool {
 	return os.Getenv("FI_AUTO_REFRESH") == "1"
+}
+
+func handlePreToolUse(clientType string, _ runtime.ClientKind, stdin io.Reader, stdout io.Writer, _ runtime.Activation) {
+	raw, err := io.ReadAll(io.LimitReader(stdin, 1<<20))
+	if err != nil || len(raw) == 0 {
+		return
+	}
+	var input struct {
+		Model         string
+		ToolName      string                     `json:"tool_name"`
+		ToolUseID     string                     `json:"tool_use_id"`
+		ToolInput     map[string]json.RawMessage `json:"tool_input"`
+		HookEventName string                     `json:"hook_event_name"`
+	}
+	if err := json.Unmarshal(raw, &input); err != nil {
+		return
+	}
+	if input.ToolName != "Bash" {
+		return
+	}
+	rawCommand, ok := input.ToolInput["command"]
+	if !ok {
+		return
+	}
+	var command string
+	if err := json.Unmarshal(rawCommand, &command); err != nil {
+		return
+	}
+	var mode string
+	if cfg, cfgErr := config.Load(); cfgErr == nil {
+		mode = cfg.Attribution.CommitMode
+	}
+	policy := commitattribution.Policy{Mode: commitattribution.CommitMode(mode), Client: clientType, Model: input.Model}
+	rewritten, changed, _ := commitattribution.Rewrite(command, policy)
+	if !changed {
+		return
+	}
+	updatedInput := make(map[string]json.RawMessage, len(input.ToolInput))
+	for key, value := range input.ToolInput {
+		updatedInput[key] = value
+	}
+	if data, err := json.Marshal(rewritten); err == nil {
+		updatedInput["command"] = data
+	}
+	output := schema.ToolHookOutput{UpdatedInput: updatedInput}
+	if data, err := json.Marshal(output); err == nil {
+		fmt.Fprintln(stdout, string(data))
+	}
 }

@@ -90,6 +90,8 @@ traffic direct and keeping optional network behavior under the user's control.
 - Validated account-budget projection when authoritative usage data exists.
 - Sanitized failure summaries and support reports.
 - Claude status-line integration and Codex's native footer configuration.
+- Multi-environment Claude/Codex installation and ownership-safe reconciliation.
+- Optional, default-off inference attribution for already-authorized agent commits.
 
 Warnings are advisory. Unknown telemetry stays unknown rather than becoming a
 made-up zero or an overconfident conclusion.
@@ -121,6 +123,8 @@ codex plugin marketplace add B-A-M-N/FreeInferenceCompanion --ref master
 codex plugin add freeinference-companion@freeinference-companion
 codex plugin list --json
 ```
+
+Alternate Claude/Codex configuration roots are reconciled only when their selected route proves FreeInference. For arbitrary roots, see [Installation](docs/INSTALL.md#additional-client-environments). `install --no-integration-discovery` restricts fan-out to canonical roots.
 
 Configure the provider and profiles using [Codex with
 FreeInference](docs/codex.md). The Codex package is skill-only and uses Codex's
@@ -258,3 +262,7 @@ freeinference fi-status --json
 ## License
 
 MIT
+
+## Commit attribution
+
+FreeInference attribution is default-off. Use `freeinference attribution set off|append|standalone`. Enabled modes can rewrite an already-authorized agent `git commit -m` only by appending `Inference: <model> via FreeInference.org` and a support link. Companion never stages, creates, or amends commits, never uses a `Co-Authored-By` identity, and never changes Claude's native attribution setting. See `docs/CLI.md` and `SECURITY.md`.

@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 
+	"github.com/b-a-m-n/freeinference-companion/internal/clientenv"
 	"github.com/b-a-m-n/freeinference-companion/pkg/version"
 )
 
@@ -57,12 +58,14 @@ func installOrUpdate(opts Options, stdout, stderr io.Writer, update bool) (*Resu
 	if err != nil {
 		return nil, fmt.Errorf("fetch manifest: %w", err)
 	}
+	coreCurrent := false
 	if installedVersion != "" {
 		comparison := compareVersions(manifest.Version, installedVersion)
-		if comparison < 0 || (comparison == 0 && !opts.Force && requestedComponentsReady(metadata, paths, manifest.Version, opts)) {
-			fmt.Fprintf(stdout, "Already at latest installed version: %s\n", installedVersion)
+		if comparison < 0 {
+			fmt.Fprintf(stdout, "Refusing downgrade: installed version %s is newer than %s\n", installedVersion, manifest.Version)
 			return &Result{Version: installedVersion, OldVersion: installedVersion, AlreadyLatest: true}, nil
 		}
+		coreCurrent = comparison == 0 && !opts.Force && requestedComponentsReady(metadata, paths, manifest.Version, opts)
 	}
 
 	result := &Result{Version: manifest.Version, OldVersion: installedVersion}
@@ -79,6 +82,17 @@ func installOrUpdate(opts Options, stdout, stderr io.Writer, update bool) (*Resu
 	fmt.Fprintf(stdout, "  Platform: %s\n  URL: %s\n", opts.Platform, pi.URL)
 	if opts.DryRun {
 		fmt.Fprintln(stdout, "  Dry run: no files will be downloaded or changed.")
+		return result, nil
+	}
+	if coreCurrent {
+		result := &Result{Version: installedVersion, OldVersion: installedVersion, AlreadyLatest: true}
+		integrationErr := withInstallerLock(paths, func() error {
+			return reconcileClientEnvironmentsFromCore(paths, opts, installedVersion, result, stdout)
+		})
+		if integrationErr != nil {
+			return nil, integrationErr
+		}
+		fmt.Fprintf(stdout, "Already at latest installed version: %s\n", installedVersion)
 		return result, nil
 	}
 	tmpZip, err := uniqueTempFile(".freeinference-release-*.zip")
@@ -118,11 +132,11 @@ func installOrUpdate(opts Options, stdout, stderr io.Writer, update bool) (*Resu
 			}
 			if latestVersion := installedComponentsVersion(latest, found, paths, opts); latestVersion != "" {
 				cmp := compareVersions(manifest.Version, latestVersion)
-				if cmp < 0 || (cmp == 0 && !opts.Force && requestedComponentsReady(latest, paths, manifest.Version, opts)) {
+				if cmp == 0 && !opts.Force && requestedComponentsReady(latest, paths, manifest.Version, opts) {
 					result.Version = latestVersion
 					result.OldVersion = latestVersion
 					result.AlreadyLatest = true
-					return nil
+					return reconcileClientEnvironmentsFromCore(paths, opts, latestVersion, result, stdout)
 				}
 			}
 		}
@@ -133,6 +147,14 @@ func installOrUpdate(opts Options, stdout, stderr io.Writer, update bool) (*Resu
 	if result.AlreadyLatest {
 		fmt.Fprintf(stdout, "Already at latest installed version: %s\n", result.Version)
 		return result, nil
+	}
+	if !opts.NoPlugin {
+		integrationErr := withInstallerLock(paths, func() error {
+			return reconcileClientEnvironmentsFromCore(paths, opts, manifest.Version, result, stdout)
+		})
+		if integrationErr != nil {
+			return nil, integrationErr
+		}
 	}
 	result.Installed = true
 	result.Updated = update && result.OldVersion != ""
@@ -677,8 +699,11 @@ func UninstallWithResult(paths Paths, stdout, stderr io.Writer) (*UninstallResul
 			if err := validateOwnedDirectoryForRemoval(paths.CodexMarketplaceDir, metadata.CodexMarketplaceSHA256); err != nil {
 				return err
 			}
-			result.Warnings = append(result.Warnings, unregisterCodexMarketplaceStatus()...)
+			result.Warnings = append(result.Warnings, unregisterCodexMarketplaceStatus(paths)...)
 		}
+		alternateRemoved, alternateWarnings := UninstallClientEnvironments(paths.home(), stdout)
+		result.Removed = append(result.Removed, alternateRemoved...)
+		result.Warnings = append(result.Warnings, alternateWarnings...)
 
 		tx := &installTransaction{}
 		failed := func(err error) error { tx.rollback(); return err }
@@ -798,34 +823,67 @@ func validateOwnedDirectoryForRemoval(path, expectedDigest string) error {
 	return nil
 }
 
-func unregisterCodexMarketplaceStatus() []string {
+func unregisterCodexMarketplaceStatus(paths Paths) []string {
 	codex, err := exec.LookPath("codex")
 	if err != nil {
 		return []string{"Codex CLI was not found; native plugin registration may remain"}
 	}
 	var warnings []string
-	if err := runCodexPluginCommand(codex, "plugin", "remove", "freeinference-companion@freeinference-companion-local", "--json"); err != nil {
+	if err := runCodexPluginCommandForHome(codex, paths.CodexHome, "plugin", "remove", "freeinference-companion@freeinference-companion-local", "--json"); err != nil {
 		warnings = append(warnings, "Codex plugin registration cleanup did not complete")
 	}
-	if err := runCodexPluginCommand(codex, "plugin", "marketplace", "remove", "freeinference-companion-local", "--json"); err != nil {
+	if err := runCodexPluginCommandForHome(codex, paths.CodexHome, "plugin", "marketplace", "remove", "freeinference-companion-local", "--json"); err != nil {
 		warnings = append(warnings, "Codex marketplace registration cleanup did not complete")
 	}
 	return warnings
 }
 
 func registerCodexMarketplaceStatus(paths Paths, stdout io.Writer) (bool, []string) {
+	return registerCodexMarketplaceForHome(paths.CodexHome, paths.CodexMarketplaceDir, stdout)
+}
+
+func registerCodexMarketplaceForHome(codexHome, marketplacePath string, stdout io.Writer) (bool, []string) {
 	codex, err := exec.LookPath("codex")
 	if err != nil {
 		return false, []string{"Codex plugin files installed; Codex CLI was not found for native registration"}
 	}
-	if err := runCodexPluginCommand(codex, "plugin", "marketplace", "add", paths.CodexMarketplaceDir, "--json"); err != nil {
+	if err := runCodexPluginCommandForHome(codex, codexHome, "plugin", "marketplace", "add", marketplacePath, "--json"); err != nil {
 		return false, []string{"Codex marketplace registration did not complete; run `codex plugin marketplace add` manually"}
 	}
-	if err := runCodexPluginCommand(codex, "plugin", "add", "freeinference-companion@freeinference-companion-local", "--json"); err != nil {
+	if err := runCodexPluginCommandForHome(codex, codexHome, "plugin", "add", "freeinference-companion@freeinference-companion-local", "--json"); err != nil {
 		return false, []string{"Codex plugin installation did not complete; run `codex plugin add freeinference-companion@freeinference-companion-local` manually"}
 	}
 	if stdout != nil {
 		fmt.Fprintln(stdout, "  Registered and installed the Codex plugin through its local marketplace.")
 	}
 	return true, nil
+}
+
+func reconcileClientEnvironmentsFromCore(paths Paths, opts Options, version string, result *Result, stdout io.Writer) error {
+	if opts.NoPlugin {
+		return nil
+	}
+	integrations, err := ReconcileClientEnvironments(reconcileOptions{
+		home: paths.home(),
+		pluginSources: map[clientenv.Client]string{
+			clientenv.ClientClaudeCode: paths.claudePluginPath(),
+		},
+		version:   version,
+		dryRun:    opts.DryRun,
+		discovery: !opts.NoIntegrationDiscovery,
+		stdout:    stdout,
+	})
+	if err != nil {
+		return fmt.Errorf("reconcile client environments: %w", err)
+	}
+	for _, integration := range integrations {
+		if integration.Action == "installed" || integration.Action == "planned" {
+			result.IntegrationsChanged = true
+		}
+		if integration.Warning != "" {
+			result.Warnings = append(result.Warnings, fmt.Sprintf("%s environment %s: %s", integration.Client, integration.ConfigRoot, integration.Warning))
+		}
+	}
+	result.EnvironmentIntegrations = integrations
+	return nil
 }

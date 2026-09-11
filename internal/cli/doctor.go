@@ -8,11 +8,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/adapters"
 	"github.com/b-a-m-n/freeinference-companion/internal/api"
+	"github.com/b-a-m-n/freeinference-companion/internal/clientenv"
 	"github.com/b-a-m-n/freeinference-companion/internal/config"
 	"github.com/b-a-m-n/freeinference-companion/internal/install"
+	"github.com/b-a-m-n/freeinference-companion/internal/installer"
 	"github.com/b-a-m-n/freeinference-companion/internal/runtime"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
 	"github.com/b-a-m-n/freeinference-companion/internal/tracing"
@@ -80,6 +83,9 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 
 	// 6. Status-line wrapper valid.
 	add("Status-line wrapper", checkStatusLineWrapper())
+	for _, environmentCheck := range checkClientEnvironmentIntegrations() {
+		add(environmentCheck.name, environmentCheck.result)
+	}
 
 	// 7. Provider detection. Generic environment detection remains useful for
 	// provider-level setups, while the client-specific checks below prevent a
@@ -676,6 +682,126 @@ func checkStatusLineWrapper() api.CheckResult {
 	return api.CheckResult{State: api.CheckPass}
 }
 
+func checkClientEnvironmentIntegrations() []doctorCheck {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return []doctorCheck{{"Client environments", api.CheckResult{State: api.CheckUnknown, Detail: "no home directory"}}}
+	}
+	environments, warnings := clientenv.Discover(home)
+	var checks []doctorCheck
+	for _, warning := range warnings {
+		checks = append(checks, doctorCheck{"Client environments", api.CheckResult{State: api.CheckWarn, Detail: warning.Error()}})
+	}
+	integrations, integrationErr := installer.ListClientIntegrations(home)
+	if integrationErr != nil {
+		checks = append(checks, doctorCheck{"Client environments", api.CheckResult{State: api.CheckWarn, Detail: "alternate ownership records unavailable"}})
+	}
+	owned := make(map[string]installer.IntegrationSummary)
+	for _, integration := range integrations {
+		owned[integration.Client+"\x00"+filepath.Clean(integration.ConfigRoot)] = integration
+	}
+	for _, environment := range environments {
+		clientLabel := "Claude"
+		if environment.Client == clientenv.ClientCodex {
+			clientLabel = "Codex"
+		}
+		prefix := clientLabel + " environment " + environment.ConfigRoot
+		manifest := filepath.Join(environment.ConfigRoot, "plugins", "freeinference-companion")
+		_, ownershipRecorded := owned[string(environment.Client)+"\x00"+filepath.Clean(environment.ConfigRoot)]
+		if environment.Client == clientenv.ClientClaudeCode {
+			hook := checkClaudeEnvironmentHook(environment.ConfigRoot)
+			if hook.State == api.CheckPass {
+				checks = append(checks, doctorCheck{prefix, api.CheckResult{State: hook.State, Detail: "plugin installed; " + hook.Detail}})
+			} else if ownershipRecorded {
+				checks = append(checks, doctorCheck{prefix, api.CheckResult{State: api.CheckWarn, Detail: "ownership recorded; " + hook.Detail}})
+			} else {
+				checks = append(checks, doctorCheck{prefix, hook})
+			}
+			continue
+		}
+		manifest = filepath.Join(manifest, ".codex-plugin", "plugin.json")
+		pluginResult := api.CheckResult{State: api.CheckUnknown, Detail: "plugin not installed"}
+		if _, err := os.Stat(manifest); err == nil {
+			pluginResult = api.CheckResult{State: api.CheckPass, Detail: "plugin installed"}
+		} else if ownershipRecorded {
+			pluginResult = api.CheckResult{State: api.CheckWarn, Detail: "ownership recorded but plugin missing"}
+		}
+		checks = append(checks, doctorCheck{prefix, pluginResult})
+		checks = append(checks, doctorCheck{prefix + " registration", checkCodexEnvironmentRegistration(environment.ConfigRoot)})
+		checks = append(checks, doctorCheck{prefix + " hook", checkCodexEnvironmentHook(environment.ConfigRoot)})
+		checks = append(checks, doctorCheck{prefix + " hooks feature", checkCodexEnvironmentHooksFeature(environment.ConfigRoot)})
+	}
+	return checks
+}
+
+func checkClaudeEnvironmentHook(root string) api.CheckResult {
+	hookPath := filepath.Join(root, "plugins", "freeinference-companion", "hooks", "hooks.json")
+	data, err := readDoctorFile(hookPath, 1<<20)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return api.CheckResult{State: api.CheckUnknown, Detail: "plugin hook definition not installed"}
+		}
+		return api.CheckResult{State: api.CheckUnknown, Detail: "plugin hook definition unavailable"}
+	}
+	var definition struct {
+		Hooks map[string]json.RawMessage `json:"hooks"`
+	}
+	if json.Unmarshal(data, &definition) != nil || len(definition.Hooks) == 0 {
+		return api.CheckResult{State: api.CheckWarn, Detail: "plugin hook definition is invalid"}
+	}
+	runner := filepath.Join(root, "plugins", "freeinference-companion", "scripts", "run-hook.sh")
+	info, err := os.Lstat(runner)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&0111 == 0 {
+		return api.CheckResult{State: api.CheckWarn, Detail: "plugin hook runner is missing or not executable"}
+	}
+	return api.CheckResult{State: api.CheckPass, Detail: "hooks and executable runner installed"}
+}
+
+func checkCodexEnvironmentRegistration(root string) api.CheckResult {
+	cacheRoot := filepath.Join(root, "plugins", "cache", "freeinference-companion-local", "freeinference-companion")
+	versions, _ := filepath.Glob(filepath.Join(cacheRoot, "*"))
+	for _, version := range versions {
+		if codexPluginManifest(version) {
+			return api.CheckResult{State: api.CheckPass, Detail: "registration active at " + version}
+		}
+	}
+	if codexPluginManifest(filepath.Join(root, "plugins", "freeinference-companion")) {
+		return api.CheckResult{State: api.CheckWarn, Detail: "plugin files present but marketplace registration not established"}
+	}
+	return api.CheckResult{State: api.CheckUnknown, Detail: "marketplace registration not established"}
+}
+
+func checkCodexEnvironmentHook(root string) api.CheckResult {
+	pluginRoot := filepath.Join(root, "plugins", "freeinference-companion")
+	data, err := readDoctorFile(filepath.Join(pluginRoot, "hooks", "hooks.json"), 1<<20)
+	if err != nil || !validCodexHookDefinition(data) {
+		return api.CheckResult{State: api.CheckUnknown, Detail: "hooks definition and executable runner not found"}
+	}
+	runner := filepath.Join(pluginRoot, "scripts", "run-hook.sh")
+	info, err := os.Lstat(runner)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&0111 == 0 {
+		return api.CheckResult{State: api.CheckUnknown, Detail: "hooks definition and executable runner not found"}
+	}
+	return api.CheckResult{State: api.CheckPass, Detail: "hooks and executable runner installed"}
+}
+
+func checkCodexEnvironmentHooksFeature(root string) api.CheckResult {
+	data, err := readDoctorFile(filepath.Join(root, "config.toml"), 1<<20)
+	if os.IsNotExist(err) {
+		return api.CheckResult{State: api.CheckPass, Detail: "hooks enabled by default (no config override)"}
+	}
+	if err != nil {
+		return api.CheckResult{State: api.CheckUnknown, Detail: "Codex feature configuration unavailable"}
+	}
+	if enabled, found := codexHooksFeatureOverride(string(data)); found {
+		if !enabled {
+			return api.CheckResult{State: api.CheckWarn, Detail: "hooks disabled in Codex config"}
+		}
+		return api.CheckResult{State: api.CheckPass, Detail: "hooks enabled in Codex config"}
+	}
+	return api.CheckResult{State: api.CheckPass, Detail: "hooks enabled by default (no config override)"}
+}
+
 // endpointFailDetail returns a sanitized, user-facing description of an
 // endpoint-validation error. It never echoes the raw URL (which may carry
 // userinfo or credential-shaped substrings); it reports the failure category.
@@ -694,4 +820,100 @@ func lookPathFI() (string, error) {
 		}
 	}
 	return "", fmt.Errorf("freeinference not found on PATH")
+}
+
+func readDoctorFile(path string, maxBytes int64) ([]byte, error) {
+	f, err := config.OpenNoFollow(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("file is not a regular file")
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("file exceeds the supported size limit")
+	}
+	return data, nil
+}
+
+type codexHookDefinition struct {
+	Hooks map[string][]codexHookGroup `json:"hooks"`
+}
+
+type codexHookGroup struct {
+	Hooks []codexHookCommand `json:"hooks"`
+}
+
+type codexHookCommand struct {
+	Type    string `json:"type"`
+	Command string `json:"command"`
+}
+
+func validCodexHookDefinition(data []byte) bool {
+	var definition codexHookDefinition
+	if json.Unmarshal(data, &definition) != nil || len(definition.Hooks) == 0 {
+		return false
+	}
+	for _, groups := range definition.Hooks {
+		for _, group := range groups {
+			for _, command := range group.Hooks {
+				if command.Type == "command" && isCodexRunnerInvocation(command.Command) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func isCodexRunnerInvocation(command string) bool {
+	const runner = "${PLUGIN_ROOT}/scripts/run-hook.sh"
+	command = strings.TrimSpace(command)
+	for _, token := range []string{runner, `"` + runner + `"`, `'` + runner + `'`} {
+		if command == token {
+			return true
+		}
+		if strings.HasPrefix(command, token) && len(command) > len(token) {
+			return unicode.IsSpace(rune(command[len(token)]))
+		}
+	}
+	return false
+}
+
+func codexHooksFeatureOverride(contents string) (bool, bool) {
+	table := ""
+	for _, raw := range strings.Split(contents, "\n") {
+		line := strings.TrimSpace(raw)
+		if hash := strings.IndexByte(line, '#'); hash >= 0 {
+			line = strings.TrimSpace(line[:hash])
+		}
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			table = strings.TrimSpace(line[1 : len(line)-1])
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if (table == "features" && key == "hooks") || key == "features.hooks" {
+			switch value {
+			case "true":
+				return true, true
+			case "false":
+				return false, true
+			}
+		}
+	}
+	return false, false
 }

@@ -45,6 +45,8 @@ func cmdInstall(paths state.Paths, rest []string, stdout, stderr io.Writer) int 
 			opts.NoBin = true
 		case "--force":
 			opts.Force = true
+		case "--no-integration-discovery":
+			opts.NoIntegrationDiscovery = true
 		case "--help", "-h":
 			fmt.Fprint(stdout, helpInstall)
 			return 0
@@ -95,6 +97,8 @@ func cmdUpdate(paths state.Paths, rest []string, stdout, stderr io.Writer) int {
 			opts.NoPlugin = true
 		case "--force":
 			opts.Force = true
+		case "--no-integration-discovery":
+			opts.NoIntegrationDiscovery = true
 		case "--help", "-h":
 			fmt.Fprint(stdout, helpUpdate)
 			return 0
@@ -137,7 +141,7 @@ func cmdUninstall(rest []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-const helpInstall = `Usage: freeinference install [--manifest <url>] [--platform <key>] [--dry-run] [--no-plugin] [--force] [--help]
+const helpInstall = `Usage: freeinference install [--manifest <url>] [--platform <key>] [--dry-run] [--no-plugin] [--force] [--no-integration-discovery] [--help]
 
 Download and install the FreeInference Companion CLI binary and Claude Code plugin.
 
@@ -158,10 +162,12 @@ Flags:
   --no-plugin          Skip plugin extraction
   --no-bin             Skip binary installation (extract plugins only)
   --force              Force reinstallation even if already at latest version
+  --no-integration-discovery
+                       Limit plugin fan-out to canonical client roots
   --help               Show this help message
 `
 
-const helpUpdate = `Usage: freeinference update [--manifest <url>] [--platform <key>] [--dry-run] [--no-plugin] [--force] [--help]
+const helpUpdate = `Usage: freeinference update [--manifest <url>] [--platform <key>] [--dry-run] [--no-plugin] [--force] [--no-integration-discovery] [--help]
 
 Check for updates and upgrade the FreeInference Companion installation.
 
@@ -177,5 +183,7 @@ Flags:
   --dry-run            Show what would be done without making changes
   --no-plugin          Skip plugin updates
   --force              Reinstall the same release; never downgrade
+  --no-integration-discovery
+                       Limit plugin fan-out to canonical client roots
   --help               Show this help message
 `

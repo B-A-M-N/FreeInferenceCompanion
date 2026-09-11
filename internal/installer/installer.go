@@ -41,6 +41,10 @@ type Options struct {
 	NoBin bool
 	// Force replaces the binary even if the version matches.
 	Force bool
+	// NoIntegrationDiscovery limits plugin fan-out to the canonical client
+	// roots. It is intended for CI and hosts that do not want bounded config
+	// discovery; runtime CODEX_HOME/CLAUDE_CONFIG_DIR behavior is unaffected.
+	NoIntegrationDiscovery bool
 }
 
 // Result reports what was installed or updated.
@@ -56,6 +60,12 @@ type Result struct {
 	PartiallyInstalled bool
 	Warnings           []string
 	ClaudePluginReady  bool
+	CodexFilesReady    bool
+	CodexRegistered    bool
+	CodexTrusted       bool
+
+	EnvironmentIntegrations []EnvironmentIntegrationResult
+	IntegrationsChanged     bool
 }
 
 // Install performs a full installation. It downloads the release ZIP, verifies
@@ -412,8 +422,22 @@ func registerCodexMarketplace(paths Paths, pluginSrc string, stdout io.Writer) e
 	return nil
 }
 
-func runCodexPluginCommand(codex string, args ...string) error {
+// runCodexPluginCommandForHome invokes the Codex plugin manager against one
+// explicit configuration root. CODEX_HOME is set exactly once so concurrent
+// fan-out cannot accidentally mutate the installer's current environment.
+func runCodexPluginCommandForHome(codex, codexHome string, args ...string) error {
 	cmd := exec.Command(codex, args...)
+	env := os.Environ()
+	filtered := make([]string, 0, len(env)+1)
+	for _, item := range env {
+		if key, _, ok := strings.Cut(item, "="); !ok || key != "CODEX_HOME" {
+			filtered = append(filtered, item)
+		}
+	}
+	if codexHome != "" {
+		filtered = append(filtered, "CODEX_HOME="+codexHome)
+	}
+	cmd.Env = filtered
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	return cmd.Run()
