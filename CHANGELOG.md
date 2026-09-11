@@ -2,6 +2,14 @@
 
 All notable changes to FreeInference Companion are recorded here.
 
+## 0.1.6 — 2026-09-11
+
+### Fixed
+
+- Let explicit Codex integration repair a stale fan-out checksum after a core
+  payload reinstall when the current directory still matches verified core
+  ownership.
+
 ## 0.1.5 — 2026-09-11
 
 ### Fixed

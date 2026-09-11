@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeIntegrationFixture(t *testing.T, path, contents string) {
@@ -633,6 +634,22 @@ func TestAddClientIntegrationAdoptsCoreOwnedCodexPayload(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := clientenv.SetCodexProxyAttestation(home, root, "https://freeinference.org/v1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveClientEnvironmentMetadata(clientEnvironmentMetadataPath(home), &ClientEnvironmentMetadata{
+		SchemaVersion: clientEnvironmentMetadataSchema,
+		Integrations: []ClientIntegration{{
+			Client:            string(clientenv.ClientCodex),
+			ConfigRoot:        root,
+			PluginPath:        targetPlugin,
+			PluginSHA256:      strings.Repeat("0", 64),
+			MarketplacePath:   targetMarketplace,
+			MarketplaceSHA256: strings.Repeat("1", 64),
+			Version:           "v0.1.9",
+			DiscoverySource:   string(clientenv.SourceExplicit),
+			InstalledAt:       time.Now(),
+		}},
+	}); err != nil {
 		t.Fatal(err)
 	}
 	integration, err := AddClientIntegration(home, clientenv.ClientCodex, root, io.Discard)

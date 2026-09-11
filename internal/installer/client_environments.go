@@ -596,14 +596,17 @@ func validateAdditionalOwnedDirectoryWithCore(path string, previous *ClientInteg
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return fmt.Errorf("refusing unsafe target path %s", path)
 	}
-	if previous == nil {
-		if expectedDigest, ok := coreOwned[canonical(path)]; ok && expectedDigest != "" {
-			matched, digestErr := pathDigestMatches(path, expectedDigest)
-			if digestErr != nil || !matched {
-				return fmt.Errorf("companion directory changed after installation: %s", path)
-			}
-			return nil
+	// A core reinstall may have refreshed an alternate-root payload while its
+	// fan-out record still contains the previous release's digest. Verified
+	// core ownership is the stronger source of truth for an explicit adoption.
+	if expectedDigest, ok := coreOwned[canonical(path)]; ok && expectedDigest != "" {
+		matched, digestErr := pathDigestMatches(path, expectedDigest)
+		if digestErr != nil || !matched {
+			return fmt.Errorf("companion directory changed after installation: %s", path)
 		}
+		return nil
+	}
+	if previous == nil {
 		return fmt.Errorf("refusing to replace unowned Companion directory %s", path)
 	}
 	expectedDigest := previous.PluginSHA256
