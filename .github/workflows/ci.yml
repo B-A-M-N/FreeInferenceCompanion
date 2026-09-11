@@ -107,8 +107,9 @@ jobs:
       - name: Codex manifest and marketplace validation
         run: |
           python3 -c "
-          import json, sys
-          m = json.load(open('plugins/freeinference-companion/.codex-plugin/plugin.json'))
+          import json, os, pathlib, sys
+          root = pathlib.Path('plugins/freeinference-companion')
+          m = json.load(open(root / '.codex-plugin/plugin.json'))
           # Top-level required fields.
           for key in ('name', 'version', 'description', 'author'):
               assert key in m, f'missing top-level {key}'
@@ -134,7 +135,15 @@ jobs:
           assert entry['source'] == {'source': 'local', 'path': './plugins/freeinference-companion'}, 'invalid marketplace source'
           assert entry['policy'] == {'installation': 'AVAILABLE', 'authentication': 'ON_INSTALL'}, 'invalid marketplace policy'
           assert entry['category'] == 'Developer Tools', 'invalid marketplace category'
-          print('Codex skill-only manifest is internally consistent.')
+          hooks = json.load(open(root / 'hooks/hooks.json'))['hooks']
+          required_events = {'SessionStart', 'SessionEnd', 'UserPromptSubmit', 'PreCompact', 'PostCompact', 'Stop'}
+          assert required_events <= set(hooks), 'Codex lifecycle hook event missing'
+          for event in required_events:
+              commands = [h.get('command', '') for group in hooks[event] for h in group.get('hooks', [])]
+              assert any('${PLUGIN_ROOT}/scripts/run-hook.sh' in command for command in commands), f'{event} does not invoke the bundled runner'
+          runner = root / 'scripts/run-hook.sh'
+          assert runner.is_file() and os.access(runner, os.X_OK), 'Codex hook runner must be executable'
+          print('Codex lifecycle manifest, hook payload, and marketplace are internally consistent.')
           "
 
   plugin-validity-required:

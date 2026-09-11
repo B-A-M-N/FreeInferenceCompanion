@@ -92,12 +92,12 @@ checksums:
 # LICENSE under freeinference-companion-<version>-<plat>/.
 #
 # Installer archives (zip) contain the platform binary, the Claude Code plugin
-# tree, and the skill-only Codex plugin tree consumed by `freeinference install`
-# / `update`.
+# tree, and the lifecycle-enabled Codex plugin tree consumed by `freeinference
+# install` / `update`.
 #
 # Plugin bundles (zip) preserve the vendor's expected layout:
 #   .claude-plugin/plugin.json, hooks/, scripts/, skills/, bin/<plat>/freeinference
-#   .codex-plugin/plugin.json, skills/ (skill-only; no bundled executable)
+#   .codex-plugin/plugin.json, hooks/, scripts/, skills/, bin/<plat>/freeinference
 # The version is patched only on the staged copy; source manifests are
 # never mutated.
 package: build-all
@@ -145,13 +145,14 @@ package: build-all
 	\
 	for p in $(PLATFORMS); do \
 		bundle_dir="$$staging/installer-$$p"; \
-		mkdir -p "$$bundle_dir/plugins/claude-code/.claude-plugin" "$$bundle_dir/plugins/claude-code/bin/$$p" "$$bundle_dir/plugins/codex/.codex-plugin"; \
+		mkdir -p "$$bundle_dir/plugins/claude-code/.claude-plugin" "$$bundle_dir/plugins/claude-code/bin/$$p" "$$bundle_dir/plugins/codex/.codex-plugin" "$$bundle_dir/plugins/codex/bin/$$p"; \
 		install -m 0755 $(BUILD_DIR)/$(BINARY)-$$p "$$bundle_dir/$(BINARY)"; \
 		sed "s/\"version\": \".*\"/\"version\": \"$$REL_VERSION\"/" plugins/claude-code/.claude-plugin/plugin.json > "$$bundle_dir/plugins/claude-code/.claude-plugin/plugin.json"; \
 		cp -R plugins/claude-code/hooks plugins/claude-code/scripts plugins/claude-code/skills "$$bundle_dir/plugins/claude-code/"; \
 		install -m 0755 $(BUILD_DIR)/$(BINARY)-$$p "$$bundle_dir/plugins/claude-code/bin/$$p/$(BINARY)"; \
 		sed "s/\"version\": \".*\"/\"version\": \"$$REL_VERSION\"/" plugins/freeinference-companion/.codex-plugin/plugin.json > "$$bundle_dir/plugins/codex/.codex-plugin/plugin.json"; \
-		cp -R plugins/freeinference-companion/skills "$$bundle_dir/plugins/codex/"; \
+		cp -R plugins/freeinference-companion/hooks plugins/freeinference-companion/scripts plugins/freeinference-companion/skills "$$bundle_dir/plugins/codex/"; \
+		install -m 0755 $(BUILD_DIR)/$(BINARY)-$$p "$$bundle_dir/plugins/codex/bin/$$p/$(BINARY)"; \
 		find "$$bundle_dir" -exec touch -h -d "@$$epoch" {} +; \
 		(cd "$$bundle_dir" && find . -type f -print | LC_ALL=C sort | zip -q -X -@ "$(CURDIR)/$(RELEASE_DIR)/freeinference-companion-$$REL_VERSION-$$p.zip"); \
 		echo "packaged installer archive for $$p"; \
@@ -177,8 +178,12 @@ package: build-all
 	sed "s/\"version\": \".*\"/\"version\": \"$$REL_VERSION\"/" \
 		plugins/freeinference-companion/.codex-plugin/plugin.json \
 		> "$$stage_codex/.codex-plugin/plugin.json"; \
-	cp -R plugins/freeinference-companion/skills \
+	cp -R plugins/freeinference-companion/hooks \
+		plugins/freeinference-companion/scripts \
+		plugins/freeinference-companion/skills \
 		"$$stage_codex/"; \
+	mkdir -p "$$stage_codex/bin"; \
+	for p in $(PLATFORMS); do mkdir -p "$$stage_codex/bin/$$p"; install -m 0755 "$(BUILD_DIR)/$(BINARY)-$$p" "$$stage_codex/bin/$$p/$(BINARY)"; done; \
 	find "$$stage_codex" -exec touch -h -d "@$$epoch" {} +; \
 	(cd "$$stage_codex" && find . -type f -print | LC_ALL=C sort | zip -q -X -@ "$(CURDIR)/$(RELEASE_DIR)/freeinference-companion-codex_$$REL_VERSION.zip") && \
 	echo "packaged Codex plugin bundle"; \
@@ -292,6 +297,9 @@ package-smoke: package
 		test -x "$$idir/plugins/claude-code/scripts/attribution-hook.sh" || { echo "FAIL: $$p installer missing executable attribution hook"; exit 1; }; \
 		test -f "$$idir/plugins/codex/.codex-plugin/plugin.json" || { echo "FAIL: $$p installer missing Codex plugin"; exit 1; }; \
 		test -d "$$idir/plugins/codex/skills" || { echo "FAIL: $$p installer missing Codex skills"; exit 1; }; \
+		test -f "$$idir/plugins/codex/hooks/hooks.json" || { echo "FAIL: $$p installer missing Codex hooks"; exit 1; }; \
+		test -x "$$idir/plugins/codex/scripts/run-hook.sh" || { echo "FAIL: $$p installer missing executable Codex hook runner"; exit 1; }; \
+		test -x "$$idir/plugins/codex/bin/$$p/$(BINARY)" || { echo "FAIL: $$p installer missing bundled Codex binary"; exit 1; }; \
 		python3 -c "import json,sys; assert json.load(open(sys.argv[1]))['version'] == sys.argv[2], 'Codex plugin version mismatch'" "$$idir/plugins/codex/.codex-plugin/plugin.json" "$$REL_VERSION"; \
 		echo "installer archive OK: $$p"; \
 	done; \
@@ -329,16 +337,16 @@ package-smoke: package
 		test -f "$$edir/.codex-plugin/plugin.json" || { echo "FAIL: $$(basename $$z) missing .codex-plugin/plugin.json"; exit 1; }; \
 		python3 -c "import json,sys; assert json.load(open(sys.argv[1]))['version'] == sys.argv[2], 'Codex plugin version mismatch'" "$$edir/.codex-plugin/plugin.json" "$$REL_VERSION"; \
 		test -d "$$edir/skills" || { echo "FAIL: $$(basename $$z) missing skills/"; exit 1; }; \
-		test ! -d "$$edir/bin" || { echo "FAIL: $$(basename $$z) unexpectedly contains a binary directory"; exit 1; }; \
-		test ! -d "$$edir/hooks" || { echo "FAIL: $$(basename $$z) unexpectedly contains Codex hooks"; exit 1; }; \
-		test ! -d "$$edir/scripts" || { echo "FAIL: $$(basename $$z) unexpectedly contains Codex scripts"; exit 1; }; \
+		test -d "$$edir/bin" || { echo "FAIL: $$(basename $$z) missing Codex binary directory"; exit 1; }; \
+		test -f "$$edir/hooks/hooks.json" || { echo "FAIL: $$(basename $$z) missing Codex hooks"; exit 1; }; \
+		test -x "$$edir/scripts/run-hook.sh" || { echo "FAIL: $$(basename $$z) missing executable Codex runner"; exit 1; }; \
 		echo "archive OK: $$(basename $$z)"; \
 	done; \
 	echo "package smoke tests passed"
 
-# plugin-clean-install extracts the Claude plugin ZIP into a temp directory with
-# an empty HOME, removes `freeinference` from PATH, and exercises its hook wrapper.
-# The wrapper must locate its bundled platform binary and exit zero.
+# plugin-clean-install extracts both plugin ZIPs into a temp directory with an
+# empty HOME, removes `freeinference` from PATH, and exercises each bundled hook
+# wrapper. The wrappers must locate their bundled platform binaries and exit 0.
 plugin-clean-install: package trace-contract-check
 	@tmpdir="$$(mktemp -d "$${TMPDIR:-/tmp}/freeinference-plugin.XXXXXX")"; \
 	trap 'rm -rf "$$tmpdir"' EXIT; \
@@ -372,6 +380,22 @@ plugin-clean-install: package trace-contract-check
 			bash "$$edir/scripts/attribution-hook.sh" >/dev/null 2>&1; \
 		rc=$$?; \
 		test "$$rc" -eq 0 || { echo "FAIL: attribution-hook.sh exited $$rc"; exit 1; }; \
+		echo "clean-install OK: $$(basename $$z) ($$plat)"; \
+	done; \
+	for z in $(RELEASE_DIR)/freeinference-companion-codex*.zip; do \
+		edir="$$tmpdir/extract-codex"; \
+		rm -rf "$$edir"; \
+		mkdir -p "$$edir"; \
+		unzip -q "$$z" -d "$$edir"; \
+		test -f "$$edir/.codex-plugin/plugin.json" || { echo "FAIL: $$(basename $$z) missing .codex-plugin/plugin.json"; exit 1; }; \
+		test -x "$$edir/scripts/run-hook.sh" || { echo "FAIL: $$(basename $$z) Codex runner not executable"; exit 1; }; \
+		bash -n "$$edir/scripts/run-hook.sh"; \
+		plat="$$(uname -s | tr '[:upper:]' '[:lower:]')-$$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"; \
+		bin="$$edir/bin/$$plat/$(BINARY)"; \
+		test -x "$$bin" || { echo "FAIL: $$(basename $$z) missing bundled Codex binary $$plat"; exit 1; }; \
+		PLUGIN_ROOT="$$edir" HOME="$$empty_home" PATH="/usr/bin:/bin" FI_DISABLED=0 \
+			bash "$$edir/scripts/run-hook.sh" SessionStart >/dev/null 2>&1; \
+		rc=$$?; test "$$rc" -eq 0 || { echo "FAIL: Codex run-hook.sh exited $$rc"; exit 1; }; \
 		echo "clean-install OK: $$(basename $$z) ($$plat)"; \
 	done; \
 	echo "plugin clean-install smoke tests passed"
@@ -425,9 +449,9 @@ fmt-check:
 
 # plugin-syntax-check verifies that the plugin manifests parse as JSON and the
 # hook wrapper scripts parse as bash. This is a SYNTAX check only — it does
-# NOT validate against either vendor's plugin schema, and it does NOT verify
-# that a plugin runtime will load plugin-local hooks. Codex is skill-only in
-# this release and uses its native marketplace manager.
+# NOT validate against either vendor's plugin schema, and it does NOT replace
+# the real vendor runtime checks below. Codex uses its native marketplace
+# manager and its standard hooks/hooks.json payload.
 #
 # Remaining gaps requiring real runtime validation:
 # - Salt race detection: only exercised when test binaries are built with
@@ -439,7 +463,7 @@ fmt-check:
 #   installation after vendor platform updates.
 plugin-syntax-check:
 	@python3 -c "import json; json.load(open('plugins/claude-code/.claude-plugin/plugin.json')); json.load(open('plugins/claude-code/hooks/hooks.json')); json.load(open('plugins/freeinference-companion/.codex-plugin/plugin.json')); json.load(open('.agents/plugins/marketplace.json')); print('plugin manifests and marketplace are syntactically valid JSON')"
-	@bash -n plugins/claude-code/scripts/run-hook.sh && bash -n plugins/claude-code/scripts/attribution-hook.sh && echo "Claude hook wrappers are syntactically valid bash"
+	@bash -n plugins/claude-code/scripts/run-hook.sh && bash -n plugins/claude-code/scripts/attribution-hook.sh && bash -n plugins/freeinference-companion/scripts/run-hook.sh && echo "Claude and Codex hook wrappers are syntactically valid bash"
 
 # trace-contract-check exercises launch-time ID/header/receipt behavior and
 # client-specific activation gates without starting a real coding client.

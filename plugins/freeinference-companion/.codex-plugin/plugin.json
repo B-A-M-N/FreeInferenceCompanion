@@ -1,7 +1,7 @@
 {
   "name": "freeinference-companion",
-  "version": "0.1.2",
-  "description": "FreeInference Companion plugin for Codex: user-requested provider diagnostics, model discovery, and setup guidance. It is skill-only, never proxies inference traffic, and reports Codex context/cache measurements as unavailable. Community-built and unofficial. Not affiliated with or endorsed by FreeInference.",
+  "version": "0.1.2+codex.20260911190536",
+  "description": "FreeInference Companion plugin for Codex: local lifecycle recording, rollout-backed context/cache reporting, provider diagnostics, and model discovery. It never proxies inference traffic. Community-built and unofficial. Not affiliated with or endorsed by FreeInference.",
   "author": {
     "name": "b-a-m-n",
     "url": "https://github.com/b-a-m-n"
@@ -10,10 +10,12 @@
   "interface": {
     "displayName": "FreeInference Companion",
     "shortDescription": "FreeInference diagnostics and setup guidance for Codex.",
-    "longDescription": "Community-built, skill-only Codex plugin with provider diagnostics, model discovery, and configuration guidance. It installs no lifecycle hooks, never proxies prompts, and adds no inference requests. Codex context and cache metrics remain unavailable because Codex does not expose those live measurements to plugins.",
+    "longDescription": "Community-built Codex plugin with local lifecycle hooks, rollout-backed context and cache reporting, provider diagnostics, model discovery, and configuration guidance. Hooks record bounded local state, never proxy prompts, and add no inference requests.",
     "developerName": "B-A-M-N",
     "category": "Developer Tools",
-    "capabilities": ["Read"],
+    "capabilities": [
+      "Read"
+    ],
     "defaultPrompt": [
       "Check FreeInference service status and provider configuration."
     ]

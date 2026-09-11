@@ -74,10 +74,10 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 
 	// 4. Claude hook configuration present.
 	add("Claude hook config", checkClaudeHookConfig())
-	// 5. Codex skill installation is intentionally separate from lifecycle
-	// hooks: the Companion Codex package is skill-only and uses Codex's native
-	// marketplace manager.
-	add("Codex skill installed", checkCodexPluginInstalled())
+	// 5. Codex installation includes the skill tree plus the standard hooks/
+	// runner payload. Codex's native footer remains independently configured.
+	add("Codex plugin installed", checkCodexPluginInstalled())
+	add("Codex hook config", checkCodexHookConfig())
 	add("Codex plugin registration", checkCodexPluginRegistration())
 	add("Codex native footer", checkCodexNativeFooter())
 
@@ -222,7 +222,7 @@ func cmdDoctor(paths state.Paths, args []string, stdout, _ io.Writer) int {
 		// make `doctor` exit 1 — diagnostics stay usable when disabled.
 		for i := range checks {
 			switch checks[i].name {
-			case "freeinference binary", "Claude hook config", "Codex skill installed", "Codex plugin registration", "Codex native footer", "Status-line wrapper":
+			case "freeinference binary", "Claude hook config", "Codex plugin installed", "Codex hook config", "Codex plugin registration", "Codex native footer", "Status-line wrapper":
 				if checks[i].result.State == api.CheckFail {
 					checks[i].result.State = api.CheckWarn
 				}
@@ -611,6 +611,28 @@ func checkCodexPluginInstalled() api.CheckResult {
 	return api.CheckResult{State: api.CheckUnknown, Detail: "not installed as a Codex plugin"}
 }
 
+func checkCodexHookConfig() api.CheckResult {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return api.CheckResult{State: api.CheckUnknown, Detail: "no home directory"}
+	}
+	for _, root := range codexPluginRoots(home) {
+		data, readErr := readDoctorFile(filepath.Join(root, "hooks", "hooks.json"), 1<<20)
+		if readErr != nil || !validCodexHookDefinition(data) {
+			continue
+		}
+		runner := filepath.Join(root, "scripts", "run-hook.sh")
+		info, statErr := os.Lstat(runner)
+		if statErr == nil && info.Mode().IsRegular() && info.Mode()&0111 != 0 {
+			return api.CheckResult{State: api.CheckPass, Detail: "lifecycle hooks and executable runner found at " + root}
+		}
+	}
+	if checkCodexPluginInstalled().State == api.CheckPass {
+		return api.CheckResult{State: api.CheckWarn, Detail: "plugin installed but lifecycle hook payload is incomplete"}
+	}
+	return api.CheckResult{State: api.CheckUnknown, Detail: "Codex lifecycle hook payload not installed"}
+}
+
 func checkCodexPluginRegistration() api.CheckResult {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -628,7 +650,7 @@ func checkCodexPluginRegistration() api.CheckResult {
 		}
 	}
 	if codexPluginManifest(filepath.Join(codexHome, "plugins", "freeinference-companion")) {
-		return api.CheckResult{State: api.CheckWarn, Detail: "skill files are present, but Codex marketplace installation is not established"}
+		return api.CheckResult{State: api.CheckWarn, Detail: "plugin files are present, but Codex marketplace installation is not established"}
 	}
 	return api.CheckResult{State: api.CheckUnknown, Detail: "Codex marketplace installation not detected"}
 }
@@ -732,6 +754,7 @@ func checkClientEnvironmentIntegrations() []doctorCheck {
 		checks = append(checks, doctorCheck{prefix, pluginResult})
 		checks = append(checks, doctorCheck{prefix + " registration", registrationResult})
 		checks = append(checks, doctorCheck{prefix + " skill payload", checkCodexEnvironmentSkillPayload(environment.ConfigRoot)})
+		checks = append(checks, doctorCheck{prefix + " hook payload", checkCodexEnvironmentHook(environment.ConfigRoot)})
 		checks = append(checks, doctorCheck{prefix + " provider route", checkCodexEnvironmentProviderRoute(environment.ConfigRoot)})
 	}
 	return checks
@@ -780,6 +803,21 @@ func checkCodexEnvironmentSkillPayload(root string) api.CheckResult {
 		}
 	}
 	return api.CheckResult{State: api.CheckWarn, Detail: "expected Companion skill payload unavailable"}
+}
+
+func checkCodexEnvironmentHook(root string) api.CheckResult {
+	for _, pluginRoot := range codexEnvironmentPluginRoots(root) {
+		data, err := readDoctorFile(filepath.Join(pluginRoot, "hooks", "hooks.json"), 1<<20)
+		if err != nil || !validCodexHookDefinition(data) {
+			continue
+		}
+		runner := filepath.Join(pluginRoot, "scripts", "run-hook.sh")
+		info, statErr := os.Lstat(runner)
+		if statErr == nil && info.Mode().IsRegular() && info.Mode()&0111 != 0 {
+			return api.CheckResult{State: api.CheckPass, Detail: "hooks and executable runner installed"}
+		}
+	}
+	return api.CheckResult{State: api.CheckWarn, Detail: "expected Codex lifecycle hook payload unavailable"}
 }
 
 func codexEnvironmentPluginRoots(root string) []string {

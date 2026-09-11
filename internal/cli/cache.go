@@ -20,14 +20,20 @@ func cmdCache(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "usage error: %v\n", err)
 		return 2
 	}
+	var resolved *resolvedSession
 	if clientType == schema.ClientCodex {
-		return printCodexCacheUnavailable(stdout, jsonOut)
-	}
-
-	resolved, err := resolveSession(paths, clientType, sessionID, stdout)
-	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
+		activation := activationForCLICommand("cache", args)
+		if snap, usageErr := latestCodexSnapshot(activation); usageErr == nil {
+			resolved = &resolvedSession{Client: schema.ClientCodex, SessionID: snap.Session.ID, Snap: snap}
+		} else {
+			return printCodexCacheUnavailable(stdout, jsonOut)
+		}
+	} else {
+		resolved, err = resolveSession(paths, clientType, sessionID, stdout)
+		if err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
+		}
 	}
 
 	snap := (*schema.Snapshot)(nil)
@@ -36,7 +42,12 @@ func cmdCache(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 	if resolved != nil {
 		snap = resolved.Snap
 		if resolved.Client == schema.ClientCodex {
-			return printCodexCacheUnavailable(stdout, jsonOut)
+			activation := activationForCLICommand("cache", args)
+			if usage, usageErr := latestCodexUsage(); usageErr == nil {
+				_ = applyCodexUsage(snap, usage, activation)
+			} else if snap.CacheAnalysis == nil || snap.LiveContext == nil {
+				return printCodexCacheUnavailable(stdout, jsonOut)
+			}
 		}
 		ca = snap.CacheAnalysis
 		lc = snap.LiveContext
@@ -192,8 +203,8 @@ func printCodexCacheUnavailable(stdout io.Writer, jsonOut bool) int {
 		fmt.Fprintln(stdout, `{"client":"codex","availability":"unavailable","reason":"client_telemetry_unavailable","cache":null}`)
 		return 0
 	}
-	fmt.Fprintln(stdout, "Cache telemetry: unavailable")
-	fmt.Fprintln(stdout, "Reason: Codex does not expose per-request cache usage to FreeInference Companion.")
+	fmt.Fprintln(stdout, "Cache telemetry: pending")
+	fmt.Fprintln(stdout, "Reason: no completed Codex rollout token usage is available yet.")
 	return 0
 }
 

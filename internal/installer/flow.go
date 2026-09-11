@@ -130,7 +130,7 @@ func installOrUpdate(opts Options, stdout, stderr io.Writer, update bool) (*Resu
 	if err := extractZIP(tmpZip, extractDir); err != nil {
 		return nil, fmt.Errorf("extract: %w", err)
 	}
-	if err := validateReleaseLayout(extractDir, !opts.NoBin, !opts.NoPlugin); err != nil {
+	if err := validateReleaseLayout(extractDir, !opts.NoBin, !opts.NoPlugin, opts.Platform); err != nil {
 		return nil, fmt.Errorf("validate release: %w", err)
 	}
 	if err := withInstallerLock(paths, func() error {

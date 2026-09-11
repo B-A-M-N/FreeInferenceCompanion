@@ -153,6 +153,11 @@ func cmdSnapshot(paths state.Paths, args []string, stdin io.Reader, stdout, stde
 		return 1
 	}
 	if resolved == nil {
+		if clientType == schema.ClientCodex && activation.Active {
+			if snap, usageErr := latestCodexSnapshot(activation); usageErr == nil {
+				return printSnapshot(stdout, stderr, snap, loadGlobal(paths), jsonOut, aid, aidErr, reveal, false)
+			}
+		}
 		if jsonOut {
 			vm := buildView(nil, loadGlobal(paths), "", false, "", "")
 			data, _ := vm.JSON()
@@ -300,8 +305,18 @@ func cmdRender(paths state.Paths, args []string, stdin io.Reader, stdout, stderr
 		return 1
 	}
 	if resolved == nil {
+		if clientType == schema.ClientCodex && activation.Active {
+			if snap, usageErr := latestCodexSnapshot(activation); usageErr == nil {
+				return printRendered(stdout, stderr, snap, loadGlobal(paths), mode, aid, aidErr, reveal, false)
+			}
+		}
 		fmt.Fprintln(stdout, "FI: no session")
 		return 0
+	}
+	if resolved.Client == schema.ClientCodex {
+		if usage, usageErr := latestCodexUsage(); usageErr == nil {
+			_ = applyCodexUsage(resolved.Snap, usage, activation)
+		}
 	}
 	return printRendered(stdout, stderr, resolved.Snap, loadGlobal(paths), mode, aid, aidErr, reveal, historical)
 }

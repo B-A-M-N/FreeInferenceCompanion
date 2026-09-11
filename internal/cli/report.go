@@ -168,6 +168,11 @@ func cmdReport(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
+	if resolved == nil && clientType == schema.ClientCodex && activation.Active {
+		if snap, usageErr := latestCodexSnapshot(activation); usageErr == nil {
+			resolved = &resolvedSession{Client: schema.ClientCodex, SessionID: snap.Session.ID, Snap: snap}
+		}
+	}
 	if resolved != nil {
 		// Resolve activation for the client that owns the selected snapshot;
 		// the command's inherited activation may describe a different client.
@@ -175,6 +180,11 @@ func cmdReport(paths state.Paths, args []string, stdout, stderr io.Writer) int {
 		report.RuntimeActive = activation.Active
 		report.Client = resolved.Client
 		report.Historical = !activation.Active && !activation.Disabled
+		if resolved.Client == schema.ClientCodex {
+			if usage, usageErr := latestCodexUsage(); usageErr == nil {
+				_ = applyCodexUsage(resolved.Snap, usage, activation)
+			}
+		}
 		report.Session = buildReportSession(resolved.Snap, reveal)
 		incidentFilter.Client = resolved.Client
 		incidentFilter.SessionID = resolved.SessionID
@@ -243,14 +253,14 @@ func buildReportSession(snap *schema.Snapshot, reveal bool) *reportSession {
 		rs.ContextTelemetry = "unavailable"
 		rs.CacheTelemetry = "unavailable"
 	}
-	if snap.Client.Type != schema.ClientCodex && snap.LiveContext != nil {
+	if snap.LiveContext != nil {
 		rs.ContextUsedPct = snap.LiveContext.UsedPercentage
 		rs.ContextTelemetry = string(snap.LiveContext.TotalTokenSemantics)
 		if rs.ContextTelemetry == "" {
 			rs.ContextTelemetry = "available"
 		}
 	}
-	if snap.Client.Type != schema.ClientCodex && snap.CacheAnalysis != nil {
+	if snap.CacheAnalysis != nil {
 		rs.CacheReadShare = snap.CacheAnalysis.CacheReadShare
 		rs.CacheTrend = snap.CacheAnalysis.Trend
 		rs.CacheObserved = snap.CacheAnalysis.ObservationCount
@@ -470,7 +480,7 @@ func printMarkdownReport(stdout io.Writer, report *reportData, reveal bool) {
 		if s.ContextUsedPct != nil {
 			fmt.Fprintf(stdout, "Context:  %.1f%% used\n", *s.ContextUsedPct)
 		} else if s.ContextTelemetry == "unavailable" {
-			fmt.Fprintln(stdout, "Context:  unavailable (Codex does not expose live context telemetry)")
+			fmt.Fprintln(stdout, "Context:  unavailable (no rollout telemetry available)")
 		} else {
 			fmt.Fprintln(stdout, "Context:  unknown")
 		}
@@ -479,7 +489,7 @@ func printMarkdownReport(stdout io.Writer, report *reportData, reveal bool) {
 		}
 		fmt.Fprintf(stdout, "Pressure: %s\n", s.PressureState)
 		if s.CacheTelemetry == "unavailable" {
-			fmt.Fprintln(stdout, "Cache:    unavailable (Codex does not expose cache telemetry)")
+			fmt.Fprintln(stdout, "Cache:    unavailable (no rollout telemetry available)")
 		} else if s.CacheObserved > 0 {
 			fmt.Fprintf(stdout, "Cache:    %s read share (%d usable of %d observed; trend: %s)\n",
 				formatPctPtr(s.CacheReadShare), s.CacheUsable, s.CacheObserved, s.CacheTrend)

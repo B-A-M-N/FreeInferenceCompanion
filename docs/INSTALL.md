@@ -39,8 +39,8 @@ one bounded authenticated model-catalog check in addition to local checks. It
 does not query health/account/public-status endpoints or send an inference
 request unless `--probe --model <name>` is explicitly supplied.
 
-The combined platform ZIP contains the Claude Code plugin tree and, in current
-releases, the skill-only Codex plugin tree. The CLI installer verifies the
+The combined platform ZIP contains the Claude Code plugin tree and the
+lifecycle-enabled Codex plugin tree. The CLI installer verifies the
 platform ZIP checksum, installs both canonical client payloads, and registers
 the Codex payload through its native marketplace manager when the Codex CLI is
 available:
@@ -66,8 +66,9 @@ FreeInference](codex.md), which covers the OpenAI-compatible `/v1` endpoint,
 the environment credential, `wire_api = "responses"`, model profiles, and the
 optional trace-header mapping.
 
-The plugin contributes diagnostic skills only. It does not install lifecycle
-hooks, proxy inference traffic, or make background API requests by default.
+The plugin contributes diagnostic skills and local lifecycle hooks. It does not
+proxy inference traffic or make background API requests by default. Codex
+rollout parsing is bounded and local.
 Use `FI_AUTO_REFRESH=1` only when you explicitly want stale metadata refresh;
 those refreshes are throttled, coalesced, and circuit-breaker protected.
 

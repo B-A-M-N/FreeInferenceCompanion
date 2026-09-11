@@ -356,7 +356,7 @@ Usage:
   freeinference refresh [--force|--if-stale] [--detach]
     [--worker models|health|account-usage|public-status] [--help]
   freeinference status-line install|uninstall
-  freeinference codex-footer install|uninstall|status
+  freeinference codex-footer install|uninstall|status|render
   freeinference config show|set|reset|path [--json]
   freeinference companion status|enable|disable
   freeinference fi-status [--json] [--problems|--down] [--details] [--fail-degraded] [--refresh] [--all]
@@ -577,19 +577,22 @@ Flags:
   --help           Show this help message
 `
 
-	helpCodexFooter = `Usage: freeinference codex-footer install|uninstall|status [--json] [--help]
+	helpCodexFooter = `Usage: freeinference codex-footer install|uninstall|status|render [--json] [--color auto|always|never] [--help]
 
 Configure Codex's native tui.status_line footer. This makes Codex render its
-own model, remaining-context, and current-directory items; it is not a
-script-backed FreeInference telemetry status line.
+own model, remaining-context, and current-directory items. The render
+subcommand reads Codex's local rollout usage records and emits the same rich
+Companion line used by Claude, for tmux and other host status surfaces.
 
 Subcommands:
   install    Preserve existing items and add the native footer items
   uninstall  Restore the prior footer when Companion still owns it
   status     Show configuration and ownership status
+  render     Render the latest Codex model, cache, context, and pressure line
 
 Flags:
   --json     Output machine-readable status
+  --color    Color mode for render (auto, always, or never)
   --help     Show this help message
 `
 

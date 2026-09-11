@@ -7,8 +7,8 @@ allowed-tools: Bash
 
 # FreeInference status
 
-Run these local commands together so the result shows every diagnostic that
-Codex can currently provide:
+Run these local commands together so the result shows the rollout-backed
+diagnostics alongside Codex's native footer:
 
 ```bash
 freeinference status --client codex --level standard
@@ -21,9 +21,10 @@ cannot be combined with `--json`. Use `--json` instead when a machine-readable
 result is needed. The status command reports
 verified provider configuration even when no Codex lifecycle snapshot exists.
 
-This marketplace plugin is skill-only and installs no Codex lifecycle hooks.
-Provider identity can be confirmed from Codex configuration, while context and
-cache telemetry remain `unavailable` because Codex does not expose those
-measurements here. Codex's native footer remains the source for its model,
-remaining-context, and current-directory fields. These commands do not make a
-provider request.
+The status command reads the latest bounded local Codex rollout record even
+when no Companion lifecycle snapshot exists. Context percentage, cache shares,
+fresh input, output, and model come from that record; provider identity comes
+from the selected Codex configuration. Before a completed turn, metrics are
+explicitly pending. Codex's native footer remains the source for its own
+model, remaining-context, and current-directory fields. These commands do not
+make a provider request.

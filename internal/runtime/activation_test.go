@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/b-a-m-n/freeinference-companion/internal/clientenv"
 )
 
 // clearActivationEnv removes every activation-relevant variable so each test
@@ -101,6 +103,30 @@ env_key = "OPENAI_API_KEY"
 	a := EvaluateForClient(ClientCodex)
 	if a.Active || a.InactiveReason != ReasonEndpointNotApproved {
 		t.Fatalf("off-host Codex provider must remain inactive: %+v", a)
+	}
+}
+
+func TestActivationForClient_CodexAcceptsAttestedLoopbackProxy(t *testing.T) {
+	clearActivationEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", home)
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(`model_provider = "freeinference"
+
+[model_providers.freeinference]
+base_url = "http://127.0.0.1:18769/v1"
+env_key = "CODEX_FI_KEY"
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CODEX_FI_KEY", "selected-provider-key")
+	t.Setenv("FI_ALLOW_INSECURE_LOCALHOST", "1")
+	if err := clientenv.SetCodexProxyAttestation(home, home, "https://freeinference.org/v1"); err != nil {
+		t.Fatalf("set proxy attestation: %v", err)
+	}
+	a := EvaluateForClient(ClientCodex)
+	if !a.Active || a.Origin != "https://freeinference.org" {
+		t.Fatalf("attested loopback Codex route should activate: %+v", a)
 	}
 }
 

@@ -101,4 +101,4 @@ freeinference report --json       # exportable support bundle
 - A cache percentage is shown only for usable observations; missing cache fields are not treated as 0%.
 - Cache TTL is shown as authoritative only when the provider supplies a TTL. Local idle time alone does not prove expiry.
 - A fresh share above 20% may indicate prompt drift, new session, or insufficient context reuse.
-- Codex currently has no per-request cache telemetry in this package, so `freeinference cache --client codex` reports unavailable.
+- Codex cache shares are derived from the latest local rollout token usage; server-side cache policy remains outside the package.

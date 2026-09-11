@@ -29,9 +29,21 @@ run_attribution() {
     ticks=0
     while kill -0 "$child_pid" 2>/dev/null; do
         if [[ "$ticks" -ge 20 ]]; then
-            kill "$child_pid" 2>/dev/null || true
+            # The executable can be a shebang script. macOS may leave that
+            # script's descendant alive when only the direct shell is killed,
+            # so terminate the small process tree before reaping the parent.
+            kill_process_tree() {
+                local pid="$1" signal="$2" descendant
+                if type -P pgrep >/dev/null 2>&1; then
+                    for descendant in $(pgrep -P "$pid" 2>/dev/null); do
+                        kill_process_tree "$descendant" "$signal"
+                    done
+                fi
+                kill "-$signal" "$pid" 2>/dev/null || true
+            }
+            kill_process_tree "$child_pid" TERM
             sleep 0.1
-            kill -KILL "$child_pid" 2>/dev/null || true
+            kill_process_tree "$child_pid" KILL
             wait "$child_pid" 2>/dev/null || true
             return 0
         fi
