@@ -3,7 +3,7 @@
 BINARY=freeinference
 BUILD_DIR=build
 # Development builds must not expose a commit hash as the product version.
-# Release jobs pass an explicit semver value (for example VERSION=v0.1.1).
+# Release jobs pass an explicit semver value (for example VERSION=v0.1.2).
 VERSION?=0.1.0-dev
 COMMIT?=$(shell git rev-parse HEAD 2>/dev/null || echo "dev")
 # Release tags conventionally include a leading "v", while the CLI and
@@ -91,9 +91,9 @@ checksums:
 # extraction never pollutes the cwd. Each archive contains freeinference, README, and
 # LICENSE under freeinference-companion-<version>-<plat>/.
 #
-# Installer archives (zip) contain the platform binary and the Claude Code
-# plugin tree consumed by `freeinference install` / `update`. Codex uses the
-# repository marketplace flow documented in docs/codex.md.
+# Installer archives (zip) contain the platform binary, the Claude Code plugin
+# tree, and the skill-only Codex plugin tree consumed by `freeinference install`
+# / `update`.
 #
 # Plugin bundles (zip) preserve the vendor's expected layout:
 #   .claude-plugin/plugin.json, hooks/, scripts/, skills/, bin/<plat>/freeinference
@@ -145,11 +145,13 @@ package: build-all
 	\
 	for p in $(PLATFORMS); do \
 		bundle_dir="$$staging/installer-$$p"; \
-		mkdir -p "$$bundle_dir/plugins/claude-code/.claude-plugin" "$$bundle_dir/plugins/claude-code/bin/$$p"; \
+		mkdir -p "$$bundle_dir/plugins/claude-code/.claude-plugin" "$$bundle_dir/plugins/claude-code/bin/$$p" "$$bundle_dir/plugins/codex/.codex-plugin"; \
 		install -m 0755 $(BUILD_DIR)/$(BINARY)-$$p "$$bundle_dir/$(BINARY)"; \
 		sed "s/\"version\": \".*\"/\"version\": \"$$REL_VERSION\"/" plugins/claude-code/.claude-plugin/plugin.json > "$$bundle_dir/plugins/claude-code/.claude-plugin/plugin.json"; \
 		cp -R plugins/claude-code/hooks plugins/claude-code/scripts plugins/claude-code/skills "$$bundle_dir/plugins/claude-code/"; \
 		install -m 0755 $(BUILD_DIR)/$(BINARY)-$$p "$$bundle_dir/plugins/claude-code/bin/$$p/$(BINARY)"; \
+		sed "s/\"version\": \".*\"/\"version\": \"$$REL_VERSION\"/" plugins/freeinference-companion/.codex-plugin/plugin.json > "$$bundle_dir/plugins/codex/.codex-plugin/plugin.json"; \
+		cp -R plugins/freeinference-companion/skills "$$bundle_dir/plugins/codex/"; \
 		find "$$bundle_dir" -exec touch -h -d "@$$epoch" {} +; \
 		(cd "$$bundle_dir" && find . -type f -print | LC_ALL=C sort | zip -q -X -@ "$(CURDIR)/$(RELEASE_DIR)/freeinference-companion-$$REL_VERSION-$$p.zip"); \
 		echo "packaged installer archive for $$p"; \
@@ -287,6 +289,10 @@ package-smoke: package
 		python3 -c "import json,sys; assert json.load(open(sys.argv[1]))['version'] == sys.argv[2], 'installer plugin version mismatch'" "$$idir/plugins/claude-code/.claude-plugin/plugin.json" "$$REL_VERSION"; \
 		test -f "$$idir/plugins/claude-code/hooks/hooks.json" || { echo "FAIL: $$p installer missing Claude hooks"; exit 1; }; \
 		test -x "$$idir/plugins/claude-code/scripts/run-hook.sh" || { echo "FAIL: $$p installer missing executable Claude hook runner"; exit 1; }; \
+		test -x "$$idir/plugins/claude-code/scripts/attribution-hook.sh" || { echo "FAIL: $$p installer missing executable attribution hook"; exit 1; }; \
+		test -f "$$idir/plugins/codex/.codex-plugin/plugin.json" || { echo "FAIL: $$p installer missing Codex plugin"; exit 1; }; \
+		test -d "$$idir/plugins/codex/skills" || { echo "FAIL: $$p installer missing Codex skills"; exit 1; }; \
+		python3 -c "import json,sys; assert json.load(open(sys.argv[1]))['version'] == sys.argv[2], 'Codex plugin version mismatch'" "$$idir/plugins/codex/.codex-plugin/plugin.json" "$$REL_VERSION"; \
 		echo "installer archive OK: $$p"; \
 	done; \
 	python3 -c "import hashlib,json,pathlib; m=json.load(open('$(RELEASE_DIR)/marketplace.json')); assert set(m['platforms']) == set('$(PLATFORMS)'.split()); assert all(info['url'].startswith('$(REPOSITORY_URL)/releases/download/') for info in m['platforms'].values()); assert all(url.startswith('$(REPOSITORY_URL)/releases/download/') for url in m['plugin_urls'].values()); assert all(len(info['sha256']) == 64 and hashlib.sha256((pathlib.Path('$(RELEASE_DIR)') / pathlib.PurePosixPath(info['url']).name).read_bytes()).hexdigest() == info['sha256'] for info in m['platforms'].values())"; \
@@ -347,6 +353,8 @@ plugin-clean-install: package trace-contract-check
 		unzip -q "$$z" -d "$$edir"; \
 		test -f "$$edir/.claude-plugin/plugin.json" || { echo "FAIL: $$(basename $$z) missing .claude-plugin/plugin.json"; exit 1; }; \
 		test -x "$$edir/scripts/run-hook.sh" || { echo "FAIL: $$(basename $$z) run-hook.sh not executable"; exit 1; }; \
+		test -x "$$edir/scripts/attribution-hook.sh" || { echo "FAIL: $$(basename $$z) attribution-hook.sh not executable"; exit 1; }; \
+		bash -n "$$edir/scripts/attribution-hook.sh"; \
 		hooks_file="$$edir/hooks/hooks.json"; \
 		test -f "$$hooks_file" || { echo "FAIL: $$(basename $$z) missing hooks/hooks.json"; exit 1; }; \
 		plat="$$(uname -s | tr '[:upper:]' '[:lower:]')-$$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"; \
@@ -359,6 +367,11 @@ plugin-clean-install: package trace-contract-check
 			bash "$$edir/scripts/run-hook.sh" SessionStart >/dev/null 2>&1; \
 		rc=$$?; \
 		test "$$rc" -eq 0 || { echo "FAIL: Claude run-hook.sh exited $$rc"; exit 1; }; \
+		printf '%s\n' '{"tool_input":{"command":"git commit -m '\''packaged hook smoke'\''"}}' | \
+			CLAUDE_PLUGIN_ROOT="$$edir" HOME="$$empty_home" PATH="/usr/bin:/bin" FI_DISABLED=0 \
+			bash "$$edir/scripts/attribution-hook.sh" >/dev/null 2>&1; \
+		rc=$$?; \
+		test "$$rc" -eq 0 || { echo "FAIL: attribution-hook.sh exited $$rc"; exit 1; }; \
 		echo "clean-install OK: $$(basename $$z) ($$plat)"; \
 	done; \
 	echo "plugin clean-install smoke tests passed"
@@ -426,7 +439,7 @@ fmt-check:
 #   installation after vendor platform updates.
 plugin-syntax-check:
 	@python3 -c "import json; json.load(open('plugins/claude-code/.claude-plugin/plugin.json')); json.load(open('plugins/claude-code/hooks/hooks.json')); json.load(open('plugins/freeinference-companion/.codex-plugin/plugin.json')); json.load(open('.agents/plugins/marketplace.json')); print('plugin manifests and marketplace are syntactically valid JSON')"
-	@bash -n plugins/claude-code/scripts/run-hook.sh && echo "Claude hook wrapper is syntactically valid bash"
+	@bash -n plugins/claude-code/scripts/run-hook.sh && bash -n plugins/claude-code/scripts/attribution-hook.sh && echo "Claude hook wrappers are syntactically valid bash"
 
 # trace-contract-check exercises launch-time ID/header/receipt behavior and
 # client-specific activation gates without starting a real coding client.

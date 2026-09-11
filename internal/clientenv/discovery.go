@@ -4,7 +4,6 @@
 package clientenv
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,7 +12,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/b-a-m-n/freeinference-companion/internal/api"
 	"github.com/b-a-m-n/freeinference-companion/internal/config"
 )
 
@@ -105,22 +103,50 @@ func DiscoverWithEnv(home string, env []string) ([]Environment, []error) {
 		environments = append(environments, environment)
 	}
 
-	add(Environment{Client: ClientClaudeCode, ConfigRoot: CanonicalRoot(homeAbs, ClientClaudeCode), Source: SourceCanonical})
+	canonicalClaude := CanonicalRoot(homeAbs, ClientClaudeCode)
+	add(Environment{Client: ClientClaudeCode, ConfigRoot: canonicalClaude, Source: SourceCanonical})
+	if validateRoot(canonicalClaude) == nil && IsLegacyFreeInferenceClaudeSettings(filepath.Join(canonicalClaude, "settings.json")) {
+		warnings = append(warnings, legacyClaudeRouteWarning(canonicalClaude))
+	}
 	if root, ok := lookup("CLAUDE_CONFIG_DIR"); ok && strings.TrimSpace(root) != "" {
-		add(Environment{Client: ClientClaudeCode, ConfigRoot: strings.TrimSpace(root), Source: SourceEnvironment})
+		root = strings.TrimSpace(root)
+		if warning := validateRoot(root); warning != nil {
+			warnings = append(warnings, fmt.Errorf("%s %s: %w", ClientClaudeCode, root, warning))
+		} else if IsFreeInferenceClaudeSettings(filepath.Join(root, "settings.json")) {
+			add(Environment{Client: ClientClaudeCode, ConfigRoot: root, Source: SourceEnvironment})
+		} else if IsLegacyFreeInferenceClaudeSettings(filepath.Join(root, "settings.json")) {
+			warnings = append(warnings, legacyClaudeRouteWarning(root))
+		}
 	}
 	add(Environment{Client: ClientCodex, ConfigRoot: CanonicalRoot(homeAbs, ClientCodex), Source: SourceCanonical})
 	if root, ok := lookup("CODEX_HOME"); ok && strings.TrimSpace(root) != "" {
-		add(Environment{Client: ClientCodex, ConfigRoot: strings.TrimSpace(root), Source: SourceEnvironment})
+		root = strings.TrimSpace(root)
+		if warning := validateRoot(root); warning != nil {
+			warnings = append(warnings, fmt.Errorf("%s %s: %w", ClientCodex, root, warning))
+		} else if IsFreeInferenceCodexConfig(filepath.Join(root, "config.toml")) {
+			add(Environment{Client: ClientCodex, ConfigRoot: root, Source: SourceEnvironment})
+		}
 	}
 
 	xdgRoot := strings.TrimSpace(lookupOrDefault(lookup, "XDG_CONFIG_HOME", filepath.Join(homeAbs, ".config")))
+	var legacyClaudeFound []string
 	claudeFound, claudeWarnings := scanDirectories(xdgRoot, xdgScanDepth, func(dir string) bool {
-		return looksLikeClaudeSettings(filepath.Join(dir, "settings.json"))
+		settingsPath := filepath.Join(dir, "settings.json")
+		if looksLikeClaudeSettings(settingsPath) {
+			return true
+		}
+		if looksLikeLegacyClaudeSettings(settingsPath) {
+			legacyClaudeFound = append(legacyClaudeFound, dir)
+		}
+		return false
 	})
 	warnings = append(warnings, claudeWarnings...)
 	for _, root := range claudeFound {
 		environments = append(environments, Environment{Client: ClientClaudeCode, ConfigRoot: root, Source: SourceXDG})
+	}
+	sort.Strings(legacyClaudeFound)
+	for _, root := range legacyClaudeFound {
+		warnings = append(warnings, legacyClaudeRouteWarning(root))
 	}
 	codexFound, codexWarnings := scanDirectories(xdgRoot, xdgScanDepth, func(dir string) bool {
 		return looksLikeCodexConfig(filepath.Join(dir, "config.toml"))
@@ -141,14 +167,29 @@ func DiscoverWithEnv(home string, env []string) ([]Environment, []error) {
 // directory containing the client's expected FreeInference route. It performs
 // no discovery and never accepts launcher names as identity.
 func ValidateEnvironment(client Client, root string) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolve home: %w", err)
+	}
+	return ValidateEnvironmentWithHome(client, root, home)
+}
+
+// ValidateEnvironmentWithHome verifies an explicit root using the supplied
+// trusted home for proxy-attestation lookup. It exists so CLI callers cannot
+// accidentally validate under a different home than they will mutate.
+func ValidateEnvironmentWithHome(client Client, root, home string) error {
 	switch client {
 	case ClientClaudeCode:
 		if !looksLikeClaudeSettings(filepath.Join(root, "settings.json")) {
-			return errors.New("claude settings.json does not select an approved FreeInference /v1 endpoint")
+			if IsLegacyFreeInferenceClaudeSettings(filepath.Join(root, "settings.json")) {
+				return errors.New("claude settings.json uses the legacy FreeInference /v1 route; set ANTHROPIC_BASE_URL to https://freeinference.org/anthropic")
+			}
+			return errors.New("claude settings.json does not select an approved FreeInference client route")
 		}
 	case ClientCodex:
-		if !looksLikeCodexConfig(filepath.Join(root, "config.toml")) {
-			return errors.New("codex config.toml does not select an approved FreeInference /v1 endpoint")
+		state, _, err := VerifyCodexConfigRoute(home, root)
+		if err != nil || (state != CodexRouteVerifiedDirect && state != CodexRouteVerifiedProxy) {
+			return errors.New("codex config.toml does not select an approved FreeInference route")
 		}
 	default:
 		return fmt.Errorf("unsupported client %q", client)
@@ -263,80 +304,19 @@ func scanDirectories(root string, maxDepth int, accept func(string) bool) ([]str
 }
 
 func looksLikeClaudeSettings(path string) bool {
-	data, err := readBoundedNoFollow(path)
-	if err != nil {
-		return false
-	}
-	var settings struct {
-		Env map[string]string `json:"env"`
-	}
-	if json.Unmarshal(data, &settings) != nil {
-		return false
-	}
-	for key, value := range settings.Env {
-		if key != "ANTHROPIC_BASE_URL" {
-			continue
-		}
-		endpoint, err := api.NormalizeEndpoint(value)
-		if err == nil && endpoint.IsFI && endpoint.RequestURL == endpoint.Origin+"/v1" {
-			return true
-		}
-	}
-	return false
+	return IsFreeInferenceClaudeSettings(path)
+}
+
+func looksLikeLegacyClaudeSettings(path string) bool {
+	return IsLegacyFreeInferenceClaudeSettings(path)
+}
+
+func legacyClaudeRouteWarning(root string) error {
+	return fmt.Errorf("claude configuration %s uses the legacy FreeInference /v1 route; update ANTHROPIC_BASE_URL to https://freeinference.org/anthropic before integration discovery can manage it", root)
 }
 
 func looksLikeCodexConfig(path string) bool {
-	data, err := readBoundedNoFollow(path)
-	if err != nil {
-		return false
-	}
-	table := ""
-	selectedProvider := ""
-	providers := make(map[string]string)
-	for _, line := range strings.Split(string(data), "\n") {
-		if hash := strings.IndexByte(line, '#'); hash >= 0 {
-			line = line[:hash]
-		}
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
-			table = strings.TrimSpace(line[1 : len(line)-1])
-			continue
-		}
-		key, value, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		key, value = strings.TrimSpace(key), strings.TrimSpace(value)
-		value, ok = parseConfigString(value)
-		if !ok {
-			continue
-		}
-		if table == "" && key == "model_provider" {
-			selectedProvider = value
-		}
-		if strings.HasPrefix(table, "model_providers.") && key == "base_url" {
-			providers[strings.TrimPrefix(table, "model_providers.")] = value
-		}
-	}
-	if selectedProvider == "" {
-		selectedProvider = "openai"
-	}
-	baseURL := providers[selectedProvider]
-	if baseURL == "" {
-		return false
-	}
-	endpoint, err := api.NormalizeEndpoint(baseURL)
-	return err == nil && endpoint.IsFI && endpoint.RequestURL == endpoint.Origin+"/v1"
-}
-
-func parseConfigString(value string) (string, bool) {
-	if len(value) < 2 || value[0] != '"' || value[len(value)-1] != '"' {
-		return "", false
-	}
-	return strings.ReplaceAll(value[1:len(value)-1], `\\"`, `"`), true
+	return IsFreeInferenceCodexConfig(path)
 }
 
 func readBoundedNoFollow(path string) ([]byte, error) {

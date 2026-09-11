@@ -100,6 +100,10 @@ func createTestZIP(t *testing.T, version string) ([]byte, string) {
 	claudeHook.SetMode(0755)
 	f, _ = w.CreateHeader(claudeHook)
 	f.Write([]byte("#!/usr/bin/env bash\nexit 0\n"))
+	attributionHook := &zip.FileHeader{Name: "plugins/claude-code/scripts/attribution-hook.sh", Method: zip.Deflate}
+	attributionHook.SetMode(0755)
+	f, _ = w.CreateHeader(attributionHook)
+	f.Write([]byte("#!/usr/bin/env bash\nexit 0\n"))
 	f, _ = w.Create("plugins/claude-code/package.json")
 	f.Write([]byte(`{"name":"freeinference-companion"}`))
 
@@ -166,16 +170,117 @@ func TestInstallFresh(t *testing.T) {
 			t.Errorf("plugin not extracted to %s: %v", pluginPath, err)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(paths.CodexPluginDir, "freeinference-companion")); !os.IsNotExist(err) {
-		t.Errorf("install unexpectedly wrote a Codex plugin: %v", err)
+	if _, err := os.Stat(paths.codexPluginPath()); err != nil {
+		t.Errorf("Codex plugin was not installed canonically: %v", err)
 	}
-	if _, err := os.Stat(paths.CodexMarketplaceDir); !os.IsNotExist(err) {
-		t.Errorf("install unexpectedly wrote a Codex marketplace: %v", err)
+	if _, err := os.Stat(filepath.Join(paths.CodexMarketplaceDir, ".agents", "plugins", "marketplace.json")); err != nil {
+		t.Errorf("Codex marketplace was not installed canonically: %v", err)
 	}
 
 	// Verify version output.
 	if !strings.Contains(stdout.String(), "v0.2.0") {
 		t.Errorf("expected version v0.2.0 in output:\n%s", stdout.String())
+	}
+	metadata, found, err := LoadInstallationMetadata(paths.MetadataPath())
+	if err != nil || !found || !metadata.CodexNativeRegistrationKnown {
+		t.Fatalf("missing explicit Codex native status: metadata=%+v found=%v err=%v", metadata, found, err)
+	}
+	if metadata.CodexPluginRegistered != metadata.CodexMarketplaceAdded {
+		t.Fatalf("Codex native status is inconsistent: %+v", metadata)
+	}
+}
+
+func TestInstallRecordsPartialCodexNativeRegistration(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeBin, "codex"), []byte("#!/bin/sh\nexit 1\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin)
+	manifestURL, _, server := testServer(t, "v0.2.0", "linux-amd64")
+	defer server.Close()
+	stdout := &strings.Builder{}
+	result, err := Install(Options{ManifestURL: manifestURL, Platform: "linux-amd64"}, stdout, io.Discard)
+	if err != nil {
+		t.Fatalf("install with failed Codex registration: %v", err)
+	}
+	if !result.PartiallyInstalled || result.CodexMarketplaceAdded || result.CodexPluginRegistered || !strings.Contains(stdout.String(), "native registration") {
+		t.Fatalf("partial Codex result=%+v output=%s", result, stdout.String())
+	}
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, found, err := LoadInstallationMetadata(paths.MetadataPath())
+	if err != nil || !found || !metadata.CodexNativeRegistrationKnown || metadata.CodexMarketplaceAdded || metadata.CodexPluginRegistered {
+		t.Fatalf("partial Codex status not durable: metadata=%+v found=%v err=%v", metadata, found, err)
+	}
+}
+
+func TestInstallRecordsSuccessfulCodexNativeRegistration(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeBin, "codex"), []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin)
+	manifestURL, _, server := testServer(t, "v0.2.0", "linux-amd64")
+	defer server.Close()
+	if _, err := Install(Options{ManifestURL: manifestURL, Platform: "linux-amd64"}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("install with successful Codex registration: %v", err)
+	}
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, found, err := LoadInstallationMetadata(paths.MetadataPath())
+	if err != nil || !found || !metadata.CodexNativeRegistrationKnown || !metadata.CodexMarketplaceAdded || !metadata.CodexPluginRegistered {
+		t.Fatalf("successful Codex status not durable: metadata=%+v found=%v err=%v", metadata, found, err)
+	}
+	status, err := InspectCodexInstallation(home, paths.CodexHome)
+	if err != nil || !status.PayloadInstalled || !status.MarketplaceInstalled || !status.NativeStatusKnown || !status.MarketplaceRegistered || !status.PluginRegistered {
+		t.Fatalf("Codex installation status=%+v err=%v", status, err)
+	}
+}
+
+func TestUninstallPreservesPayloadWhenKnownCodexCleanupFails(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0700); err != nil {
+		t.Fatal(err)
+	}
+	fakeCodex := filepath.Join(fakeBin, "codex")
+	if err := os.WriteFile(fakeCodex, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin)
+	manifestURL, _, server := testServer(t, "v0.2.0", "linux-amd64")
+	defer server.Close()
+	if _, err := Install(Options{ManifestURL: manifestURL, Platform: "linux-amd64"}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if err := os.WriteFile(fakeCodex, []byte("#!/bin/sh\nexit 1\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := UninstallWithResult(paths, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "native Codex cleanup failed") || len(result.Removed) != 0 {
+		t.Fatalf("failed native cleanup result=%+v err=%v", result, err)
+	}
+	if _, statErr := os.Stat(paths.CodexMarketplaceDir); statErr != nil {
+		t.Fatalf("payload removed despite native cleanup failure: %v", statErr)
 	}
 }
 
@@ -451,7 +556,7 @@ func TestValidateReleaseLayoutRequiresExecutableHook(t *testing.T) {
 	}{
 		{name: "Claude", base: filepath.Join(root, "plugins", "claude-code"), meta: ".claude-plugin/plugin.json"},
 	} {
-		for _, rel := range []string{plugin.meta, "hooks/hooks.json", "scripts/run-hook.sh"} {
+		for _, rel := range []string{plugin.meta, "hooks/hooks.json", "scripts/run-hook.sh", "scripts/attribution-hook.sh"} {
 			path := filepath.Join(plugin.base, rel)
 			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 				t.Fatal(err)
@@ -461,6 +566,9 @@ func TestValidateReleaseLayoutRequiresExecutableHook(t *testing.T) {
 			}
 		}
 		if err := os.Chmod(filepath.Join(plugin.base, "scripts/run-hook.sh"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(filepath.Join(plugin.base, "scripts/attribution-hook.sh"), 0755); err != nil {
 			t.Fatal(err)
 		}
 	}

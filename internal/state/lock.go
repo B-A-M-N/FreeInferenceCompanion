@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"syscall"
 )
 
 // ErrLockBusy is returned when a lock file is already held by another process.
@@ -30,49 +29,20 @@ func NewFileLock(path string) *FileLock {
 // Acquire opens the lock file and acquires an exclusive non-blocking flock.
 // Returns ErrLockBusy if the lock is already held by another process.
 // Validates the lock file is a regular file (not a symlink) after opening.
-// Uses O_NOFOLLOW to prevent symlink-following attacks on the lock file itself.
+// Unix uses O_NOFOLLOW to prevent symlink-following attacks on the lock file;
+// Windows uses its native file-locking API.
 func (l *FileLock) Acquire() error {
-	f, err := os.OpenFile(l.path, os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0600)
-	if err != nil {
-		return fmt.Errorf("open lock file: %w", err)
-	}
-	// Validate the lock file is a regular file with correct permissions
-	if err := validateLockFile(f); err != nil {
-		f.Close()
-		return err
-	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		f.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) {
-			return ErrLockBusy
-		}
-		return fmt.Errorf("acquire lock: %w", err)
-	}
-	l.f = f
-	return nil
+	return acquireFileLock(l, false)
 }
 
 // AcquireBlocking opens the lock file and acquires an exclusive blocking flock.
 // Unlike Acquire, this blocks until the lock is available. Use this for
 // background workers (not hooks) where a brief wait is acceptable.
 // Validates the lock file is a regular file (not a symlink) after opening.
-// Uses O_NOFOLLOW to prevent symlink-following attacks on the lock file itself.
+// Unix uses O_NOFOLLOW to prevent symlink-following attacks on the lock file;
+// Windows uses its native file-locking API.
 func (l *FileLock) AcquireBlocking() error {
-	f, err := os.OpenFile(l.path, os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0600)
-	if err != nil {
-		return fmt.Errorf("open lock file: %w", err)
-	}
-	// Validate the lock file is a regular file with correct permissions
-	if err := validateLockFile(f); err != nil {
-		f.Close()
-		return err
-	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		f.Close()
-		return fmt.Errorf("acquire blocking lock: %w", err)
-	}
-	l.f = f
-	return nil
+	return acquireFileLock(l, true)
 }
 
 // validateLockFile ensures the lock file is a regular file with 0600 permissions.
@@ -94,18 +64,5 @@ func validateLockFile(f *os.File) error {
 
 // Release releases the flock and closes the file.
 func (l *FileLock) Release() error {
-	if l.f == nil {
-		return nil
-	}
-	if err := syscall.Flock(int(l.f.Fd()), syscall.LOCK_UN); err != nil {
-		l.f.Close()
-		l.f = nil
-		return fmt.Errorf("unlock: %w", err)
-	}
-	if err := l.f.Close(); err != nil {
-		l.f = nil
-		return fmt.Errorf("close lock: %w", err)
-	}
-	l.f = nil
-	return nil
+	return releaseFileLock(l)
 }

@@ -1,14 +1,20 @@
 package clientenv
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
+	"github.com/BurntSushi/toml"
 	"github.com/b-a-m-n/freeinference-companion/internal/api"
 	"github.com/b-a-m-n/freeinference-companion/internal/config"
 )
@@ -18,14 +24,22 @@ import (
 // FIC-owned metadata, never written into the client's config.toml.
 type CodexProxyAttestation struct {
 	UpstreamURL string `json:"upstream_url"`
+	ProxyURL    string `json:"proxy_url"`
 }
+
+// CodexProxyAttestationPath exposes the injective attestation location for
+// callers that need explicit cleanup or diagnostics.
+func CodexProxyAttestationPath(home, root string) string { return codexProxyPath(home, root) }
 
 func codexProxyPath(home, root string) string {
 	id, err := canonicalRootPath(root)
 	if err != nil {
 		id = filepath.Clean(root)
 	}
-	name := strings.ReplaceAll(strings.TrimLeft(id, "/"), "/", "_")
+	// SHA-256 is injective enough for configuration-root filenames and avoids
+	// separator/underscore collisions in the legacy encoder.
+	digest := sha256.Sum256([]byte(id))
+	name := hex.EncodeToString(digest[:])
 	return filepath.Join(home, ".config", "freeinference-companion", "clientenv", name+".codex-proxy.json")
 }
 
@@ -42,18 +56,26 @@ func SetCodexProxyAttestation(home, root, upstream string) error {
 	if strings.TrimSpace(root) == "" {
 		return errors.New("codex configuration root is empty")
 	}
-	endpoint, err := api.NormalizeEndpoint(upstream)
+	_, proxyURL, routeErr := VerifyCodexConfigRoute(home, root)
+	if routeErr != nil {
+		return fmt.Errorf("proxy configuration: %w", routeErr)
+	}
+	proxyRoute, proxyErr := normalizeLoopbackRoute(proxyURL)
+	if proxyErr != nil {
+		return fmt.Errorf("proxy configuration: %w", proxyErr)
+	}
+	route, endpoint, err := api.NormalizeRoute(upstream)
 	if err != nil {
 		return fmt.Errorf("upstream endpoint: %w", err)
 	}
-	if !endpoint.IsFI || endpoint.RequestURL != endpoint.Origin+"/v1" {
-		return errors.New("upstream endpoint is not an approved FreeInference /v1 route")
+	if !endpoint.IsFI || route != endpoint.Origin+api.CodexRoutePath {
+		return errors.New("upstream endpoint is not an approved FreeInference Codex /v1 route")
 	}
 	path := codexProxyPath(home, root)
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(CodexProxyAttestation{UpstreamURL: upstream}, "", "  ")
+	data, err := json.MarshalIndent(CodexProxyAttestation{UpstreamURL: upstream, ProxyURL: proxyRoute}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -105,8 +127,8 @@ func VerifyCodexConfigRoute(home, root string) (CodexRouteState, string, error) 
 	if !ok {
 		return CodexRouteUnrelated, "", nil
 	}
-	endpoint, endpointErr := api.NormalizeEndpoint(baseURL)
-	if endpointErr == nil && endpoint.IsFI && endpoint.RequestURL == endpoint.Origin+"/v1" {
+	route, endpoint, endpointErr := api.NormalizeRoute(baseURL)
+	if endpointErr == nil && endpoint.IsFI && route == endpoint.Origin+api.CodexRoutePath {
 		return CodexRouteVerifiedDirect, baseURL, nil
 	}
 	if !isLoopbackURL(baseURL) {
@@ -116,15 +138,30 @@ func VerifyCodexConfigRoute(home, root string) (CodexRouteState, string, error) 
 	if attestationErr != nil || attestation == nil {
 		return CodexRouteCandidate, baseURL, nil
 	}
-	upstream, upstreamErr := api.NormalizeEndpoint(attestation.UpstreamURL)
-	if upstreamErr != nil || !upstream.IsFI || upstream.RequestURL != upstream.Origin+"/v1" {
+	proxyRoute, proxyErr := normalizeLoopbackRoute(baseURL)
+	if proxyErr != nil || attestation.ProxyURL != proxyRoute {
+		return CodexRouteCandidate, baseURL, nil
+	}
+	upstreamRoute, upstream, upstreamErr := api.NormalizeRoute(attestation.UpstreamURL)
+	if upstreamErr != nil || !upstream.IsFI || upstreamRoute != upstream.Origin+api.CodexRoutePath {
 		return CodexRouteCandidate, baseURL, nil
 	}
 	return CodexRouteVerifiedProxy, baseURL, nil
 }
 
+func normalizeLoopbackRoute(raw string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || !isLoopbackURL(raw) {
+		return "", errors.New("selected route is not a valid loopback HTTP endpoint")
+	}
+	if u.RawPath != "" || strings.TrimRight(u.Path, "/") != api.CodexRoutePath {
+		return "", errors.New("selected route must use the loopback /v1 path")
+	}
+	return strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host) + api.CodexRoutePath, nil
+}
+
 func loadCodexProxyAttestation(home, root string) (*CodexProxyAttestation, error) {
-	data, err := os.ReadFile(codexProxyPath(home, root))
+	data, err := readBoundedNoFollow(codexProxyPath(home, root))
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
@@ -138,27 +175,31 @@ func loadCodexProxyAttestation(home, root string) (*CodexProxyAttestation, error
 	return &attestation, nil
 }
 
-func isLoopbackURL(raw string) bool {
-	host := strings.TrimSpace(strings.ToLower(hostOfURL(raw)))
-	return host == "localhost" || host == "127.0.0.1" || host == "::1" || strings.HasSuffix(host, ".localhost")
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
-func hostOfURL(raw string) string {
-	trimmed := strings.TrimSpace(raw)
-	if after, ok := strings.CutPrefix(trimmed, "http://"); ok {
-		trimmed = after
-	} else if after, ok := strings.CutPrefix(trimmed, "https://"); ok {
-		trimmed = after
+func isLoopbackURL(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || !strings.EqualFold(u.Scheme, "http") && !strings.EqualFold(u.Scheme, "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" || strings.HasSuffix(u.Host, ":") {
+		return false
 	}
-	if slash := strings.IndexByte(trimmed, '/'); slash >= 0 {
-		trimmed = trimmed[:slash]
+	if u.Hostname() == "" || !isLoopbackHost(u.Hostname()) {
+		return false
 	}
-	// Strip port. IPv6 hosts in this comparison are either bare ::1 or
-	// bracketed; a simple suffix cut is sufficient for loopback detection.
-	if colon := strings.LastIndexByte(trimmed, ':'); colon >= 0 && !strings.Contains(trimmed, "]") {
-		trimmed = trimmed[:colon]
+	if port := u.Port(); port != "" {
+		value, err := strconv.Atoi(port)
+		if err != nil || value < 1 || value > 65535 {
+			return false
+		}
 	}
-	return strings.Trim(trimmed, "[]")
+	return true
 }
 
 func readAllBounded(f *os.File) ([]byte, error) {
@@ -174,40 +215,19 @@ func readAllBounded(f *os.File) ([]byte, error) {
 }
 
 func parseSelectedCodexProvider(contents string) (string, string, bool) {
-	table := ""
-	selected := ""
-	providers := map[string]string{}
-	for _, line := range strings.Split(contents, "\n") {
-		if hash := strings.IndexByte(line, '#'); hash >= 0 {
-			line = line[:hash]
-		}
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
-			table = strings.TrimSpace(line[1 : len(line)-1])
-			continue
-		}
-		key, value, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		key, value = strings.TrimSpace(key), strings.TrimSpace(value)
-		value, ok = parseConfigString(value)
-		if !ok {
-			continue
-		}
-		if table == "" && key == "model_provider" {
-			selected = value
-		}
-		if strings.HasPrefix(table, "model_providers.") && key == "base_url" {
-			providers[strings.TrimPrefix(table, "model_providers.")] = value
-		}
+	var document struct {
+		ModelProvider string `toml:"model_provider"`
+		Providers     map[string]struct {
+			BaseURL string `toml:"base_url"`
+		} `toml:"model_providers"`
 	}
-	if selected == "" {
+	if err := toml.Unmarshal([]byte(contents), &document); err != nil {
+		return "", "", false
+	}
+	selected := document.ModelProvider
+	if strings.TrimSpace(selected) == "" {
 		selected = "openai"
 	}
-	base, ok := providers[selected]
-	return selected, base, ok
+	provider, ok := document.Providers[selected]
+	return selected, provider.BaseURL, ok && strings.TrimSpace(provider.BaseURL) != ""
 }

@@ -19,10 +19,19 @@ freeinference attribution set off|append|standalone [--json]
 | `append` | append inference attribution | no change |
 | `standalone` | append and deduplicate provenance | append inference attribution |
 
-The attribution is:
+The formatter emits one of these exact footer forms:
+
+When the model is known:
 
 ```text
 Inference: <model> via FreeInference.org
+Support-FreeInference: https://freeinference.org/
+```
+
+When the model is unavailable, the fallback is:
+
+```text
+Inference provided via FreeInference.org.
 Support-FreeInference: https://freeinference.org/
 ```
 
@@ -35,16 +44,19 @@ By default, `install` and `update` also reconcile alternate Claude/Codex roots w
 ```text
 freeinference integrations list [--json]
 freeinference integrations discover [--json]
-freeinference integrations add --client claude-code|codex --root /path/to/root
+freeinference integrations add --client claude-code|codex --root /path/to/root [--proxy-upstream <url>]
 freeinference integrations remove --client claude-code|codex --root /path/to/root
+freeinference integrations diagnose --client claude-code|codex --root /path/to/root [--model <id>] [--json]
 ```
 
-Identity is `(client type, configuration root)`; model profiles inside one root remain one environment. Alternate roots must independently prove an approved FreeInference `/v1` route:
+Identity is `(client type, configuration root)`; model profiles inside one root remain one environment. Alternate roots must independently prove the approved FreeInference route for their client:
 
 - Claude: `settings.json` `env.ANTHROPIC_BASE_URL`
 - Codex: selected provider's `model_providers.<id>.base_url`
 
-Discovery never recursively scans projects and never uses launcher names. Explicit `add` supports arbitrary roots. Codex loopback routes are candidates and require `--proxy-upstream <approved FI /v1 URL>`; direct `https://freeinference.org/v1` roots verify automatically. `integrations diagnose` reports route state, plugin manager state, and generated model capabilities without mutating `models.json`. Existing unowned Companion directories are refused; modified owned installs are preserved until reconciled safely. `remove` deletes only paths derived from the recorded identity and only after digest ownership checks pass.
+Discovery never recursively scans projects and never uses launcher names. Explicit `add` supports arbitrary roots. Codex loopback routes are candidates and require `--proxy-upstream <approved FI /v1 URL>`; direct `https://freeinference.org/v1` roots verify automatically. `integrations diagnose` reports route state and generated model capabilities without mutating `models.json`; pass `--model <id>` to evaluate only the selected catalog entry, otherwise the diagnostic uses the conservative strictest result across the catalog. Existing unowned Companion directories are refused; modified owned installs are preserved until reconciled safely. `remove` deletes only paths derived from the recorded identity and only after digest ownership checks pass.
+
+Route matching is exact by client: Claude uses `https://freeinference.org/anthropic` and Codex uses `https://freeinference.org/v1`. Trailing slashes are ignored, but prefixes, alternate paths, query strings, fragments, credentials, escaped paths, and non-approved ports are rejected. Port `443` is equivalent to the default HTTPS port. Claude profiles still using the legacy FreeInference `/v1` route are skipped with a migration warning; change `env.ANTHROPIC_BASE_URL` to `https://freeinference.org/anthropic` and rerun discovery or install.
 
 | Command | Description |
 | --- | --- |
@@ -71,15 +83,16 @@ Discovery never recursively scans projects and never uses launcher names. Explic
 | `freeinference companion status\|enable\|disable` | Inspect or change the local Companion kill switch |
 | `freeinference hook <client> <event>` | Process a Claude Code or Codex lifecycle event; hooks are fail-open and local-only |
 | `freeinference version [--json]` | Show binary and state-schema version information |
+| `freeinference integrations list [--json]` | Show additional client environments owned by the installer |
+| `freeinference integrations discover [--json]` | Show canonical, exported, and bounded-discovery client roots |
+| `freeinference integrations diagnose --client <type> --root <path> [--model <id>] [--json]` | Inspect the selected route and generated model capabilities without mutation |
+| `freeinference integrations add\|remove --client claude-code\|codex --root <path>` | Explicitly register or remove one alternate client environment |
 
 The `--refresh` options and `refresh` command are explicit network operations.
 They are not part of ordinary hooks, status rendering, plugin installation, or
 Codex skill installation. `doctor --probe --model <name>` is the only normal
 command path that intentionally sends a synthetic inference request, and it
 must be requested explicitly.
-| `freeinference integrations list [--json]` | Show additional client environments owned by the installer |
-| `freeinference integrations discover [--json]` | Show canonical, exported, and bounded-discovery client roots |
-| `freeinference integrations add\|remove --client claude-code\|codex --root <path>` | Explicitly register or remove one alternate client environment |
 | `freeinference install --help` | Install a release; supports `--no-integration-discovery` for canonical-only fan-out |
 | `freeinference update --help` | Update a release; supports `--no-integration-discovery` for canonical-only fan-out |
 

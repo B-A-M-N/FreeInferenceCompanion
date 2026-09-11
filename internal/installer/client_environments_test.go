@@ -1,6 +1,7 @@
 package installer
 
 import (
+	"errors"
 	"io"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/clientenv"
@@ -54,7 +55,7 @@ func TestReconcileInstallsFreeInferenceProfilesAndRecordsOwnership(t *testing.T)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	claudeRoot := filepath.Join(home, ".config", "claude-profiles", "fi-profile-a")
 	codexRoot := filepath.Join(home, ".custom-codex")
-	writeIntegrationFixture(t, filepath.Join(claudeRoot, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://freeinference.org/v1"}}`)
+	writeIntegrationFixture(t, filepath.Join(claudeRoot, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://freeinference.org/anthropic"}}`)
 	writeIntegrationFixture(t, filepath.Join(codexRoot, "config.toml"), "model_provider = \"fi\"\n\n[model_providers.fi]\nbase_url = \"https://freeinference.org/v1\"\n")
 	claudeSource := pluginFixture(t, "claude", "claude-v1")
 	codexSource := pluginFixture(t, "codex", "codex-v1")
@@ -98,9 +99,8 @@ func TestReconcileUpdatesPreviouslyRecordedProfileEvenWhenNoLongerDiscovered(t *
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "old-profile"))
 	t.Setenv("CODEX_HOME", "")
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	// First integration records ownership.
 	claudeRoot := filepath.Join(home, "old-profile")
-	writeIntegrationFixture(t, filepath.Join(claudeRoot, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://freeinference.org/v1"}}`)
+	writeIntegrationFixture(t, filepath.Join(claudeRoot, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://freeinference.org/anthropic"}}`)
 	source := pluginFixture(t, "claude", "v1")
 	if _, err := ReconcileClientEnvironments(reconcileOptions{
 		home:          home,
@@ -110,19 +110,30 @@ func TestReconcileUpdatesPreviouslyRecordedProfileEvenWhenNoLongerDiscovered(t *
 	}); err != nil {
 		t.Fatal(err)
 	}
-	// Configuration no longer identifies the profile, but Companion still owns
-	// its plugin and must upgrade it rather than strand the old copy.
+	// Remove both the selected endpoint and the environment variable. The next
+	// operation must still find the root solely through SourceRecorded.
 	if err := os.Remove(filepath.Join(claudeRoot, "settings.json")); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	first, _ := clientenv.Discover(home)
+	for _, environment := range first {
+		if filepath.Clean(environment.ConfigRoot) == filepath.Clean(claudeRoot) {
+			t.Fatalf("removed environment still discovered: %+v", first)
+		}
+	}
 	newSource := pluginFixture(t, "claude-new", "v2")
-	if _, err := ReconcileClientEnvironments(reconcileOptions{
+	results, err := ReconcileClientEnvironments(reconcileOptions{
 		home:          home,
 		pluginSources: map[clientenv.Client]string{clientenv.ClientClaudeCode: newSource},
 		version:       "v0.2.0",
 		discovery:     true,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Source() != "recorded" || results[0].Action != "installed" {
+		t.Fatalf("recorded reconciliation result = %+v", results)
 	}
 	data, err := os.ReadFile(filepath.Join(claudeRoot, "plugins", "freeinference-companion", "scripts", "run-hook.sh"))
 	if err != nil || !strings.Contains(string(data), "v2") {
@@ -137,7 +148,7 @@ func TestReconcileRefusesUnownedExistingCompanionDirectory(t *testing.T) {
 	t.Setenv("CODEX_HOME", "")
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	claudeRoot := filepath.Join(home, "claude-profile")
-	writeIntegrationFixture(t, filepath.Join(claudeRoot, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://freeinference.org/v1"}}`)
+	writeIntegrationFixture(t, filepath.Join(claudeRoot, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://freeinference.org/anthropic"}}`)
 	foreign := filepath.Join(claudeRoot, "plugins", "freeinference-companion")
 	writeIntegrationFixture(t, filepath.Join(foreign, "keep.txt"), "foreign")
 	results, err := ReconcileClientEnvironments(reconcileOptions{
@@ -165,7 +176,7 @@ func TestReconcileDoesNotOverwriteModifiedOwnedProfile(t *testing.T) {
 	t.Setenv("CODEX_HOME", "")
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	claudeRoot := filepath.Join(home, "claude-profile")
-	writeIntegrationFixture(t, filepath.Join(claudeRoot, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://freeinference.org/v1"}}`)
+	writeIntegrationFixture(t, filepath.Join(claudeRoot, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://freeinference.org/anthropic"}}`)
 	if _, err := ReconcileClientEnvironments(reconcileOptions{
 		home:          home,
 		pluginSources: map[clientenv.Client]string{clientenv.ClientClaudeCode: pluginFixture(t, "claude", "v1")},
@@ -210,7 +221,7 @@ func TestReconcileOnlyDiscoversFreeInferenceEnvironments(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	fiRoot := filepath.Join(home, ".config", "engines", "fi")
 	otherRoot := filepath.Join(home, ".config", "engines", "other")
-	writeIntegrationFixture(t, filepath.Join(fiRoot, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://freeinference.org/v1"}}`)
+	writeIntegrationFixture(t, filepath.Join(fiRoot, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://freeinference.org/anthropic"}}`)
 	writeIntegrationFixture(t, filepath.Join(otherRoot, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://api.openai.com/v1"}}`)
 	nonFICodex := filepath.Join(home, ".another-codex")
 	writeIntegrationFixture(t, filepath.Join(nonFICodex, "config.toml"), "model_provider = \"openai\"\n\n[model_providers.openai]\nbase_url = \"https://api.openai.com/v1\"\n")
@@ -235,7 +246,7 @@ func TestReconcileNoDiscoveryKeepsCanonicalOnly(t *testing.T) {
 	t.Setenv("CODEX_HOME", "")
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	claudeRoot := filepath.Join(home, "claude-profile")
-	writeIntegrationFixture(t, filepath.Join(claudeRoot, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://freeinference.org/v1"}}`)
+	writeIntegrationFixture(t, filepath.Join(claudeRoot, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://freeinference.org/anthropic"}}`)
 	results, err := ReconcileClientEnvironments(reconcileOptions{
 		home:          home,
 		pluginSources: map[clientenv.Client]string{clientenv.ClientClaudeCode: pluginFixture(t, "claude", "v1")},
@@ -250,6 +261,96 @@ func TestReconcileNoDiscoveryKeepsCanonicalOnly(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(claudeRoot, "plugins")); !os.IsNotExist(err) {
 		t.Fatalf("no-discovery mode mutated profile: %v", err)
+	}
+}
+
+func TestReconcileNoDiscoveryPreservesRecordedIntegrations(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "recorded-profile"))
+	t.Setenv("CODEX_HOME", "")
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	root := filepath.Join(home, "recorded-profile")
+	writeIntegrationFixture(t, filepath.Join(root, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://freeinference.org/anthropic"}}`)
+	if _, err := ReconcileClientEnvironments(reconcileOptions{
+		home:          home,
+		pluginSources: map[clientenv.Client]string{clientenv.ClientClaudeCode: pluginFixture(t, "claude-v1", "v1")},
+		version:       "v0.1.0",
+		discovery:     true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	newSource := pluginFixture(t, "claude-v2", "v2")
+	results, err := ReconcileClientEnvironments(reconcileOptions{
+		home:          home,
+		pluginSources: map[clientenv.Client]string{clientenv.ClientClaudeCode: newSource},
+		version:       "v0.2.0",
+		discovery:     false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("no-discovery mode reported recorded integrations: %+v", results)
+	}
+	plugin := filepath.Join(root, "plugins", "freeinference-companion", "scripts", "run-hook.sh")
+	data, err := os.ReadFile(plugin)
+	if err != nil || !strings.Contains(string(data), "v1") || strings.Contains(string(data), "v2") {
+		t.Fatalf("recorded integration was mutated: %q, %v", data, err)
+	}
+	metadata, err := loadClientEnvironmentMetadata(clientEnvironmentMetadataPath(home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := integrationByID(t, metadata, "claude-code", root)
+	if record == nil || record.Version != "v0.1.0" {
+		t.Fatalf("recorded integration was forgotten or upgraded: %+v", metadata.Integrations)
+	}
+}
+
+func TestReconcileKeepsOwnershipAfterRollbackCleanupWarning(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "recorded-profile"))
+	t.Setenv("CODEX_HOME", "")
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	root := filepath.Join(home, "recorded-profile")
+	writeIntegrationFixture(t, filepath.Join(root, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://freeinference.org/anthropic"}}`)
+	if _, err := ReconcileClientEnvironments(reconcileOptions{
+		home:          home,
+		pluginSources: map[clientenv.Client]string{clientenv.ClientClaudeCode: pluginFixture(t, "claude-v1", "v1")},
+		version:       "v0.1.0",
+		discovery:     true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	transactionFinalizeFailureHook = func(target string) error {
+		if target == filepath.Join(root, "plugins", "freeinference-companion") {
+			return errors.New("injected rollback cleanup failure")
+		}
+		return nil
+	}
+	t.Cleanup(func() { transactionFinalizeFailureHook = nil })
+	results, err := ReconcileClientEnvironments(reconcileOptions{
+		home:          home,
+		pluginSources: map[clientenv.Client]string{clientenv.ClientClaudeCode: pluginFixture(t, "claude-v2", "v2")},
+		version:       "v0.2.0",
+		discovery:     true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Warning == "" || results[0].Action != "installed" {
+		t.Fatalf("cleanup warning result = %+v", results)
+	}
+	metadata, err := loadClientEnvironmentMetadata(clientEnvironmentMetadataPath(home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := integrationByID(t, metadata, "claude-code", root)
+	if record == nil || record.Version != "v0.2.0" {
+		t.Fatalf("active ownership record was not retained: %+v", metadata.Integrations)
 	}
 }
 
@@ -274,7 +375,7 @@ func TestInstallReconcilesNewProfilesAtSameVersion(t *testing.T) {
 
 	claudeRoot := filepath.Join(home, ".config", "claude-profiles", "fi-profile-a")
 	codexRoot := filepath.Join(home, ".custom-codex")
-	writeIntegrationFixture(t, filepath.Join(claudeRoot, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://freeinference.org/v1"}}`)
+	writeIntegrationFixture(t, filepath.Join(claudeRoot, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://freeinference.org/anthropic"}}`)
 	writeIntegrationFixture(t, filepath.Join(codexRoot, "config.toml"), "model_provider = \"fi\"\n\n[model_providers.fi]\nbase_url = \"https://freeinference.org/v1\"\n")
 
 	second, err := Install(Options{ManifestURL: manifestURL, Platform: "linux-amd64"}, io.Discard, io.Discard)
@@ -311,7 +412,7 @@ func TestUninstallClientEnvironmentsRemovesOnlyRecordedOwnedPaths(t *testing.T) 
 	t.Setenv("CODEX_HOME", "")
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	claudeRoot := filepath.Join(home, "claude-profile")
-	writeIntegrationFixture(t, filepath.Join(claudeRoot, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://freeinference.org/v1"}}`)
+	writeIntegrationFixture(t, filepath.Join(claudeRoot, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://freeinference.org/anthropic"}}`)
 	if _, err := ReconcileClientEnvironments(reconcileOptions{
 		home:          home,
 		pluginSources: map[clientenv.Client]string{clientenv.ClientClaudeCode: pluginFixture(t, "claude", "v1")},
@@ -427,12 +528,17 @@ func TestAddClientIntegrationRegistersExplicitArbitraryRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	metadata := metadataForPaths(paths, "v0.2.0", "https://example.test", strings.Repeat("a", 64), "v0.2.0")
-	metadata.ClaudePluginSHA256, _ = pathDigest(paths.ClaudePluginPath)
+	metadata.ClaudePluginVersion = "v0.2.0"
+	metadata.CoreClaudePluginPath = paths.CoreClaudePluginPath
+	metadata.CoreClaudePluginSHA256, err = pathDigest(paths.CoreClaudePluginPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := SaveInstallationMetadata(paths.MetadataPath(), metadata); err != nil {
 		t.Fatal(err)
 	}
 	root := filepath.Join(home, "weird-explicit-profile")
-	writeIntegrationFixture(t, filepath.Join(root, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://freeinference.org/v1"}}`)
+	writeIntegrationFixture(t, filepath.Join(root, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://freeinference.org/anthropic"}}`)
 	integration, err := AddClientIntegration(home, clientenv.ClientClaudeCode, root, io.Discard)
 	if err != nil {
 		t.Fatal(err)
@@ -457,6 +563,32 @@ func TestAddClientIntegrationRejectsNonFreeInferenceRoot(t *testing.T) {
 	}
 }
 
+func TestAddClientIntegrationHonorsCodexProxyAttestation(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	t.Setenv("CODEX_HOME", "")
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("PATH", "/usr/bin:/bin")
+	manifestURL, _, server := testServer(t, "v0.2.0", "linux-amd64")
+	defer server.Close()
+	if _, err := Install(Options{ManifestURL: manifestURL, Platform: "linux-amd64"}, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(home, "loopback-codex")
+	writeIntegrationFixture(t, filepath.Join(root, "config.toml"), "model_provider = \"fi\"\n\n[model_providers.fi]\nbase_url = \"http://127.0.0.1:18769/v1\"\n")
+	if err := clientenv.SetCodexProxyAttestation(home, root, "https://freeinference.org/v1"); err != nil {
+		t.Fatal(err)
+	}
+	integration, err := AddClientIntegration(home, clientenv.ClientCodex, root, io.Discard)
+	if err != nil {
+		t.Fatalf("attested loopback integration rejected: %v", err)
+	}
+	if integration.Client != string(clientenv.ClientCodex) || integration.ConfigRoot != root {
+		t.Fatalf("integration summary = %+v", integration)
+	}
+}
+
 func TestRemoveClientIntegrationRemovesOnlySelectedEnvironment(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -466,7 +598,7 @@ func TestRemoveClientIntegrationRemovesOnlySelectedEnvironment(t *testing.T) {
 	keepRoot := filepath.Join(home, ".config", "claude-code", "keep")
 	removeRoot := filepath.Join(home, ".config", "claude-code", "remove")
 	for _, root := range []string{keepRoot, removeRoot} {
-		writeIntegrationFixture(t, filepath.Join(root, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://freeinference.org/v1"}}`)
+		writeIntegrationFixture(t, filepath.Join(root, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://freeinference.org/anthropic"}}`)
 	}
 	if _, err := ReconcileClientEnvironments(reconcileOptions{
 		home: home,
@@ -507,7 +639,7 @@ func TestReconcileMissingRecordedEnvironmentIsMarkedMissingAndMetadataPruned(t *
 	t.Setenv("CODEX_HOME", "")
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	root := filepath.Join(home, "temporary-profile")
-	writeIntegrationFixture(t, filepath.Join(root, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://freeinference.org/v1"}}`)
+	writeIntegrationFixture(t, filepath.Join(root, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://freeinference.org/anthropic"}}`)
 	if _, err := ReconcileClientEnvironments(reconcileOptions{
 		home: home,
 		pluginSources: map[clientenv.Client]string{
@@ -555,7 +687,7 @@ func TestReconcileSymlinkedTargetPluginPathIsRefused(t *testing.T) {
 	t.Setenv("CODEX_HOME", "")
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	root := filepath.Join(home, "claude-profile")
-	writeIntegrationFixture(t, filepath.Join(root, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://freeinference.org/v1"}}`)
+	writeIntegrationFixture(t, filepath.Join(root, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://freeinference.org/anthropic"}}`)
 	realPlugin := filepath.Join(home, "real-plugin")
 	if err := os.MkdirAll(realPlugin, 0700); err != nil {
 		t.Fatal(err)
@@ -593,7 +725,7 @@ func TestReconcileOneProfileFailureKeepsOtherProfileSuccessful(t *testing.T) {
 	t.Setenv("CODEX_HOME", filepath.Join(home, ".good-codex"))
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	broken := filepath.Join(home, "broken-profile")
-	writeIntegrationFixture(t, filepath.Join(broken, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://freeinference.org/v1"}}`)
+	writeIntegrationFixture(t, filepath.Join(broken, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"https://freeinference.org/anthropic"}}`)
 	writeIntegrationFixture(t, filepath.Join(broken, "plugins", "freeinference-companion", "foreign.txt"), "foreign")
 	good := filepath.Join(home, ".good-codex")
 	writeIntegrationFixture(t, filepath.Join(good, "config.toml"), "model_provider = \"fi\"\n\n[model_providers.fi]\nbase_url = \"https://freeinference.org/v1\"\n")

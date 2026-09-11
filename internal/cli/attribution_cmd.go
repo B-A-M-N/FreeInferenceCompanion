@@ -94,6 +94,7 @@ func attributionSet(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "error: encode attribution mode: %v\n", err)
 			return 1
 		}
+		return 0
 	}
 	fmt.Fprintf(stdout, "Commit attribution set to %s.\n", cfg.Attribution.CommitMode)
 	return 0

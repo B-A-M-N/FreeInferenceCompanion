@@ -3,9 +3,11 @@ package clientenv
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/config"
 )
@@ -15,6 +17,8 @@ import (
 type CodexModelCapabilities struct {
 	Path           string   `json:"path"`
 	Models         int      `json:"models"`
+	SelectedModel  string   `json:"selected_model,omitempty"`
+	Scope          string   `json:"scope"`
 	SkillsAllowed  bool     `json:"skills_allowed"`
 	PluginsAllowed bool     `json:"plugins_allowed"`
 	AppsAllowed    bool     `json:"apps_allowed"`
@@ -25,29 +29,49 @@ type CodexModelCapabilities struct {
 // reports the strictest capability settings across all entries. A missing
 // catalog is not a blocker: native default catalogs may expose plugins.
 func InspectCodexModelCatalog(codexHome string) (CodexModelCapabilities, error) {
+	return inspectCodexModelCatalog(codexHome, "")
+}
+
+// InspectCodexModelCatalogForModel evaluates one selected model when the
+// caller knows which model the Codex session will use. Without a selection,
+// InspectCodexModelCatalog intentionally remains conservative and evaluates
+// every catalog entry.
+func InspectCodexModelCatalogForModel(codexHome, modelID string) (CodexModelCapabilities, error) {
+	return inspectCodexModelCatalog(codexHome, strings.TrimSpace(modelID))
+}
+
+func inspectCodexModelCatalog(codexHome, selectedModel string) (CodexModelCapabilities, error) {
 	path := filepath.Join(codexHome, "models.json")
-	result := CodexModelCapabilities{Path: path, SkillsAllowed: true, PluginsAllowed: true}
+	result := CodexModelCapabilities{Path: path, Scope: "all", SkillsAllowed: true, PluginsAllowed: true, AppsAllowed: true}
+	if selectedModel != "" {
+		result.SelectedModel = selectedModel
+		result.Scope = "selected"
+	}
+	failClosed := func(err error) (CodexModelCapabilities, error) {
+		result.SkillsAllowed, result.PluginsAllowed, result.AppsAllowed = false, false, false
+		return result, err
+	}
 	f, err := config.OpenNoFollow(path)
 	if os.IsNotExist(err) {
 		return result, nil
 	}
 	if err != nil {
-		return result, err
+		return failClosed(err)
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil {
-		return result, err
+		return failClosed(err)
 	}
 	if !info.Mode().IsRegular() {
-		return result, errors.New("model catalog is not a regular file")
+		return failClosed(errors.New("model catalog is not a regular file"))
 	}
 	data, err := io.ReadAll(io.LimitReader(f, 2<<20+1))
 	if err != nil {
-		return result, err
+		return failClosed(err)
 	}
 	if len(data) > 2<<20 {
-		return result, errors.New("model catalog exceeds the supported size limit")
+		return failClosed(errors.New("model catalog exceeds the supported size limit"))
 	}
 	var catalog struct {
 		Models []struct {
@@ -58,25 +82,36 @@ func InspectCodexModelCatalog(codexHome string) (CodexModelCapabilities, error) 
 		} `json:"models"`
 	}
 	if err := json.Unmarshal(data, &catalog); err != nil {
-		return result, errors.New("model catalog is invalid")
+		return failClosed(errors.New("model catalog is invalid"))
 	}
 	result.Models = len(catalog.Models)
+	matched := selectedModel == ""
 	for _, model := range catalog.Models {
+		if selectedModel != "" && model.ID != selectedModel {
+			continue
+		}
+		matched = true
 		if model.IncludeSkillsUsageInstructions != nil && !*model.IncludeSkillsUsageInstructions {
 			result.SkillsAllowed = false
 		}
 		if model.IncludePluginUsageInstructions != nil && !*model.IncludePluginUsageInstructions {
 			result.PluginsAllowed = false
 		}
-		if model.IncludeAppsUsageInstructions != nil {
-			result.AppsAllowed = result.AppsAllowed || *model.IncludeAppsUsageInstructions
+		if model.IncludeAppsUsageInstructions != nil && !*model.IncludeAppsUsageInstructions {
+			result.AppsAllowed = false
 		}
+	}
+	if !matched {
+		return failClosed(fmt.Errorf("model %q is not present in the Codex catalog", selectedModel))
 	}
 	if !result.SkillsAllowed {
 		result.Blockers = append(result.Blockers, "include_skills_usage_instructions=false")
 	}
 	if !result.PluginsAllowed {
 		result.Blockers = append(result.Blockers, "include_plugin_usage_instructions=false")
+	}
+	if !result.AppsAllowed {
+		result.Blockers = append(result.Blockers, "include_apps_usage_instructions=false")
 	}
 	return result, nil
 }

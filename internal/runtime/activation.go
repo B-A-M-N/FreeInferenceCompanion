@@ -505,7 +505,8 @@ func isClaudeRoute(id *api.EndpointIdentity) bool {
 	if id == nil {
 		return false
 	}
-	return strings.TrimRight(id.RequestURL, "/") == strings.TrimRight(id.Origin, "/")+"/anthropic"
+	route, normalized, err := api.NormalizeRoute(id.RequestURL)
+	return err == nil && normalized.IsFI && route == normalized.Origin+api.ClaudeRoutePath
 }
 
 func evaluateCodexActivation(a Activation, evidence ClientEvidence) Activation {
@@ -541,7 +542,8 @@ func evaluateCodexActivation(a Activation, evidence ClientEvidence) Activation {
 		a.InactiveReason = ReasonEndpointNotApproved
 		return a
 	}
-	if strings.TrimRight(id.RequestURL, "/") != id.Origin+"/v1" {
+	route, _, routeErr := api.NormalizeRoute(id.RequestURL)
+	if routeErr != nil || route != id.Origin+api.CodexRoutePath {
 		a.InactiveReason = ReasonEndpointInvalid
 		return a
 	}

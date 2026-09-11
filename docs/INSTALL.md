@@ -11,7 +11,7 @@ along with `checksums.txt`. Set `VERSION` to the release you are installing
 and verify the exact archive before extracting it:
 
 ```bash
-VERSION=0.1.1
+VERSION=0.1.2
 PLATFORM=linux-amd64       # linux-arm64, darwin-amd64, or darwin-arm64
 ARCHIVE="freeinference-companion-${VERSION}-${PLATFORM}.tar.gz"
 
@@ -39,10 +39,11 @@ one bounded authenticated model-catalog check in addition to local checks. It
 does not query health/account/public-status endpoints or send an inference
 request unless `--probe --model <name>` is explicitly supplied.
 
-The combined platform ZIP contains the Claude Code plugin tree. Codex is
-installed separately through its native marketplace manager. The CLI installer
-can consume a release `marketplace.json` and will verify the platform ZIP
-checksum before installing:
+The combined platform ZIP contains the Claude Code plugin tree and, in current
+releases, the skill-only Codex plugin tree. The CLI installer verifies the
+platform ZIP checksum, installs both canonical client payloads, and registers
+the Codex payload through its native marketplace manager when the Codex CLI is
+available:
 
 ```bash
 freeinference install --platform linux-amd64
@@ -74,10 +75,15 @@ those refreshes are throttled, coalesced, and circuit-breaker protected.
 
 `freeinference install` targets canonical `~/.claude` and `~/.codex`, then
 reconciles alternate Claude/Codex environments whose selected configuration
-routes to an approved FreeInference `/v1` endpoint. Bounded discovery examines
+routes to the approved client-specific FreeInference endpoint. Bounded discovery examines
 `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, immediate hidden Codex homes under `$HOME`,
 and `$XDG_CONFIG_HOME` to two directory levels. It does not crawl projects,
 backups, or arbitrary launcher scripts.
+
+Claude profiles using the former FreeInference `/v1` route are intentionally
+not integrated. Update `env.ANTHROPIC_BASE_URL` in their `settings.json` to
+`https://freeinference.org/anthropic`, then rerun `freeinference integrations discover`
+or `freeinference install`.
 
 For a root discovery cannot infer, register it explicitly:
 
@@ -99,7 +105,7 @@ freeinference integrations add --client codex --root /path/to/profile \
 Diagnose one profile, including generated model capability flags:
 
 ```bash
-freeinference integrations diagnose --client codex --root /path/to/profile [--json]
+freeinference integrations diagnose --client codex --root /path/to/profile [--model <id>] [--json]
 ```
 
 A usable Codex plugin environment must allow both:
@@ -109,7 +115,15 @@ A usable Codex plugin environment must allow both:
 ```
 
 FIC detects blocking catalogs read-only; it never rewrites an
-externally generated `models.json`. Use
+externally generated `models.json`. Without `--model`, diagnostics report the
+strictest setting across all catalog entries. With `--model <id>`, they report
+only that selected model. The installer records Codex payload installation,
+marketplace registration, and plugin registration separately in `core.json`;
+an incomplete native registration is reported as a warning rather than being
+mistaken for a complete integration. A new Codex session may be required
+before a newly registered plugin is visible.
+
+Use
 `freeinference install --no-integration-discovery` to restrict fan-out to
 canonical roots. Existing unowned Companion directories are never overwritten.
 Already-installed profiles are upgraded on later installs, including when the

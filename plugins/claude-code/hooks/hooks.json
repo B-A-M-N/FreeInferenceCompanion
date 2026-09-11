@@ -99,12 +99,12 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "*",
+        "matcher": "Bash",
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/run-hook.sh\" PreToolUse",
-            "timeout": 5
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/attribution-hook.sh\" PreToolUse",
+            "timeout": 10
           }
         ]
       }

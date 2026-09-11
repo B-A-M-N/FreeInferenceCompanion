@@ -51,7 +51,7 @@ The report explicitly excludes:
 ```
 FreeInference Companion Report
 ============================================================
-Version:    0.1.1
+Version:    0.1.2
 Generated:  2026-07-27T20:30:00Z
 
 --- Session ---

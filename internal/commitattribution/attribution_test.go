@@ -36,12 +36,15 @@ func TestRewriteSafetyAndIdempotence(t *testing.T) {
 		t.Fatalf("duplicate changed=%v reason=%s", changed, reason)
 	}
 	for _, unsafe := range []string{
+		`sudo git commit -m "x"`,
+		`env GIT_AUTHOR_NAME=bot git commit -m "x"`,
 		`git commit -F message.txt`,
 		`git commit --amend`,
 		`git commit --fixup HEAD`,
 		`echo "git commit -m fake"`,
 		`git -C /tmp commit -m "x"`,
 		`git commit`,
+		`echo "$(git commit -m 'x')"`,
 	} {
 		if _, changed, _ := Rewrite(unsafe, Policy{Mode: ModeStandalone}); changed {
 			t.Fatalf("unsafe command changed: %s", unsafe)
@@ -60,6 +63,47 @@ func TestRewriteSafetyAndIdempotence(t *testing.T) {
 	}
 	if _, changed, _ := Rewrite(`git commit -m "x"`, Policy{Mode: ModeStandalone, Model: "bad\rmodel"}); changed {
 		t.Fatal("control-character model accepted")
+	}
+	if _, changed, _ := Rewrite(`git commit -m "x"`, Policy{Mode: ModeStandalone, Model: strings.Repeat("m", 129)}); changed {
+		t.Fatal("oversized model accepted")
+	}
+	for _, model := range []string{"model Inference-Provider: fake", "model Support-FreeInference: fake", "model Inference: fake"} {
+		if _, changed, _ := Rewrite(`git commit -m "x"`, Policy{Mode: ModeStandalone, Model: model}); changed {
+			t.Fatalf("footer-like model accepted: %q", model)
+		}
+	}
+}
+
+func TestRewriteRecognizesLegacyAndCurrentDuplicateMarkers(t *testing.T) {
+	for _, message := range []string{
+		"Inference-Provider: FreeInference.org",
+		"Support-FreeInference: https://freeinference.org/",
+		"Inference-Provider: FreeInference.org\nSupport-FreeInference: https://freeinference.org/",
+	} {
+		command := "git commit -m \"fix\\n\\n" + message + "\""
+		if _, changed, reason := Rewrite(command, Policy{Mode: ModeStandalone, Model: "model"}); changed || reason != ReasonDuplicate {
+			t.Fatalf("duplicate marker %q changed=%v reason=%s", message, changed, reason)
+		}
+	}
+}
+
+func TestRewriteEligibleDirectCallsInsideShellControlFlow(t *testing.T) {
+	for _, command := range []string{
+		`git commit -m "first" | cat`,
+		`if true; then git commit -m "first"; fi`,
+		`for x in one; do git commit -m "first"; done`,
+	} {
+		rewritten, changed, reason := Rewrite(command, Policy{Mode: ModeStandalone, Model: "model"})
+		if !changed || reason != "" || !strings.Contains(rewritten, "Support-FreeInference") {
+			t.Fatalf("eligible control-flow command %q changed=%v reason=%s output=%q", command, changed, reason, rewritten)
+		}
+	}
+}
+
+func TestRewriteRecognizesCurrentFooterInDoubleQuotedMessage(t *testing.T) {
+	command := "git commit -m \"fix\n\nInference: model via FreeInference.org\nSupport-FreeInference: https://freeinference.org/\n\""
+	if _, changed, reason := Rewrite(command, Policy{Mode: ModeStandalone, Model: "model"}); changed || reason != ReasonDuplicate {
+		t.Fatalf("current footer changed=%v reason=%s", changed, reason)
 	}
 }
 
@@ -89,5 +133,29 @@ func TestRewriteMultilineCommandPreservesPriorLines(t *testing.T) {
 	rewritten, changed, _ := Rewrite(command, Policy{Mode: ModeStandalone, Model: "model"})
 	if !changed || !strings.HasPrefix(rewritten, "# prepare\n") || !strings.Contains(rewritten, "echo done") {
 		t.Fatalf("multiline rewrite damaged unrelated commands: %q", rewritten)
+	}
+}
+
+func TestRewriteAllCommitsInOneCommand(t *testing.T) {
+	for _, command := range []string{
+		`git commit -m "first" && git commit -m "second"`,
+		`git commit -m "first"; git commit -m "second"`,
+		`(git commit -m "first"; git commit -m "second")`,
+	} {
+		rewritten, changed, reason := Rewrite(command, Policy{Mode: ModeStandalone, Model: "model"})
+		if !changed || reason != "" {
+			t.Fatalf("command %q changed=%v reason=%s output=%q", command, changed, reason, rewritten)
+		}
+		if got := strings.Count(rewritten, "Inference: model via FreeInference.org"); got != 2 {
+			t.Fatalf("command %q footer count=%d output=%q", command, got, rewritten)
+		}
+	}
+}
+
+func TestUnknownAttributionModeIsDisabled(t *testing.T) {
+	for _, mode := range []CommitMode{"", "unexpected", ModeOff} {
+		if _, changed, reason := Rewrite(`git commit -m "x"`, Policy{Mode: mode}); changed || reason != ReasonDisabled {
+			t.Fatalf("mode %q changed=%v reason=%s", mode, changed, reason)
+		}
 	}
 }

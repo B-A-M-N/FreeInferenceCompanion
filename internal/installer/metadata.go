@@ -37,6 +37,10 @@ type InstallationMetadata struct {
 	CodexPluginSHA256       string    `json:"codex_plugin_sha256,omitempty"`
 	CodexMarketplacePath    string    `json:"codex_marketplace_path"`
 	CodexMarketplaceSHA256  string    `json:"codex_marketplace_sha256,omitempty"`
+	CoreClaudePluginPath    string    `json:"core_claude_plugin_path,omitempty"`
+	CoreClaudePluginSHA256  string    `json:"core_claude_plugin_sha256,omitempty"`
+	CoreCodexPluginPath     string    `json:"core_codex_plugin_path,omitempty"`
+	CoreCodexPluginSHA256   string    `json:"core_codex_plugin_sha256,omitempty"`
 	InstalledAt             time.Time `json:"installed_at"`
 	InstallerVersion        string    `json:"installer_version"`
 	ManifestOrigin          string    `json:"manifest_origin"`
@@ -48,6 +52,11 @@ type InstallationMetadata struct {
 	ClaudePluginOwned       bool      `json:"claude_plugin_owned"`
 	CodexPluginOwned        bool      `json:"codex_plugin_owned"`
 	CodexMarketplaceOwned   bool      `json:"codex_marketplace_owned"`
+	// CodexNativeRegistrationKnown distinguishes a current install that has
+	// checked native registration from older metadata that predates this state.
+	CodexNativeRegistrationKnown bool `json:"codex_native_registration_known"`
+	CodexMarketplaceAdded        bool `json:"codex_marketplace_added"`
+	CodexPluginRegistered        bool `json:"codex_plugin_registered"`
 }
 
 func installationMetadataPath(home string) string {
@@ -171,17 +180,35 @@ func (m InstallationMetadata) validate() error {
 	if m.ShimBackupPath != "" && strings.ContainsAny(m.ShimBackupPath, "\x00\r\n") {
 		return errors.New("installation metadata has an invalid shim backup path")
 	}
+	if m.CodexPluginRegistered && !m.CodexMarketplaceAdded {
+		return errors.New("installation metadata has a Codex plugin without its marketplace registration")
+	}
+	if (m.CodexMarketplaceAdded || m.CodexPluginRegistered) && !m.CodexMarketplaceOwned {
+		return errors.New("installation metadata has native Codex registration without an owned marketplace")
+	}
 	if len(m.ArtifactSHA256) != 64 || !isHex(m.ArtifactSHA256) {
 		return errors.New("installation metadata has an invalid artifact checksum")
 	}
 	for name, value := range map[string]string{
-		"managed_binary_sha256":    m.ManagedBinarySHA256,
-		"claude_plugin_sha256":     m.ClaudePluginSHA256,
-		"codex_plugin_sha256":      m.CodexPluginSHA256,
-		"codex_marketplace_sha256": m.CodexMarketplaceSHA256,
+		"managed_binary_sha256":     m.ManagedBinarySHA256,
+		"claude_plugin_sha256":      m.ClaudePluginSHA256,
+		"codex_plugin_sha256":       m.CodexPluginSHA256,
+		"codex_marketplace_sha256":  m.CodexMarketplaceSHA256,
+		"core_claude_plugin_sha256": m.CoreClaudePluginSHA256,
+		"core_codex_plugin_sha256":  m.CoreCodexPluginSHA256,
 	} {
 		if value != "" && (len(value) != 64 || !isHex(value)) {
 			return fmt.Errorf("installation metadata has an invalid %s", name)
+		}
+	}
+	for _, evidence := range []struct {
+		name, path, digest string
+	}{
+		{"core Claude plugin", m.CoreClaudePluginPath, m.CoreClaudePluginSHA256},
+		{"core Codex plugin", m.CoreCodexPluginPath, m.CoreCodexPluginSHA256},
+	} {
+		if (evidence.path == "") != (evidence.digest == "") {
+			return fmt.Errorf("installation metadata has incomplete ownership evidence for %s", evidence.name)
 		}
 	}
 	if m.InstalledAt.IsZero() {

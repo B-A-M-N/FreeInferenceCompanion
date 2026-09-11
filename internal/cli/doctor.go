@@ -721,15 +721,18 @@ func checkClientEnvironmentIntegrations() []doctorCheck {
 		}
 		manifest = filepath.Join(manifest, ".codex-plugin", "plugin.json")
 		pluginResult := api.CheckResult{State: api.CheckUnknown, Detail: "plugin not installed"}
-		if _, err := os.Stat(manifest); err == nil {
+		registrationResult := checkCodexEnvironmentRegistration(environment.ConfigRoot)
+		if registrationResult.State == api.CheckPass {
+			pluginResult = api.CheckResult{State: api.CheckPass, Detail: "plugin installed through native marketplace"}
+		} else if _, err := os.Stat(manifest); err == nil {
 			pluginResult = api.CheckResult{State: api.CheckPass, Detail: "plugin installed"}
 		} else if ownershipRecorded {
 			pluginResult = api.CheckResult{State: api.CheckWarn, Detail: "ownership recorded but plugin missing"}
 		}
 		checks = append(checks, doctorCheck{prefix, pluginResult})
-		checks = append(checks, doctorCheck{prefix + " registration", checkCodexEnvironmentRegistration(environment.ConfigRoot)})
-		checks = append(checks, doctorCheck{prefix + " hook", checkCodexEnvironmentHook(environment.ConfigRoot)})
-		checks = append(checks, doctorCheck{prefix + " hooks feature", checkCodexEnvironmentHooksFeature(environment.ConfigRoot)})
+		checks = append(checks, doctorCheck{prefix + " registration", registrationResult})
+		checks = append(checks, doctorCheck{prefix + " skill payload", checkCodexEnvironmentSkillPayload(environment.ConfigRoot)})
+		checks = append(checks, doctorCheck{prefix + " provider route", checkCodexEnvironmentProviderRoute(environment.ConfigRoot)})
 	}
 	return checks
 }
@@ -758,11 +761,9 @@ func checkClaudeEnvironmentHook(root string) api.CheckResult {
 }
 
 func checkCodexEnvironmentRegistration(root string) api.CheckResult {
-	cacheRoot := filepath.Join(root, "plugins", "cache", "freeinference-companion-local", "freeinference-companion")
-	versions, _ := filepath.Glob(filepath.Join(cacheRoot, "*"))
-	for _, version := range versions {
-		if codexPluginManifest(version) {
-			return api.CheckResult{State: api.CheckPass, Detail: "registration active at " + version}
+	for _, pluginRoot := range codexEnvironmentCachePluginRoots(root) {
+		if codexPluginManifest(pluginRoot) {
+			return api.CheckResult{State: api.CheckPass, Detail: "registration active at " + pluginRoot}
 		}
 	}
 	if codexPluginManifest(filepath.Join(root, "plugins", "freeinference-companion")) {
@@ -771,40 +772,42 @@ func checkCodexEnvironmentRegistration(root string) api.CheckResult {
 	return api.CheckResult{State: api.CheckUnknown, Detail: "marketplace registration not established"}
 }
 
-func checkCodexEnvironmentHook(root string) api.CheckResult {
-	pluginRoot := filepath.Join(root, "plugins", "freeinference-companion")
-	data, err := readDoctorFile(filepath.Join(pluginRoot, "hooks", "hooks.json"), 1<<20)
-	if err != nil || !validCodexHookDefinition(data) {
-		return api.CheckResult{State: api.CheckUnknown, Detail: "hooks definition and executable runner not found"}
-	}
-	runner := filepath.Join(pluginRoot, "scripts", "run-hook.sh")
-	info, err := os.Lstat(runner)
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&0111 == 0 {
-		return api.CheckResult{State: api.CheckUnknown, Detail: "hooks definition and executable runner not found"}
-	}
-	return api.CheckResult{State: api.CheckPass, Detail: "hooks and executable runner installed"}
-}
-
-func checkCodexEnvironmentHooksFeature(root string) api.CheckResult {
-	data, err := readDoctorFile(filepath.Join(root, "config.toml"), 1<<20)
-	if os.IsNotExist(err) {
-		return api.CheckResult{State: api.CheckPass, Detail: "hooks enabled by default (no config override)"}
-	}
-	if err != nil {
-		return api.CheckResult{State: api.CheckUnknown, Detail: "Codex feature configuration unavailable"}
-	}
-	if enabled, found := codexHooksFeatureOverride(string(data)); found {
-		if !enabled {
-			return api.CheckResult{State: api.CheckWarn, Detail: "hooks disabled in Codex config"}
+func checkCodexEnvironmentSkillPayload(root string) api.CheckResult {
+	for _, pluginRoot := range codexEnvironmentPluginRoots(root) {
+		skill := filepath.Join(pluginRoot, "skills", "freeinference-doctor", "SKILL.md")
+		if data, err := readDoctorFile(skill, 1<<20); err == nil && strings.Contains(string(data), "freeinference doctor") {
+			return api.CheckResult{State: api.CheckPass, Detail: "doctor skill payload available"}
 		}
-		return api.CheckResult{State: api.CheckPass, Detail: "hooks enabled in Codex config"}
 	}
-	return api.CheckResult{State: api.CheckPass, Detail: "hooks enabled by default (no config override)"}
+	return api.CheckResult{State: api.CheckWarn, Detail: "expected Companion skill payload unavailable"}
 }
 
-// endpointFailDetail returns a sanitized, user-facing description of an
-// endpoint-validation error. It never echoes the raw URL (which may carry
-// userinfo or credential-shaped substrings); it reports the failure category.
+func codexEnvironmentPluginRoots(root string) []string {
+	direct := filepath.Join(root, "plugins", "freeinference-companion")
+	return append([]string{direct}, codexEnvironmentCachePluginRoots(root)...)
+}
+
+func codexEnvironmentCachePluginRoots(root string) []string {
+	cacheRoot := filepath.Join(root, "plugins", "cache", "freeinference-companion-local", "freeinference-companion")
+	versions, _ := filepath.Glob(filepath.Join(cacheRoot, "*"))
+	return versions
+}
+
+func checkCodexEnvironmentProviderRoute(root string) api.CheckResult {
+	home, homeErr := os.UserHomeDir()
+	if homeErr != nil {
+		return api.CheckResult{State: api.CheckUnknown, Detail: "no home directory for proxy attestation"}
+	}
+	state, _, err := clientenv.VerifyCodexConfigRoute(home, root)
+	if err != nil {
+		return api.CheckResult{State: api.CheckWarn, Detail: "provider route unavailable: " + err.Error()}
+	}
+	if state == clientenv.CodexRouteVerifiedDirect || state == clientenv.CodexRouteVerifiedProxy {
+		return api.CheckResult{State: api.CheckPass, Detail: "selected provider is FreeInference"}
+	}
+	return api.CheckResult{State: api.CheckWarn, Detail: "selected provider route is not verified FreeInference: " + string(state)}
+}
+
 func endpointFailDetail(err error) string {
 	if err == nil {
 		return "FREEINFERENCE_BASE_URL is invalid"
@@ -887,33 +890,4 @@ func isCodexRunnerInvocation(command string) bool {
 		}
 	}
 	return false
-}
-
-func codexHooksFeatureOverride(contents string) (bool, bool) {
-	table := ""
-	for _, raw := range strings.Split(contents, "\n") {
-		line := strings.TrimSpace(raw)
-		if hash := strings.IndexByte(line, '#'); hash >= 0 {
-			line = strings.TrimSpace(line[:hash])
-		}
-		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
-			table = strings.TrimSpace(line[1 : len(line)-1])
-			continue
-		}
-		key, value, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		key = strings.TrimSpace(key)
-		value = strings.TrimSpace(value)
-		if (table == "features" && key == "hooks") || key == "features.hooks" {
-			switch value {
-			case "true":
-				return true, true
-			case "false":
-				return false, true
-			}
-		}
-	}
-	return false, false
 }
