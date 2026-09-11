@@ -35,6 +35,11 @@ The parser fails open and leaves the command unchanged for ambiguous or
 unsafe Git grammar. The hook only mutates when the current client runtime is
 verified as FreeInference. `off` produces no Git behavior.
 
+Client-environment discovery and explicit `integrations add` likewise accept
+only configuration roots whose selected route proves FreeInference. They do
+not crawl projects or infer environments from launcher names. Installer
+fan-out records directory digests and refuses unowned or drifted targets.
+
 ## Data and credentials
 
 The companion reads provider credentials from the environment and keeps them

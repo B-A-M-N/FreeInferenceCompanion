@@ -28,6 +28,23 @@ Support-FreeInference: https://freeinference.org/
 
 Companion never stages or originates a commit. Ambiguous Git grammar fails open unchanged. Native Claude attribution settings are not modified. Lower-level equivalent: `freeinference config set attribution.commit_mode <mode>`.
 
+By default, `install` and `update` also reconcile alternate Claude/Codex roots whose currently selected configuration routes to an approved FreeInference endpoint. `--no-integration-discovery` limits plugin fan-out to canonical roots.
+
+### Client environment integrations
+
+```text
+freeinference integrations list [--json]
+freeinference integrations discover [--json]
+freeinference integrations add --client claude-code|codex --root /path/to/root
+freeinference integrations remove --client claude-code|codex --root /path/to/root
+```
+
+Identity is `(client type, configuration root)`; model profiles inside one root remain one environment. Alternate roots must independently prove an approved FreeInference `/v1` route:
+
+- Claude: `settings.json` `env.ANTHROPIC_BASE_URL`
+- Codex: selected provider's `model_providers.<id>.base_url`
+
+Discovery never recursively scans projects and never uses launcher names. Explicit `add` supports arbitrary roots. Existing unowned Companion directories are refused; modified owned installs are preserved until reconciled safely. `remove` deletes only paths derived from the recorded identity and only after digest ownership checks pass.
 
 | Command | Description |
 | --- | --- |
@@ -60,6 +77,11 @@ They are not part of ordinary hooks, status rendering, plugin installation, or
 Codex skill installation. `doctor --probe --model <name>` is the only normal
 command path that intentionally sends a synthetic inference request, and it
 must be requested explicitly.
+| `freeinference integrations list [--json]` | Show additional client environments owned by the installer |
+| `freeinference integrations discover [--json]` | Show canonical, exported, and bounded-discovery client roots |
+| `freeinference integrations add\|remove --client claude-code\|codex --root <path>` | Explicitly register or remove one alternate client environment |
+| `freeinference install --help` | Install a release; supports `--no-integration-discovery` for canonical-only fan-out |
+| `freeinference update --help` | Update a release; supports `--no-integration-discovery` for canonical-only fan-out |
 
 ## Environment
 
