@@ -59,11 +59,16 @@ func (r EnvironmentIntegrationResult) Source() string { return r.source }
 type reconcileOptions struct {
 	home          string
 	pluginSources map[clientenv.Client]string
-	version       string
-	dryRun        bool
-	discovery     bool
-	explicit      []clientenv.Environment
-	stdout        io.Writer
+	// coreOwnedDirectories contains verified alternate-root payloads that are
+	// already recorded by core.json. An explicit integration may adopt these
+	// directories into client-environments.json after rechecking their digest;
+	// an unrecorded or drifted directory is still refused.
+	coreOwnedDirectories map[string]string
+	version              string
+	dryRun               bool
+	discovery            bool
+	explicit             []clientenv.Environment
+	stdout               io.Writer
 }
 
 func (o reconcileOptions) sourceFor(client clientenv.Client) (string, error) {
@@ -483,7 +488,7 @@ func reconcileOneClientEnvironment(environment clientenv.Environment, prior *Cli
 		return result, ClientIntegration{}, err.Error(), nil
 	}
 	previous := findClientIntegration(prior, environment)
-	if err := validateAdditionalOwnedDirectory(expectedPlugin, previous); err != nil {
+	if err := validateAdditionalOwnedDirectoryWithCore(expectedPlugin, previous, opts.coreOwnedDirectories); err != nil {
 		result.Action, result.Warning = "warning", err.Error()
 		return result, ClientIntegration{}, err.Error(), nil
 	}
@@ -497,7 +502,7 @@ func reconcileOneClientEnvironment(environment clientenv.Environment, prior *Cli
 	}
 	if environment.Client == clientenv.ClientCodex {
 		marketplacePath := filepath.Join(environment.ConfigRoot, "plugins", "freeinference-companion-marketplace")
-		if err := validateAdditionalOwnedDirectory(marketplacePath, previous); err != nil {
+		if err := validateAdditionalOwnedDirectoryWithCore(marketplacePath, previous, opts.coreOwnedDirectories); err != nil {
 			result.Action, result.Warning = "warning", err.Error()
 			return result, ClientIntegration{}, err.Error(), nil
 		}
@@ -580,7 +585,7 @@ func validateClientConfigRoot(root string) error {
 	return nil
 }
 
-func validateAdditionalOwnedDirectory(path string, previous *ClientIntegration) error {
+func validateAdditionalOwnedDirectoryWithCore(path string, previous *ClientIntegration, coreOwned map[string]string) error {
 	info, err := os.Lstat(path)
 	if os.IsNotExist(err) {
 		return nil
@@ -592,6 +597,13 @@ func validateAdditionalOwnedDirectory(path string, previous *ClientIntegration) 
 		return fmt.Errorf("refusing unsafe target path %s", path)
 	}
 	if previous == nil {
+		if expectedDigest, ok := coreOwned[canonical(path)]; ok && expectedDigest != "" {
+			matched, digestErr := pathDigestMatches(path, expectedDigest)
+			if digestErr != nil || !matched {
+				return fmt.Errorf("companion directory changed after installation: %s", path)
+			}
+			return nil
+		}
 		return fmt.Errorf("refusing to replace unowned Companion directory %s", path)
 	}
 	expectedDigest := previous.PluginSHA256

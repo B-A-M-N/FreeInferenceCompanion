@@ -2,6 +2,16 @@
 
 All notable changes to FreeInference Companion are recorded here.
 
+## 0.1.4 — 2026-09-11
+
+Installer migration fix.
+
+### Fixed
+
+- Explicit Codex environment integration now adopts a pre-existing payload
+  when it matches verified core ownership, while continuing to reject changed
+  or unowned directories.
+
 ## 0.1.3 — 2026-09-11
 
 Codex observability and install parity release.
