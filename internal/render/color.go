@@ -818,14 +818,16 @@ func (vm *ViewModel) Line(config RenderConfig) string {
 		freshStr = config.colorize("fresh "+FormatTokenCount(*vm.FreshInputTokens), ColorCyan)
 	}
 
-	pressureSym := config.PressureSymbol(vm.PressureState, vm.WarningActive)
+	// Explicitly label the compact-line status as context pressure, not
+	// provider or FreeInference service health.
+	pressureSym := "ctx " + config.PressureSymbol(vm.PressureState, vm.WarningActive)
 
 	// Select segments by tier.
 	var parts []string
 	switch {
 	case width < 60:
-		// Narrow: shield, cache, ctx
-		parts = append(parts, shieldSym, readStr, ctxStr)
+		// Narrow: shield, cache, ctx pressure
+		parts = append(parts, shieldSym, readStr, ctxStr, pressureSym)
 	case width < 100:
 		// Medium: model, shield, cache, fresh, ctx, pressure
 		parts = append(parts, modelColored, shieldSym, readStr, freshStr, ctxStr, pressureSym)

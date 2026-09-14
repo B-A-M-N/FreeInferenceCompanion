@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/adapters"
 	"github.com/b-a-m-n/freeinference-companion/internal/background"
@@ -147,6 +148,11 @@ func handleCodexHook(paths state.Paths, eventName string, stdin io.Reader, stdou
 	sessionID := input.SessionID
 	if sessionID == "" {
 		return
+	}
+	// Bind this Companion-launched client instance to the exact Codex session.
+	// This is a local opaque pointer, not prompt or rollout content.
+	if instanceID := strings.TrimSpace(os.Getenv("FI_CLIENT_INSTANCE_ID")); instanceID != "" {
+		_ = bindCodexClientInstance(instanceID, sessionID)
 	}
 
 	switch eventName {

@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/codexusage"
 	"github.com/b-a-m-n/freeinference-companion/internal/engine"
 	"github.com/b-a-m-n/freeinference-companion/internal/runtime"
 	"github.com/b-a-m-n/freeinference-companion/internal/secure"
+	"github.com/b-a-m-n/freeinference-companion/internal/state"
 	"github.com/b-a-m-n/freeinference-companion/pkg/schema"
 )
 
@@ -27,11 +29,70 @@ func codexHomeForUsage() (string, error) {
 }
 
 func latestCodexUsage() (*codexusage.Usage, error) {
+	return codexUsageForSession(codexCurrentSessionID())
+}
+
+// codexCurrentSessionID prefers an explicit process session pointer. It then
+// accepts a Companion-only launch-to-session binding created by hooks; the raw
+// Codex session ID is never used as an instance token and rollout contents are
+// never persisted.
+func codexCurrentSessionID() string {
+	if sessionID := strings.TrimSpace(os.Getenv("FI_SESSION_ID")); sessionID != "" {
+		return sessionID
+	}
+	instanceID := strings.TrimSpace(os.Getenv("FI_CLIENT_INSTANCE_ID"))
+	if instanceID == "" {
+		return ""
+	}
+	paths, err := state.NewPaths()
+	if err != nil {
+		return ""
+	}
+	var binding struct {
+		CodexSessionID string `json:"codex_session_id"`
+	}
+	bindingPath := filepath.Join(paths.CacheDir, "codex-instances", instanceID+".json")
+	if err := state.ReadJSON(bindingPath, &binding); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(binding.CodexSessionID)
+}
+
+// codexUsageForSession reads rollout telemetry for the exact requested Codex
+// session. Without a session binding, diagnostics retain their documented
+// newest-rollout behavior.
+func codexUsageForSession(sessionID string) (*codexusage.Usage, error) {
 	home, err := codexHomeForUsage()
 	if err != nil {
 		return nil, err
 	}
+	if strings.TrimSpace(sessionID) != "" {
+		return codexusage.ReadForSession(home, strings.TrimSpace(sessionID))
+	}
 	return codexusage.Latest(home)
+}
+
+// bindCodexClientInstance records only an opaque local process instance and
+// its Codex session ID. It never records transcript paths or rollout content.
+func bindCodexClientInstance(instanceID, sessionID string) error {
+	instanceID, sessionID = strings.TrimSpace(instanceID), strings.TrimSpace(sessionID)
+	if instanceID == "" || sessionID == "" {
+		return nil
+	}
+	if !safeInstanceID(instanceID) || sessionID != secure.SafeIdentifier(sessionID) {
+		return nil
+	}
+	paths, err := state.NewPaths()
+	if err != nil {
+		return err
+	}
+	dir := filepath.Join(paths.CacheDir, "codex-instances")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	return state.WriteJSONAtomically(filepath.Join(dir, instanceID+".json"), map[string]string{
+		"codex_session_id": sessionID,
+	})
 }
 
 // latestCodexSnapshot creates the same in-memory view used by the interactive
@@ -217,4 +278,17 @@ func codexUsageError(err error) string {
 	default:
 		return fmt.Sprintf("Codex rollout unavailable: %v", err)
 	}
+}
+
+// safeInstanceID accepts only a bounded token suitable for a local filename.
+func safeInstanceID(value string) bool {
+	if len(value) == 0 || len(value) > 128 {
+		return false
+	}
+	for _, r := range value {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '-' && r != '_' {
+			return false
+		}
+	}
+	return true
 }

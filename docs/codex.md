@@ -130,9 +130,9 @@ the payload may be present while native registration remains incomplete; rerun
 the command after fixing Codex. Codex may require a new session before the
 newly registered skills are visible.
 
-Codex also owns a native footer. To configure Codex to show its own model,
-remaining-context, and current-directory items while preserving existing
-footer items:
+Codex also owns a native footer. To configure Codex to show model/reasoning,
+remaining context, and current directory while preserving existing footer
+items:
 
 ```bash
 freeinference codex-footer install
@@ -141,18 +141,30 @@ freeinference codex-footer uninstall
 ```
 
 This is native Codex rendering, not scraped screen telemetry. The companion
-does not treat `context-remaining` as a hook field. Its rich line uses the
-latest bounded local rollout record instead.
+does not treat native footer fields as hook fields. Its richer cache/freshness
+line uses the latest bounded local rollout record instead; Codex's native
+status-line schema has no `CODEX_HOME`/profile-name or script-backed custom
+item.
 
-To show the rich line beside Codex's native footer in a tmux terminal, the
-HarvardCodex launcher can install a status-right segment backed by:
+To show the rich line outside Codex's native footer, use the first-class
+host-neutral surface command. HarvardCodex and other launchers can feed it to
+tmux, terminal titles, or another status host:
 
 ```bash
-freeinference codex-footer render --color=never
+freeinference codex-surface render --color=never
 ```
+
+The command resolves the exact current Codex session through the local
+launch-to-session binding (or explicit session pointer) and emits no line when
+that session cannot be proven.
 
 The command is local-only and returns no line until a completed rollout usage
 record exists.
+
+Automatic rollout-backed rendering is session-specific. The Companion resolves
+the rollout whose verified `session_meta` matches the current session and never
+falls back to another session. For manual diagnostics, commands may still select
+the newest rollout when no explicit session is supplied.
 
 The stateless service command is available regardless of provider activation:
 

@@ -122,3 +122,15 @@ func cmdCodexFooter(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 }
+
+// cmdCodexSurface provides a host-neutral Codex telemetry line. Unlike the
+// native footer, this contract is owned by Companion and can run in tmux, a
+// terminal title host, or any launcher-backed status process.
+func cmdCodexSurface(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 || args[0] != "render" {
+		fmt.Fprintln(stderr, "Usage: freeinference codex-surface render [--json] [--color auto|always|never]")
+		return 2
+	}
+	renderArgs := append([]string{"render"}, args[1:]...)
+	return cmdCodexFooter(renderArgs, stdout, stderr)
+}

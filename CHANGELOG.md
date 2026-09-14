@@ -2,6 +2,22 @@
 
 All notable changes to FreeInference Companion are recorded here.
 
+## 0.1.7 — 2026-09-13
+
+### Changed
+
+- Select Codex rollout telemetry by verified session identity instead of globally newest rollout; automatic surfaces no longer cross sessions.
+- Add `codex-surface render` as a host-neutral Companion surface for launchers, bound to the local client instance-to-session record.
+- Restrict endpoint normalization to HTTPS, bind HarvardCodex-style loopback routes to explicit persisted FreeInference upstream attestations, and remove `FI_ALLOW_INSECURE_LOCALHOST`.
+- Scope Codex native footer ownership and locks by canonical configuration root, migrate prior singleton ownership, and support multi-environment install/update/uninstall.
+- Keep the native Codex footer intentionally minimal with model/reasoning,
+  remaining context, and current-directory items; upgrades now remove obsolete
+  Companion-managed items while preserving user items and restoration.
+- Label compact status pressure as `ctx` state so context health is not
+  mistaken for provider or FreeInference service health.
+- Correct compatibility and evidence documentation for rollout-backed Codex
+  telemetry and the historical screenshot boundary.
+
 ## 0.1.6 — 2026-09-11
 
 ### Fixed

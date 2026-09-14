@@ -62,7 +62,8 @@ refresh rebuilds them.
 
 - Hooks fail open and do local computation only.
 - Provider detection gates FreeInference-specific warnings and metadata.
-- A loopback Claude route requires `FI_PROXY_UPSTREAM_URL` naming the approved
+- Claude and Codex loopback routes require an explicit approved upstream attestation; no ambient environment override permits insecure endpoints.
+- Codex rollout telemetry resolves the exact session before automatic rendering; it never falls back to another session.
   Anthropic-compatible FreeInference upstream; `FI_PROVIDER` alone never
   activates anything.
 - Missing telemetry remains unknown; it is never fabricated as zero.

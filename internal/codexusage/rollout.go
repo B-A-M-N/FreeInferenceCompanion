@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -50,14 +51,15 @@ type Usage struct {
 	latestTokenAt time.Time
 }
 
-// FreshInputTokens derives the uncached input counter from Codex's reported
-// input, cache-read, and cache-write counters. It returns nil when the
-// complete breakdown was not reported or is internally inconsistent.
+// FreshInputTokens derives uncached input from current input and cache-read
+// counters, matching Codex semantics where cached input is a subset of input.
+// It returns nil if either required counter is absent or inconsistent. Cache
+// writes remain a separate optional counter and are never inferred as zero.
 func (u Usage) FreshInputTokens() *int64 {
-	if u.Last.InputTokens == nil || u.Last.CachedInputTokens == nil || u.Last.CacheWriteInputTokens == nil {
+	if u.Last.InputTokens == nil || u.Last.CachedInputTokens == nil {
 		return nil
 	}
-	fresh := *u.Last.InputTokens - *u.Last.CachedInputTokens - *u.Last.CacheWriteInputTokens
+	fresh := *u.Last.InputTokens - *u.Last.CachedInputTokens
 	if fresh < 0 {
 		return nil
 	}
@@ -124,9 +126,92 @@ func FindLatest(codexHome string) (string, error) {
 	return latest, nil
 }
 
-// Latest reads the newest rollout below codexHome.
+// Latest reads the newest rollout below codexHome. It is retained for
+// diagnostics and tests only; automatic session surfaces must use ReadForSession.
 func Latest(codexHome string) (*Usage, error) {
 	path, err := FindLatest(codexHome)
+	if err != nil {
+		return nil, err
+	}
+	return ReadFile(path)
+}
+
+// FindForSession locates a regular rollout whose verified session_meta
+// declares the requested session ID. It does not trust rollout filenames.
+func FindForSession(codexHome, sessionID string) (string, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return "", errors.New("codex session ID is empty")
+	}
+	root := filepath.Join(codexHome, "sessions")
+	years, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", ErrNoRollout
+		}
+		return "", err
+	}
+	var candidates []string
+	for _, year := range years {
+		if !year.IsDir() || strings.HasPrefix(year.Name(), ".") {
+			continue
+		}
+		months, readErr := os.ReadDir(filepath.Join(root, year.Name()))
+		if readErr != nil {
+			continue
+		}
+		for _, month := range months {
+			if !month.IsDir() || strings.HasPrefix(month.Name(), ".") {
+				continue
+			}
+			days, readErr := os.ReadDir(filepath.Join(root, year.Name(), month.Name()))
+			if readErr != nil {
+				continue
+			}
+			for _, day := range days {
+				if !day.IsDir() || strings.HasPrefix(day.Name(), ".") {
+					continue
+				}
+				entries, readErr := os.ReadDir(filepath.Join(root, year.Name(), month.Name(), day.Name()))
+				if readErr != nil {
+					continue
+				}
+				for _, entry := range entries {
+					if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") || strings.HasPrefix(entry.Name(), ".") {
+						continue
+					}
+					path := filepath.Join(root, year.Name(), month.Name(), day.Name(), entry.Name())
+					info, statErr := os.Lstat(path)
+					if statErr != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+						continue
+					}
+					candidates = append(candidates, path)
+				}
+			}
+		}
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		left, right := candidates[i], candidates[j]
+		leftInfo, leftErr := os.Lstat(left)
+		rightInfo, rightErr := os.Lstat(right)
+		if leftErr != nil || rightErr != nil {
+			return left < right
+		}
+		return leftInfo.ModTime().After(rightInfo.ModTime())
+	})
+	for _, path := range candidates {
+		usage, err := ReadFile(path)
+		if err == nil && usage.SessionID == sessionID {
+			return path, nil
+		}
+	}
+	return "", ErrNoRollout
+}
+
+// ReadForSession reads rollout telemetry for one exact Codex session. It never
+// falls back to another session.
+func ReadForSession(codexHome, sessionID string) (*Usage, error) {
+	path, err := FindForSession(codexHome, sessionID)
 	if err != nil {
 		return nil, err
 	}

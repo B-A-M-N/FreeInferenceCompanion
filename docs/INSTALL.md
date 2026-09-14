@@ -139,7 +139,7 @@ the verified upstream route:
 ```bash
 ANTHROPIC_BASE_URL=http://127.0.0.1:8765 \
 FI_PROXY_UPSTREAM_URL=https://freeinference.org/anthropic \
-FI_ALLOW_INSECURE_LOCALHOST=1
+Loopback integrations require a persisted proxy attestation instead of an environment override.
 ```
 
 `FI_PROXY_UPSTREAM_URL` is required in addition to the loopback URL. This is

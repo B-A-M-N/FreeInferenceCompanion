@@ -70,7 +70,7 @@ func TestLineRender(t *testing.T) {
 	if !strings.Contains(line, "cache 93%") {
 		t.Errorf("line = %q", line)
 	}
-	if !strings.Contains(line, "WARN") {
+	if !strings.Contains(line, "ctx WARN") {
 		t.Errorf("line = %q", line)
 	}
 }
@@ -324,5 +324,20 @@ func TestDisplayWidthIgnoresANSI(t *testing.T) {
 	// Unicode shield
 	if dw := displayWidth("🛡"); dw != 1 {
 		t.Errorf("shield: got %d", dw)
+	}
+}
+
+func TestCompactLineLabelsContextPressureNotProviderHealth(t *testing.T) {
+	snap := fixtureSnapshot(true)
+	snap.Pressure = schema.PressureState{State: schema.PressureHealthy}
+	vm := BuildViewModel("0.1.0", snap, nil, "", time.Now(), true, "", "")
+	rc := DefaultRenderConfig()
+	rc.ColorMode = ColorNever
+	line := vm.Line(rc)
+	if !strings.Contains(line, "ctx OK") {
+		t.Fatalf("line=%q, want explicit ctx OK pressure label", line)
+	}
+	if strings.HasSuffix(line, "| OK") {
+		t.Fatalf("line=%q must not present provider health as final bare OK", line)
 	}
 }

@@ -42,6 +42,12 @@ const (
 	SyntheticProbeValue  = "synthetic"
 )
 
+// allowLoopbackHTTPForTesting is disabled by default and has no environment
+// override. Package tests may allow loopback HTTP for httptest fixtures.
+
+// AllowLoopbackHTTPForTesting is available only to internal package tests.
+var AllowLoopbackHTTPForTesting bool
+
 // CustomEndpointConfig holds the validated custom endpoint configuration.
 // Both FI_CUSTOM_ENDPOINT and FI_CUSTOM_API_KEY must be present together.
 type CustomEndpointConfig struct {
@@ -76,7 +82,7 @@ func LoadCustomEndpointConfig() (*CustomEndpointConfig, error) {
 // ValidateBaseURL validates a base URL for credentialed API requests.
 // Rules:
 //   - Must be absolute (scheme + host).
-//   - Must be HTTPS, unless it's loopback AND FI_ALLOW_INSECURE_LOCALHOST=1.
+//   - Must be HTTPS.
 //   - Must not contain userinfo.
 //   - Must not have a fragment.
 //
@@ -104,7 +110,7 @@ type EndpointIdentity struct {
 // NormalizeEndpoint parses and normalizes a raw URL into an EndpointIdentity.
 // Rules:
 //   - Must be absolute (scheme + host).
-//   - Must be HTTPS, unless it's loopback AND FI_ALLOW_INSECURE_LOCALHOST=1.
+//   - Must be HTTPS.
 //   - Must not contain userinfo.
 //   - Must not have a fragment.
 //   - Query strings are NOT persisted (they may carry secrets).
@@ -139,11 +145,8 @@ func NormalizeEndpoint(rawURL string) (*EndpointIdentity, error) {
 		return nil, fmt.Errorf("invalid base URL: must not contain a query string")
 	}
 	if u.Scheme != "https" {
-		host := u.Hostname()
-		isLoopback := isLoopbackHost(host)
-		allowInsecure := os.Getenv("FI_ALLOW_INSECURE_LOCALHOST") == "1"
-		if !(isLoopback && allowInsecure) {
-			return nil, fmt.Errorf("invalid base URL: must be HTTPS (set FI_ALLOW_INSECURE_LOCALHOST=1 for loopback development)")
+		if !(AllowLoopbackHTTPForTesting && u.Scheme == "http" && isLoopbackHost(u.Hostname())) {
+			return nil, fmt.Errorf("invalid base URL: must be HTTPS")
 		}
 	}
 	host := strings.ToLower(u.Hostname())

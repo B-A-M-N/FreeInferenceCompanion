@@ -44,6 +44,15 @@ var updaterHTTPClient = &http.Client{
 	},
 }
 
+// installHTTPClientForTesting allows package tests to inject a loopback HTTP
+// transport. Production callers always use updaterHTTPClient with HTTPS-only
+// validation.
+var installHTTPClientForTesting func() *http.Client
+
+// allowLoopbackRemoteURLForTesting is disabled in production. Package tests
+// use it with loopback HTTP test servers; it has no environment override.
+var allowLoopbackRemoteURLForTesting bool
+
 // PlatformKey identifies a target platform (e.g. "linux-amd64").
 type PlatformKey string
 
@@ -83,7 +92,7 @@ func FetchManifest(manifestURL string) (*MarketplaceManifest, error) {
 	if err := validateRemoteURL(manifestURL); err != nil {
 		return nil, fmt.Errorf("fetch manifest: %w", err)
 	}
-	resp, err := updaterHTTPClient.Get(manifestURL)
+	resp, err := installHTTPClient().Get(manifestURL)
 	if err != nil {
 		return nil, fmt.Errorf("fetch manifest: %w", err)
 	}
@@ -274,8 +283,21 @@ func DownloadTo(downloadURL, destPath string) (int64, error) {
 	return n, nil
 }
 
-// validateRemoteURL limits installer inputs to HTTPS. Local HTTP is allowed
-// only for explicitly opted-in development and test endpoints.
+// installHTTPClient returns the production HTTPS-only client unless a package
+// test has injected a loopback-capable client.
+func installHTTPClient() *http.Client {
+	if installHTTPClientForTesting != nil {
+		return &http.Client{
+			Timeout:       updaterHTTPClient.Timeout,
+			Transport:     &http.Transport{Proxy: http.ProxyFromEnvironment},
+			CheckRedirect: updaterHTTPClient.CheckRedirect,
+		}
+	}
+	return updaterHTTPClient
+}
+
+// validateRemoteURL limits installer inputs to HTTPS. No environment variable
+// can widen this production boundary.
 func validateRemoteURL(raw string) error {
 	return validateRemoteURLForRequest(raw, false)
 }
@@ -292,11 +314,11 @@ func validateRemoteURLForRequest(raw string, allowQuery bool) error {
 	if u.Scheme == "https" {
 		return nil
 	}
-	if u.Scheme == "http" && os.Getenv("FI_ALLOW_INSECURE_LOCALHOST") == "1" {
+	if allowLoopbackRemoteURLForTesting && u.Scheme == "http" {
 		host := strings.ToLower(u.Hostname())
-		if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+		if host == "127.0.0.1" || host == "::1" {
 			return nil
 		}
 	}
-	return fmt.Errorf("URL must use HTTPS (or opted-in loopback HTTP for development)")
+	return fmt.Errorf("URL must use HTTPS")
 }

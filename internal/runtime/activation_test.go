@@ -19,7 +19,7 @@ func clearActivationEnv(t *testing.T) {
 		"FREEINFERENCE_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
 		"FI_ALLOW_CUSTOM_API_ENDPOINT", "FI_ALLOW_INSECURE_LOCALHOST",
 		ProxyUpstreamEnv,
-		"CODEX_HOME", "CODEX_PROFILE",
+		"CODEX_HOME", "CODEX_PROFILE", "CODEX_CI", "CODEX_SESSION_ID", "CODEX_THREAD_ID", "CODEX_PERMISSION_PROFILE", "CODEX_SANDBOX_NETWORK_DISABLED",
 	} {
 		t.Setenv(env, "")
 	}
@@ -120,9 +120,11 @@ env_key = "CODEX_FI_KEY"
 		t.Fatal(err)
 	}
 	t.Setenv("CODEX_FI_KEY", "selected-provider-key")
-	t.Setenv("FI_ALLOW_INSECURE_LOCALHOST", "1")
 	if err := clientenv.SetCodexProxyAttestation(home, home, "https://freeinference.org/v1"); err != nil {
 		t.Fatalf("set proxy attestation: %v", err)
+	}
+	if _, resolveErr := ResolveCodexProviderConfiguration(); resolveErr != nil {
+		t.Fatalf("resolve loopback: %v", resolveErr)
 	}
 	a := EvaluateForClient(ClientCodex)
 	if !a.Active || a.Origin != "https://freeinference.org" {
@@ -438,7 +440,6 @@ func TestActivation_DocumentedClaudeCodeCredential_Active(t *testing.T) {
 
 func TestActivation_ClaudeLocalProxyRequiresExplicitApprovedUpstream(t *testing.T) {
 	clearActivationEnv(t)
-	t.Setenv("FI_ALLOW_INSECURE_LOCALHOST", "1")
 	t.Setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:8765")
 	t.Setenv("ANTHROPIC_AUTH_TOKEN", "free-inference-test")
 	if a := EvaluateForClient(ClientClaudeCode); a.Active {
@@ -473,7 +474,6 @@ func TestActivation_ClaudeProxyAttestationDoesNotActivateDirectOrUnrelatedRoutes
 		t.Fatalf("proxy attestation must not activate ordinary Claude: %+v", a)
 	}
 
-	t.Setenv("FI_ALLOW_INSECURE_LOCALHOST", "1")
 	t.Setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:8765")
 	t.Setenv(ProxyUpstreamEnv, "https://freeinference.org/v1")
 	if a := EvaluateForClient(ClientClaudeCode); a.Active {

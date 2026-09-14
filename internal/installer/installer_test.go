@@ -19,7 +19,8 @@ import (
 // and a mock platform ZIP file. The caller should call server.Close() when done.
 func testServer(t *testing.T, version string, platform PlatformKey) (manifestURL string, zipHash string, server *httptest.Server) {
 	t.Helper()
-	t.Setenv("FI_ALLOW_INSECURE_LOCALHOST", "1")
+	restore := allowLoopbackInstallerTestClient()
+	t.Cleanup(restore)
 
 	// Create a ZIP file with a mock binary and plugin directories.
 	zipData, zipHash := createTestZIP(t, version)
@@ -830,7 +831,6 @@ func TestFetchManifestInvalidURL(t *testing.T) {
 }
 
 func TestManifestPlatformNotFound(t *testing.T) {
-	t.Setenv("FI_ALLOW_INSECURE_LOCALHOST", "1")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"version": "v1.0.0",
@@ -843,6 +843,8 @@ func TestManifestPlatformNotFound(t *testing.T) {
 		})
 	}))
 	defer server.Close()
+	restore := allowLoopbackInstallerTestClient()
+	defer restore()
 
 	m, err := FetchManifest(server.URL)
 	if err != nil {
@@ -855,7 +857,6 @@ func TestManifestPlatformNotFound(t *testing.T) {
 }
 
 func TestDownloadToInvalidURL(t *testing.T) {
-	t.Setenv("FI_ALLOW_INSECURE_LOCALHOST", "1")
 	_, err := DownloadTo("http://127.0.0.1:1/nonexistent", "/tmp/test.zip")
 	// Should return an error (connection refused or similar).
 	if err == nil {
@@ -873,7 +874,8 @@ func TestInstallerRemoteURLsRequireHTTPS(t *testing.T) {
 }
 
 func TestFetchManifestRejectsMalformedReleaseMetadata(t *testing.T) {
-	t.Setenv("FI_ALLOW_INSECURE_LOCALHOST", "1")
+	restore := allowLoopbackInstallerTestClient()
+	defer restore()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"version":"not-a-version","platforms":{"linux-amd64":{"url":"http://127.0.0.1/release.zip","sha256":"not-a-sha"}}}`))
 	}))
@@ -1035,5 +1037,15 @@ func TestVerifyChecksumValid(t *testing.T) {
 	err := VerifyChecksum(data, expected)
 	if err != nil {
 		t.Errorf("valid checksum rejected: %v", err)
+	}
+}
+
+func allowLoopbackInstallerTestClient() func() {
+	originalClient := installHTTPClientForTesting
+	originalLoopback := allowLoopbackRemoteURLForTesting
+	allowLoopbackRemoteURLForTesting = true
+	return func() {
+		installHTTPClientForTesting = originalClient
+		allowLoopbackRemoteURLForTesting = originalLoopback
 	}
 }

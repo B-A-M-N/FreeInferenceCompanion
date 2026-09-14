@@ -463,7 +463,9 @@ func TestValidateBaseURL(t *testing.T) {
 	}{
 		{"valid https", "https://freeinference.org/v1", false, false},
 		{"http remote", "http://example.com/v1", true, false},
-		{"http remote no opt-in", "http://freeinference.org/v1", true, false},
+		{"http freeinference", "http://freeinference.org/v1", true, false},
+		{"http loopback", "http://127.0.0.1:18769/v1", true, false},
+		{"http localhost", "http://localhost:18769/v1", true, false},
 		// Note: https://api.anthropic.com/v1 passes ValidateBaseURL (valid HTTPS)
 		// but is rejected by NewClient when an API key is set — tested below.
 		{"empty", "", true, false},
@@ -473,11 +475,6 @@ func TestValidateBaseURL(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.allowInsecure {
-				t.Setenv("FI_ALLOW_INSECURE_LOCALHOST", "1")
-			} else {
-				t.Setenv("FI_ALLOW_INSECURE_LOCALHOST", "")
-			}
 			_, err := ValidateBaseURL(tt.url)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("ValidateBaseURL(%q) error = %v, wantErr %v", tt.url, err, tt.wantErr)

@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/b-a-m-n/freeinference-companion/internal/api"
+	"github.com/b-a-m-n/freeinference-companion/internal/codexusage"
 	"github.com/b-a-m-n/freeinference-companion/internal/render"
 	"github.com/b-a-m-n/freeinference-companion/internal/runtime"
 	"github.com/b-a-m-n/freeinference-companion/internal/state"
@@ -46,20 +48,20 @@ func TestRenderConfigHonorsSpacedColorFlag(t *testing.T) {
 
 func TestDoctorRunsAllChecksWithoutEarlyExit(t *testing.T) {
 	// Point the API client at a local catalog server.
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"object": "list",
 			"data":   []map[string]any{{"id": "glm-5.1", "context_length": 200000}},
 		})
 	}))
 	defer server.Close()
+	t.Setenv("TEST_SERVER_URL", server.URL)
 
-	t.Setenv("FI_CUSTOM_ENDPOINT", server.URL)
+	t.Setenv("FI_CUSTOM_ENDPOINT", "https://freeinference.org/v1")
 	t.Setenv("FI_CUSTOM_API_KEY", "custom-test-key")
 	t.Setenv("FREEINFERENCE_BASE_URL", "")
 	t.Setenv("FREEINFERENCE_API_KEY", "")
 	t.Setenv("FI_HEALTH_URL", "")
-	t.Setenv("FI_ALLOW_INSECURE_LOCALHOST", "1")
 
 	// Put the running binary on PATH so `freeinference` resolves correctly.
 	exposeRunningBinaryOnPath(t)
@@ -95,12 +97,11 @@ func TestDoctorRunsAllChecksWithoutEarlyExit(t *testing.T) {
 }
 
 func TestDoctorFailsWhenEndpointDown(t *testing.T) {
-	t.Setenv("FI_CUSTOM_ENDPOINT", "http://127.0.0.1:1")
+	t.Setenv("FI_CUSTOM_ENDPOINT", "https://127.0.0.1:1")
 	t.Setenv("FI_CUSTOM_API_KEY", "custom-test-key")
 	t.Setenv("FREEINFERENCE_BASE_URL", "")
 	t.Setenv("FREEINFERENCE_API_KEY", "")
 	t.Setenv("FI_HEALTH_URL", "")
-	t.Setenv("FI_ALLOW_INSECURE_LOCALHOST", "1")
 
 	var out, errOut strings.Builder
 	code := cmdDoctor(testPaths(t), nil, &out, &errOut)
@@ -124,7 +125,6 @@ func TestDoctorDoesNotProbeUnverifiedEndpoint(t *testing.T) {
 	t.Setenv("FI_CUSTOM_API_KEY", "")
 	t.Setenv("FREEINFERENCE_BASE_URL", server.URL)
 	t.Setenv("FREEINFERENCE_API_KEY", "")
-	t.Setenv("FI_ALLOW_INSECURE_LOCALHOST", "1")
 	t.Setenv("FI_HEALTH_URL", "")
 	exposeRunningBinaryOnPath(t)
 
@@ -152,7 +152,6 @@ func TestDoctorUnsafeForceDoesNotAuthorizeNetwork(t *testing.T) {
 	t.Setenv("FI_UNSAFE_FORCE_ACTIVATION", "1")
 	t.Setenv("FREEINFERENCE_BASE_URL", server.URL)
 	t.Setenv("FREEINFERENCE_API_KEY", "")
-	t.Setenv("FI_ALLOW_INSECURE_LOCALHOST", "1")
 	t.Setenv("FI_HEALTH_URL", "")
 	exposeRunningBinaryOnPath(t)
 
@@ -197,11 +196,10 @@ func TestRefreshWorkerFlag(t *testing.T) {
 	}))
 	defer server.Close()
 
-	// Use the test server URL with the insecure-localhost opt-in since
-	// httptest serves on HTTP loopback.
+	api.AllowLoopbackHTTPForTesting = true
+	t.Cleanup(func() { api.AllowLoopbackHTTPForTesting = false })
 	t.Setenv("FREEINFERENCE_BASE_URL", server.URL)
 	t.Setenv("FREEINFERENCE_API_KEY", "")
-	t.Setenv("FI_ALLOW_INSECURE_LOCALHOST", "1")
 
 	var out, errOut strings.Builder
 	code := cmdRefresh(testPaths(t), []string{"--worker", "models"}, &out, &errOut)
@@ -470,7 +468,7 @@ env_key = "FREEINFERENCE_API_KEY"
 		t.Fatalf("render exit=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
 	}
 	line := out.String()
-	for _, want := range []string{"FI deepseek-v4-flash", "cache 70%", "fresh 200", "ctx 13%"} {
+	for _, want := range []string{"FI deepseek-v4-flash", "cache 63%", "fresh 300", "ctx 13%"} {
 		if !strings.Contains(line, want) {
 			t.Fatalf("render output %q missing %q", line, want)
 		}
@@ -632,6 +630,11 @@ env_key = "FREEINFERENCE_API_KEY"
 // API URL combined with `freeinference doctor --probe` must NOT panic or make a
 // request. It reports the unverified route and exits cleanly.
 func TestDoctorProbeWithInvalidEndpoint(t *testing.T) {
+	// Isolate persistent and environment-provided configuration so the live
+	// HarvardCodex setup cannot turn this localhost-free fixture into an
+	// activated route.
+	t.Setenv("FI_CONFIG_DIR", t.TempDir())
+	t.Setenv("CODEX_HOME", t.TempDir())
 	// Invalid URL containing userinfo — fails ValidateBaseURL.
 	t.Setenv("FREEINFERENCE_BASE_URL", "https://user:pass@freeinference.org/v1")
 	t.Setenv("FREEINFERENCE_API_KEY", "hyi-test-key-12345")
@@ -789,5 +792,66 @@ func TestDisabledModeActivationGate(t *testing.T) {
 	}
 	if !a.Disabled {
 		t.Error("Disabled flag should be set")
+	}
+}
+
+func TestCodexSurfaceRejectsUnknownSubcommand(t *testing.T) {
+	var out, errOut strings.Builder
+	if code := cmdCodexSurface([]string{"foo"}, &out, &errOut); code != 2 {
+		t.Fatalf("codex-surface exit=%d", code)
+	}
+	if !strings.Contains(errOut.String(), "Usage: freeinference codex-surface render") {
+		t.Fatalf("usage=%q", errOut.String())
+	}
+}
+
+func TestCodexClientInstanceBindingResolvesSession(t *testing.T) {
+	t.Setenv("FI_CACHE_DIR", t.TempDir())
+	t.Setenv("CODEX_HOME", t.TempDir())
+	rollout := filepath.Join(os.Getenv("CODEX_HOME"), "sessions", "2026", "09", "13", "rollout-bound.jsonl")
+	if err := os.MkdirAll(filepath.Dir(rollout), 0700); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"type":"session_meta","payload":{"session_id":"bound-session"}}
+{"timestamp":"2026-09-13T18:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":70},"model_context_window":1000}}}
+`
+	if err := os.WriteFile(rollout, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FI_CLIENT_INSTANCE_ID", "client-instance-1")
+	if err := bindCodexClientInstance("client-instance-1", "bound-session"); err != nil {
+		t.Fatal(err)
+	}
+	if _, directErr := codexusage.ReadForSession(os.Getenv("CODEX_HOME"), "bound-session"); directErr != nil {
+		t.Fatalf("direct rollout: %v", directErr)
+	}
+	bindingID := codexCurrentSessionID()
+	if bindingID != "bound-session" {
+		t.Fatalf("binding=%q", bindingID)
+	}
+	usage, err := latestCodexUsage()
+	if err != nil {
+		t.Fatalf("bound render usage: %v", err)
+	}
+	if usage.SessionID != "bound-session" || usage.Last.InputTokens == nil || *usage.Last.InputTokens != 100 {
+		t.Fatalf("usage=%+v", usage)
+	}
+
+	// Simulate a newer unrelated rollout; the bound renderer must not see it.
+	unrelated := filepath.Join(os.Getenv("CODEX_HOME"), "sessions", "2026", "09", "13", "rollout-newest.jsonl")
+	unrelatedBody := "{\"type\":\"session_meta\",\"payload\":{\"session_id\":\"unrelated\"}}\n" +
+		"{\"timestamp\":\"2026-09-13T19:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"input_tokens\":999}}}}\n"
+	if err := os.WriteFile(unrelated, []byte(unrelatedBody), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(unrelated, time.Now(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	usage, err = latestCodexUsage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage.SessionID != "bound-session" {
+		t.Fatalf("bound session=%s, want bound-session", usage.SessionID)
 	}
 }

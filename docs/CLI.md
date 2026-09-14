@@ -54,7 +54,7 @@ Identity is `(client type, configuration root)`; model profiles inside one root 
 - Claude: `settings.json` `env.ANTHROPIC_BASE_URL`
 - Codex: selected provider's `model_providers.<id>.base_url`
 
-Discovery never recursively scans projects and never uses launcher names. Explicit `add` supports arbitrary roots. Codex loopback routes are candidates and require `--proxy-upstream <approved FI /v1 URL>`; direct `https://freeinference.org/v1` roots verify automatically. `integrations diagnose` reports route state and generated model capabilities without mutating `models.json`; pass `--model <id>` to evaluate only the selected catalog entry, otherwise the diagnostic uses the conservative strictest result across the catalog. Existing unowned Companion directories are refused; modified owned installs are preserved until reconciled safely. `remove` deletes only paths derived from the recorded identity and only after digest ownership checks pass.
+Discovery never recursively scans projects and never uses launcher names. Explicit `add` supports arbitrary roots. Codex loopback routes are candidates and require `--proxy-upstream <approved FI /v1 URL>`; production endpoints remain HTTPS-only and no localhost override exists; direct `https://freeinference.org/v1` roots verify automatically. `integrations diagnose` reports route state and generated model capabilities without mutating `models.json`; pass `--model <id>` to evaluate only the selected catalog entry, otherwise the diagnostic uses the conservative strictest result across the catalog. Existing unowned Companion directories are refused; modified owned installs are preserved until reconciled safely. `remove` deletes only paths derived from the recorded identity and only after digest ownership checks pass.
 
 Route matching is exact by client: Claude uses `https://freeinference.org/anthropic` and Codex uses `https://freeinference.org/v1`. Trailing slashes are ignored, but prefixes, alternate paths, query strings, fragments, credentials, escaped paths, and non-approved ports are rejected. Port `443` is equivalent to the default HTTPS port. Claude profiles still using the legacy FreeInference `/v1` route are skipped with a migration warning; change `env.ANTHROPIC_BASE_URL` to `https://freeinference.org/anthropic` and rerun discovery or install.
 
@@ -108,7 +108,6 @@ must be requested explicitly.
 | `FI_SESSION_ID` | — | Explicit session override for status/context/report |
 | `FI_PROVIDER` | — | Attribution metadata only; does not activate the Companion |
 | `FI_PROXY_UPSTREAM_URL` | — | Explicit approved upstream route for a local Claude compatibility proxy; ignored unless `ANTHROPIC_BASE_URL` is loopback |
-| `FI_ALLOW_INSECURE_LOCALHOST` | — | Allows an `http://` loopback runtime endpoint; use only with an explicitly trusted local proxy |
 | `FI_AUTO_REFRESH` | `0` | Opt in to detached stale-metadata refreshes |
 | `FI_NO_BACKGROUND` | — | Disable detached refreshes |
 | `FI_TRACING` | `1` for `freeinference run` | Enable or disable launch-time trace correlation |
@@ -154,7 +153,7 @@ approved upstream route in `FI_PROXY_UPSTREAM_URL`:
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8765
 export ANTHROPIC_AUTH_TOKEN=Free_Inference_API
 export FI_PROXY_UPSTREAM_URL=https://freeinference.org/anthropic
-export FI_ALLOW_INSECURE_LOCALHOST=1  # only for an intentional http loopback proxy
+Loopback integrations require `freeinference integrations add ... --proxy-upstream https://freeinference.org/v1`.
 ```
 
 The Companion then records the effective FreeInference origin for local state

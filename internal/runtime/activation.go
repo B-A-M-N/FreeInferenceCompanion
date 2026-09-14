@@ -31,6 +31,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/b-a-m-n/freeinference-companion/internal/api"
@@ -376,12 +377,24 @@ func EvaluateForClient(client ClientKind, supplied ...ClientEvidence) Activation
 		return evaluateClaudeActivation(a, evidence)
 	case ClientCodex:
 		if len(supplied) == 0 {
-			resolved, err := ResolveCodexProviderConfiguration()
-			if err != nil {
-				a.InactiveReason = ReasonCodexProviderUnverified
+			resolved, resolveErr := ResolveCodexProviderConfiguration()
+			evidence = resolved
+			if resolveErr != nil {
+				if !evidence.ProviderSelectionVerified {
+					a.InactiveReason = ReasonCodexProviderUnverified
+					return a
+				}
+				a.Evidence = ClientEvidenceSummary{
+					ProviderID:                evidence.ProviderID,
+					ProviderSelectionVerified: true,
+					ProviderSelectionSource:   evidence.ProviderSelectionSource,
+				}
+				a.EndpointSource = evidence.EndpointSource
+				a.CredentialSource = evidence.CredentialSource
+				a.KeyPresent = evidence.CredentialValue != ""
+				a.InactiveReason = ReasonEndpointNotApproved
 				return a
 			}
-			evidence = resolved
 		}
 		return evaluateCodexActivation(a, evidence)
 	default:
@@ -453,6 +466,31 @@ func evaluateClaudeActivation(a Activation, evidence ClientEvidence) Activation 
 		return a
 	}
 
+	if isLoopbackEndpoint(anthropicURL) {
+		route, routeErr := normalizeLoopbackProxyRoute(anthropicURL)
+		if routeErr != nil {
+			a.EndpointSource = "ANTHROPIC_BASE_URL"
+			a.InactiveReason = ReasonEndpointInvalid
+			return a
+		}
+		upstreamRaw := strings.TrimSpace(os.Getenv(ProxyUpstreamEnv))
+		upstream, upstreamErr := api.NormalizeEndpoint(upstreamRaw)
+		if upstreamErr != nil || upstream == nil || !upstream.IsFI || !isClaudeRoute(upstream) {
+			a.EndpointSource = "ANTHROPIC_BASE_URL"
+			a.InactiveReason = ReasonEndpointNotApproved
+			return a
+		}
+		a.EndpointValid = true
+		a.EndpointSource = "ANTHROPIC_BASE_URL"
+		a.ProxyActive = true
+		a.ProxyUpstreamURL = upstream.RequestURL
+		a.Origin = upstream.Origin
+		a.EndpointURL = route
+		a.Active = true
+		a.capturedCredential = credValue
+		return a
+	}
+
 	id, err := api.NormalizeEndpoint(anthropicURL)
 	if err != nil {
 		a.EndpointSource = "ANTHROPIC_BASE_URL"
@@ -464,24 +502,8 @@ func evaluateClaudeActivation(a Activation, evidence ClientEvidence) Activation 
 	a.Origin = id.Origin
 	a.EndpointURL = id.RequestURL
 	if !id.IsFI {
-		// HarvardClaude and similar explicit integrations may put a local
-		// compatibility proxy between Claude Code and FreeInference. Do not
-		// treat every loopback endpoint as FI: require a separately declared,
-		// approved HTTPS upstream route. This keeps ordinary local proxies and
-		// unrelated Claude sessions completely silent.
-		if !isLoopbackEndpoint(anthropicURL) {
-			a.InactiveReason = ReasonEndpointNotApproved
-			return a
-		}
-		upstreamRaw := strings.TrimSpace(os.Getenv(ProxyUpstreamEnv))
-		upstream, upstreamErr := api.NormalizeEndpoint(upstreamRaw)
-		if upstreamErr != nil || upstream == nil || !upstream.IsFI || !isClaudeRoute(upstream) {
-			a.InactiveReason = ReasonEndpointNotApproved
-			return a
-		}
-		a.ProxyActive = true
-		a.ProxyUpstreamURL = upstream.RequestURL
-		a.Origin = upstream.Origin
+		a.InactiveReason = ReasonEndpointNotApproved
+		return a
 	}
 	a.Active = true
 	a.capturedCredential = credValue
@@ -489,16 +511,33 @@ func evaluateClaudeActivation(a Activation, evidence ClientEvidence) Activation 
 }
 
 func isLoopbackEndpoint(raw string) bool {
+	_, err := normalizeLoopbackProxyRoute(raw)
+	return err == nil
+}
+
+// normalizeLoopbackProxyRoute accepts only literal IPv4/IPv6 loopback hosts on
+// plain HTTP with an explicit port and the exact expected /path. It treats
+// localhost and omission of the default port as untrusted ambiguity.
+func normalizeLoopbackProxyRoute(raw string) (string, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || u == nil || u.Host == "" {
-		return false
+	if err != nil || u == nil || u.Scheme != "http" || u.Host == "" || u.User != nil ||
+		u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" || u.RawPath != "" {
+		return "", errors.New("invalid loopback proxy route")
 	}
-	host := strings.TrimSpace(strings.ToLower(u.Hostname()))
-	if host == "localhost" {
-		return true
-	}
+	host := strings.ToLower(u.Hostname())
 	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	if ip == nil || !ip.IsLoopback() {
+		return "", errors.New("loopback proxy host must be a literal loopback address")
+	}
+	port := u.Port()
+	if port == "" {
+		return "", errors.New("loopback proxy route requires an explicit port")
+	}
+	value, err := strconv.Atoi(port)
+	if err != nil || value < 1 || value > 65535 {
+		return "", errors.New("loopback proxy route has an invalid port")
+	}
+	return u.Scheme + "://" + u.Host + u.Path, nil
 }
 
 func isClaudeRoute(id *api.EndpointIdentity) bool {

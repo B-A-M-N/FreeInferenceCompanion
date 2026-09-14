@@ -39,12 +39,14 @@ cache observations, context pressure, and freshness:
 ```text
 ordinary Claude/Codex session       (no FreeInference output)
 verified FreeInference Claude       FI qwen3.6-35b | cache 0% | fresh 23K | ctx 12% | OK
-verified FreeInference Codex        native Codex footer + FI model/cache/context line
+verified FreeInference Codex        reduced native footer + FI session-bound rich line (surface host)
 ```
 
-Codex keeps ownership of its native footer. The Companion plugin records its
-lifecycle events and reads only bounded local rollout metadata for the rich
-model/cache/context line; it never scrapes the screen or intercepts prompts.
+Codex keeps ownership of its native footer. The Companion plugin records
+lifecycle events, binds the launch to its exact session, and reads only bounded
+local rollout metadata for the rich line exposed by
+`freeinference codex-surface render`; it never scrapes the screen or intercepts
+prompts.
 Before Codex has completed a turn, those counters remain explicitly pending.
 
 The important diagnostics are surfaced inside the native clients as skills:
@@ -195,7 +197,7 @@ local hooks          ready
 background refresh   disabled
 
 $ freeinference status --compact
-FI glm-5.1 | cache 78% | fresh 12.4K | ctx 41% | healthy
+FI glm-5.1 | cache 78% | fresh 12.4K | ctx 41% | ctx OK
 
 $ freeinference cache
 pattern              intermittent

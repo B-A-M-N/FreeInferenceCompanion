@@ -38,8 +38,8 @@ func TestReadFileUsesLatestTokenCountAndMetadata(t *testing.T) {
 	if usage.ContextWindow != 950000 || usage.Last.InputTokens == nil || *usage.Last.InputTokens != 1200 {
 		t.Fatalf("latest usage = %+v", usage)
 	}
-	if fresh := usage.FreshInputTokens(); fresh == nil || *fresh != 200 {
-		t.Fatalf("fresh input = %v, want 200", fresh)
+	if fresh := usage.FreshInputTokens(); fresh == nil || *fresh != 300 {
+		t.Fatalf("fresh input = %v, want 300 (input minus cached)", fresh)
 	}
 	if usage.ObservedAt != (time.Date(2026, 9, 11, 18, 0, 3, 0, time.UTC)) {
 		t.Fatalf("observed at = %s", usage.ObservedAt)
@@ -75,3 +75,57 @@ func TestLatestAndReadFileReportMissingUsage(t *testing.T) {
 		t.Fatalf("missing error = %v, want ErrNoRollout", err)
 	}
 }
+
+func TestFindForSessionVerifiesMetadataAndRejectsFallback(t *testing.T) {
+	home := t.TempDir()
+	sessionA := writeRollout(t, home, "rollout-a.jsonl", `{"type":"session_meta","payload":{"session_id":"session-a"}}
+{"timestamp":"2026-09-11T18:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10}}}}
+`)
+	sessionB := writeRollout(t, home, "rollout-b.jsonl", `{"type":"session_meta","payload":{"session_id":"session-b"}}
+{"timestamp":"2026-09-11T19:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":20}}}}
+`)
+	newer := time.Now().Add(-time.Minute)
+	older := newer.Add(-time.Minute)
+	if err := os.Chtimes(sessionA, older, older); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(sessionB, newer, newer); err != nil {
+		t.Fatal(err)
+	}
+
+	path, err := FindForSession(home, "session-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != sessionA {
+		t.Fatalf("session A resolved to newer session B: %s", path)
+	}
+	usage, err := ReadForSession(home, "session-a")
+	if err != nil || usage.Last.InputTokens == nil || *usage.Last.InputTokens != 10 {
+		t.Fatalf("usage=%+v err=%v", usage, err)
+	}
+	if _, err := ReadForSession(home, "session-c"); !errors.Is(err, ErrNoRollout) {
+		t.Fatalf("missing session error = %v, want ErrNoRollout", err)
+	}
+}
+
+func TestFindForSessionRejectsTrustingFilename(t *testing.T) {
+	home := t.TempDir()
+	writeRollout(t, home, "rollout-mislabeled.jsonl", `{"type":"session_meta","payload":{"session_id":"actual-session"}}`)
+	if _, err := FindForSession(home, "mislabeled"); !errors.Is(err, ErrNoRollout) {
+		t.Fatalf("filename-only lookup error = %v, want ErrNoRollout", err)
+	}
+}
+
+func TestFreshInputTokensKeepsAbsentCacheWriteUnknown(t *testing.T) {
+	usage := Usage{Last: TokenUsage{InputTokens: i64(1000), CachedInputTokens: i64(700)}}
+	fresh := usage.FreshInputTokens()
+	if fresh == nil || *fresh != 300 {
+		t.Fatalf("fresh=%v, want 300 while cache-write remains unavailable", fresh)
+	}
+	if usage.Last.CacheWriteInputTokens != nil {
+		t.Fatal("cache write must remain nil when Codex did not report it")
+	}
+}
+
+func i64(v int64) *int64 { return &v }

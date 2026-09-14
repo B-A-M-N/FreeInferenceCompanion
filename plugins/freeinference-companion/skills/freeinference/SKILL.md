@@ -254,7 +254,6 @@ Many commands accept `--json` for machine-readable JSON output and `--help` for 
 - `FI_NO_BACKGROUND` — Disable detached background refresh after opting in
 - `FI_AUTO_REFRESH` — Set to `1` to opt in to stale metadata refreshes from supported CLI lifecycle integrations
 - `FI_DISABLED` — Set to `1` to disable all companion features
-- `FI_ALLOW_INSECURE_LOCALHOST` — Allow `http://` loopback (development only)
 - `FI_TRACING` — Enable/disable launch-time `X-Session-ID` correlation (`1` by default for `freeinference run`)
 
 ## Codex Runtime Setup and Model Switching

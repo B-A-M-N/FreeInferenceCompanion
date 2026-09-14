@@ -1,6 +1,8 @@
 package install
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -43,12 +45,61 @@ type codexTUIMetadata struct {
 	CreatedTUITable         bool      `json:"created_tui_table,omitempty"`
 }
 
-func codexTUIMetadataPath(home string) string {
+func codexTUIMetadataPath(home, configPath string) (string, error) {
+	canonical, err := canonicalCodexConfigPath(configPath)
+	if err != nil {
+		return "", err
+	}
+	return codexTUIMetadataPathForPath(home, canonical), nil
+}
+
+func codexTUIMetadataPathForPath(home, canonicalConfigPath string) string {
+	digest := sha256.Sum256([]byte(canonicalConfigPath))
+	name := hex.EncodeToString(digest[:])
+	return filepath.Join(home, ".config", "freeinference-companion", "installations", "codex-tui", name+".json")
+}
+
+func legacyCodexTUIMetadataPath(home string) string {
 	return filepath.Join(home, ".config", "freeinference-companion", "installations", "codex-tui.json")
 }
 
-func codexTUILockPath(home string) string {
-	return filepath.Join(home, ".config", "freeinference-companion", "installations", "codex-tui.lock")
+// migrateLegacyCodexTUIMetadata moves the pre-multi-environment singleton
+// record only when it names this exact configuration root. This preserves
+// restoration for existing installs without allowing one root to adopt
+// another root's ownership.
+func migrateLegacyCodexTUIMetadata(home, canonicalConfigPath string) error {
+	legacyPath := legacyCodexTUIMetadataPath(home)
+	meta, found, err := loadCodexTUIMetadata(legacyPath)
+	if err != nil || !found {
+		return err
+	}
+	recorded, pathErr := canonicalCodexConfigPath(meta.ConfigPath)
+	if pathErr != nil || recorded != canonicalConfigPath {
+		return nil
+	}
+	scopedPath := codexTUIMetadataPathForPath(home, canonicalConfigPath)
+	if err := os.MkdirAll(filepath.Dir(scopedPath), 0700); err != nil {
+		return err
+	}
+	data, err := os.ReadFile(legacyPath)
+	if err != nil {
+		return err
+	}
+	if err := writeFileAtomic(scopedPath, data, 0600); err != nil {
+		return err
+	}
+	if err := os.Remove(legacyPath); err != nil {
+		return err
+	}
+	return nil
+}
+
+func codexTUILockPath(home, configPath string) (string, error) {
+	metadataPath, err := codexTUIMetadataPath(home, configPath)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(metadataPath, ".json") + ".lock", nil
 }
 
 func canonicalCodexConfigPath(path string) (string, error) {
@@ -72,7 +123,11 @@ func InstallCodexTUI(home, configPath string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return withInstallerLock(codexTUILockPath(home), func() error {
+	lockPath, err := codexTUILockPath(home, configPath)
+	if err != nil {
+		return err
+	}
+	return withInstallerLock(lockPath, func() error {
 		return installCodexTUILocked(home, configPath, stdout)
 	})
 }
@@ -92,7 +147,13 @@ func installCodexTUILocked(home, configPath string, stdout io.Writer) error {
 	_, hadTUITable := findCodexTUITable(contents)
 	createdTUITable := !hadTUITable
 
-	metaPath := codexTUIMetadataPath(home)
+	metaPath, err := codexTUIMetadataPath(home, configPath)
+	if err != nil {
+		return err
+	}
+	if err := migrateLegacyCodexTUIMetadata(home, configPath); err != nil {
+		return fmt.Errorf("migrate codex footer metadata: %w", err)
+	}
 	existing, haveExisting, err := loadCodexTUIMetadata(metaPath)
 	if err != nil {
 		return fmt.Errorf("read codex footer metadata: %w", err)
@@ -111,6 +172,9 @@ func installCodexTUILocked(home, configPath string, stdout io.Writer) error {
 	hadPrevious := found
 	if haveExisting {
 		previous = append([]string(nil), existing.PreviousItems...)
+		if len(previous) == 0 {
+			previous = nil
+		}
 		hadPrevious = existing.HadPrevious
 		previousLine = existing.PreviousLine
 		originalTrailingNewline = existing.OriginalTrailingNewline
@@ -118,6 +182,16 @@ func installCodexTUILocked(home, configPath string, stdout io.Writer) error {
 			originalTrailingLineEnd = existing.OriginalTrailingLineEnd
 		}
 		createdTUITable = existing.CreatedTUITable
+	}
+	if haveExisting && !sameStrings(previous, current) {
+		contents, err = setCodexTUIStatusLine(contents, previous)
+		if err != nil {
+			return err
+		}
+		current, _, err = parseCodexTUIStatusLine(contents)
+		if err != nil {
+			return err
+		}
 	}
 	owned := appendUniqueCodexTUIItems(current, "model-with-reasoning", "context-remaining", "current-dir")
 	newContents, err := setCodexTUIStatusLine(contents, owned)
@@ -152,6 +226,10 @@ func installCodexTUILocked(home, configPath string, stdout io.Writer) error {
 		_ = rollbackCodexTUIConfig(configPath, priorBytes, priorMode, priorErr)
 		return fmt.Errorf("encode codex footer metadata: %w", err)
 	}
+	if err := os.MkdirAll(filepath.Dir(metaPath), 0700); err != nil {
+		_ = rollbackCodexTUIConfig(configPath, priorBytes, priorMode, priorErr)
+		return fmt.Errorf("create codex footer metadata directory: %w", err)
+	}
 	if err := writeFileAtomic(metaPath, append(metaBytes, '\n'), 0600); err != nil {
 		_ = rollbackCodexTUIConfig(configPath, priorBytes, priorMode, priorErr)
 		return fmt.Errorf("write codex footer metadata: %w", err)
@@ -171,17 +249,21 @@ func UninstallCodexTUI(home, configPath string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return withInstallerLock(codexTUILockPath(home), func() error {
-		metaPath := codexTUIMetadataPath(home)
-		meta, found, err := loadCodexTUIMetadata(metaPath)
-		if err != nil {
-			return fmt.Errorf("read codex footer metadata: %w", err)
+	lockPath, err := codexTUILockPath(home, configPath)
+	if err != nil {
+		return err
+	}
+	return withInstallerLock(lockPath, func() error {
+		metaPath, metaPathErr := codexTUIMetadataPath(home, configPath)
+		if metaPathErr != nil {
+			return metaPathErr
+		}
+		meta, found, metaErr := loadCodexTUIMetadata(metaPath)
+		if metaErr != nil {
+			return fmt.Errorf("read codex footer metadata: %w", metaErr)
 		}
 		if !found {
-			if stdout != nil {
-				fmt.Fprintln(stdout, "Codex native footer is not installed by FreeInference Companion.")
-			}
-			return nil
+			return fmt.Errorf("codex footer metadata not found: %w", os.ErrNotExist)
 		}
 		recordedPath, pathErr := canonicalCodexConfigPath(meta.ConfigPath)
 		if pathErr != nil || recordedPath != configPath {
@@ -243,6 +325,7 @@ func UninstallCodexTUI(home, configPath string, stdout io.Writer) error {
 			_ = rollbackCodexTUIConfig(configPath, priorBytes, priorMode, nil)
 			return fmt.Errorf("remove codex footer metadata: %w", err)
 		}
+		_ = os.Remove(filepath.Dir(metaPath))
 		if stdout != nil {
 			fmt.Fprintf(stdout, "Restored Codex native footer configuration in %s.\n", configPath)
 		}
@@ -258,12 +341,16 @@ func InspectCodexTUI(home, configPath string) (CodexTUIStatus, error) {
 	}
 	status := CodexTUIStatus{ConfigPath: canonicalPath, Status: "not_configured"}
 	configPath = canonicalPath
-	contents, _, err := readCodexTUIConfig(configPath)
+	metaPath, err := codexTUIMetadataPath(home, configPath)
 	if err != nil {
-		if os.IsNotExist(err) {
+		return status, err
+	}
+	contents, _, readErr := readCodexTUIConfig(configPath)
+	if readErr != nil {
+		if os.IsNotExist(readErr) {
 			return status, nil
 		}
-		return status, err
+		return status, readErr
 	}
 	items, found, err := parseCodexTUIStatusLine(contents)
 	if err != nil {
@@ -272,9 +359,18 @@ func InspectCodexTUI(home, configPath string) (CodexTUIStatus, error) {
 	status.Configured = found
 	status.Referenced = found
 	status.StatusLine = items
-	meta, haveMeta, err := loadCodexTUIMetadata(codexTUIMetadataPath(home))
-	if err != nil {
-		return status, err
+	meta, haveMeta, loadErr := loadCodexTUIMetadata(metaPath)
+	if loadErr == nil && !haveMeta {
+		legacyMeta, legacyFound, legacyErr := loadCodexTUIMetadata(legacyCodexTUIMetadataPath(home))
+		if legacyErr == nil && legacyFound {
+			recorded, recordedErr := canonicalCodexConfigPath(legacyMeta.ConfigPath)
+			if recordedErr == nil && recorded == status.ConfigPath {
+				meta, haveMeta = legacyMeta, true
+			}
+		}
+	}
+	if loadErr != nil {
+		return status, loadErr
 	}
 	if !haveMeta {
 		if found {

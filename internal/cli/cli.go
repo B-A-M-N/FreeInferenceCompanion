@@ -75,6 +75,9 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) (exitCode int
 	if cmd == "codex-footer" {
 		return cmdCodexFooter(rest, stdout, stderr)
 	}
+	if cmd == "codex-surface" {
+		return cmdCodexSurface(rest, stdout, stderr)
+	}
 	// Persistent companion controls are intentionally stateless: disabling the
 	// companion must not create cache, salt, session, or provider directories.
 	if cmd == "companion" {
@@ -357,6 +360,7 @@ Usage:
     [--worker models|health|account-usage|public-status] [--help]
   freeinference status-line install|uninstall
   freeinference codex-footer install|uninstall|status|render
+  freeinference codex-surface render
   freeinference config show|set|reset|path [--json]
   freeinference companion status|enable|disable
   freeinference fi-status [--json] [--problems|--down] [--details] [--fail-degraded] [--refresh] [--all]
@@ -376,7 +380,6 @@ Environment:
   FI_AUTO_REFRESH          Opt in to stale metadata refreshes from lifecycle hooks
   FI_NO_BACKGROUND         Disable detached background refresh after opting in
   FI_DISABLED              Disable all companion features
-  FI_ALLOW_INSECURE_LOCALHOST  Allow http:// loopback (development only)
   FI_TRACING                Enable/disable Companion launch tracing (default: enabled for run)
   NO_COLOR                 Disable colors (see https://no-color.org)
   FORCE_COLOR              Force color output even without a terminal
@@ -580,7 +583,7 @@ Flags:
 	helpCodexFooter = `Usage: freeinference codex-footer install|uninstall|status|render [--json] [--color auto|always|never] [--help]
 
 Configure Codex's native tui.status_line footer. This makes Codex render its
-own model, remaining-context, and current-directory items. The render
+environment, model, context, token, and version items. The render
 subcommand reads Codex's local rollout usage records and emits the same rich
 Companion line used by Claude, for tmux and other host status surfaces.
 

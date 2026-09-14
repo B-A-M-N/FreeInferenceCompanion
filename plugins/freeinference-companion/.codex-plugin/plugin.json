@@ -1,6 +1,6 @@
 {
   "name": "freeinference-companion",
-  "version": "0.1.2+codex.20260911190536",
+  "version": "0.1.7",
   "description": "FreeInference Companion plugin for Codex: local lifecycle recording, rollout-backed context/cache reporting, provider diagnostics, and model discovery. It never proxies inference traffic. Community-built and unofficial. Not affiliated with or endorsed by FreeInference.",
   "author": {
     "name": "b-a-m-n",
